@@ -15,6 +15,7 @@ set -euo pipefail
 : "${KAUTUKA_DEFAULT_MANIFEST_PUBLIC_KEY_PEM:=}"
 : "${KAUTUKA_DEFAULT_VERSION:=}"
 : "${KAUTUKA_DEFAULT_RELEASE_CHANNEL:=}"
+: "${KAUTUKA_DEFAULT_RELEASE_TAG:=}"
 : "${KAUTUKA_DEFAULT_REPOSITORY_OWNER:=devkrity}"
 : "${KAUTUKA_DEFAULT_REPOSITORY_NAME:=kautuka}"
 
@@ -30,6 +31,8 @@ Options:
     --feed-base-url <url>    Release feed base URL. Derives artifact download and manifest URLs.
     --version <version>       Installed version used under versions/<version>
   --install-root <path>     Install root for Manager versions (default: /opt/kautuka/manager)
+    --web-port <port>        Published localhost port for a fresh signed appliance (default: 20229)
+    --defer-admin-setup       Leave first admin setup to the calling installer for a signed appliance
     --internal-state-root <path>
                                                         Internal runtime state root (default: /var/lib/kautuka)
     --visible-root <path>     Visible logs/workspaces root (default: /var/lib/kautuka)
@@ -195,9 +198,8 @@ write_trusted_manifest_public_key() {
 
     local destination_dir
     destination_dir="$(dirname "$destination")"
-    mkdir -p "$destination_dir"
-    chown root:root "$destination_dir"
-    chmod go-w "$destination_dir"
+    # Manager opens this root-owned directory to read the public key as an unprivileged user.
+    install -d -o root -g root -m 0755 -- "$destination_dir"
     local temporary_key
     temporary_key="$(mktemp "$destination_dir/.manifest-public-key.XXXXXX")"
     cat > "$temporary_key" <<EOF
@@ -206,6 +208,38 @@ EOF
     chmod 644 "$temporary_key"
     chown root:root "$temporary_key"
     mv -Tf "$temporary_key" "$destination"
+}
+
+install_verified_release_metadata() {
+    local version_root="$1" manifest="$2" signature="$3" appliance="$4"
+
+    install -T -o root -g root -m 0644 -- "$manifest" "$version_root/kautuka-platform-release.json"
+    install -T -o root -g root -m 0644 -- "$signature" "$version_root/kautuka-platform-release.sig"
+    if [[ "$appliance" == 'true' ]]; then
+        local release_id="$version_root/release-id.txt"
+        [[ -f "$release_id" && ! -L "$release_id" ]] || fail 'signed appliance payload requires a regular release-id.txt'
+        chmod 0644 "$release_id"
+    fi
+}
+
+validate_appliance_image_payload() {
+    local source="$1"
+    [[ -d "$source" && ! -L "$source" ]] || fail 'signed appliance release is missing its service image directory'
+    local role archive
+    for role in credentialshost channelhost gateway webhost updateservice; do
+        archive="$source/$role.tar"
+        [[ -f "$archive" && ! -L "$archive" && -s "$archive" ]] \
+            || fail "signed appliance release is missing a regular service image archive for $role"
+    done
+}
+
+install_appliance_image_payload() {
+    local source="$1" destination="$2/service-images" role
+    [[ ! -e "$destination" && ! -L "$destination" ]] || fail 'service image destination already exists'
+    install -d -o root -g root -m 0755 -- "$destination"
+    for role in credentialshost channelhost gateway webhost updateservice; do
+        install -T -o root -g root -m 0644 -- "$source/$role.tar" "$destination/$role.tar"
+    done
 }
 
 require_trusted_manifest_public_key_for_network_install() {
@@ -265,6 +299,7 @@ copy_runtime_payload() {
 }
 
 ensure_selinux_runtime_exec_policy() {
+    local appliance_image_payload="${1:-false}"
     local selinux_state=''
     if ! command -v getenforce >/dev/null 2>&1; then
         return 0
@@ -272,6 +307,13 @@ ensure_selinux_runtime_exec_policy() {
     selinux_state="$(getenforce 2>/dev/null || true)"
     if [[ "$selinux_state" == 'Disabled' || -z "$selinux_state" ]]; then
         return 0
+    fi
+
+    if { ! command -v semanage >/dev/null 2>&1 || ! command -v restorecon >/dev/null 2>&1; } \
+        && command -v dnf >/dev/null 2>&1; then
+        echo 'Installing SELinux runtime labeling tools.'
+        dnf install -y policycoreutils-python-utils policycoreutils \
+            || fail 'could not install SELinux labeling tools; check the DNF repositories and rerun the installer'
     fi
 
     if ! command -v semanage >/dev/null 2>&1 || ! command -v restorecon >/dev/null 2>&1; then
@@ -285,11 +327,26 @@ ensure_selinux_runtime_exec_policy() {
     if ! semanage fcontext -a -t bin_t "$rule" >/dev/null 2>&1; then
         semanage fcontext -m -t bin_t "$rule" >/dev/null 2>&1 || fail "could not register SELinux executable labeling rule for Kautuka; install policycoreutils-python-utils and check SELinux policy permissions"
     fi
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        local writer_lock_rule
+        for writer_lock_rule in '/run/kautuka-db-writer\.lock' '/run/kautuka-helper-run\.lock'; do
+            if ! semanage fcontext -a -t container_file_t "$writer_lock_rule" >/dev/null 2>&1; then
+                semanage fcontext -m -t container_file_t "$writer_lock_rule" >/dev/null 2>&1 \
+                    || fail 'could not register the SELinux label for a shared Kautuka lock'
+            fi
+        done
+    fi
 }
 
 write_service_scope_document() {
     local username="$1"
     local target="$2"
+    local user_units='"kautuka-manager.service", "kautuka-updateservice.service", "kautuka-webhost.service"'
+    local system_units='"kautuka-gateway.service", "kautuka-channelhost.service", "kautuka-credentialshost.service"'
+    if [[ "${3:-false}" == 'true' ]]; then
+        user_units='"kautuka-manager.service"'
+        system_units=''
+    fi
 
     mkdir -p /etc/kautuka
     cat > /etc/kautuka/service-scope.json <<EOF
@@ -297,8 +354,8 @@ write_service_scope_document() {
   "schemaVersion": 2,
   "username": "${username}",
   "target": "${target}",
-  "userUnits": ["kautuka-manager.service", "kautuka-updateservice.service", "kautuka-webhost.service"],
-  "systemUnits": ["kautuka-gateway.service", "kautuka-channelhost.service", "kautuka-credentialshost.service"]
+  "userUnits": [${user_units}],
+  "systemUnits": [${system_units}]
 }
 EOF
     chmod 644 /etc/kautuka/service-scope.json
@@ -322,6 +379,28 @@ install_nac_hook_payload() {
     local proxy_ruleset_destination="${hook_destination%kautuka_hook.py}kautuka_package_proxy.nft.json.tmpl"
     [[ -f "$proxy_ruleset_source" ]] || fail "required package proxy ruleset template is missing: $proxy_ruleset_source"
     install -m 0644 -- "$proxy_ruleset_source" "$proxy_ruleset_destination"
+}
+
+install_oci_hook_registration() {
+    local hooks_dir="$1" executable="$2" service_user="$3" service_group="$4"
+    local registration
+    registration="$(mktemp "$hooks_dir/.kautuka-hook.XXXXXX")"
+    cat > "$registration" <<EOF
+{
+  "version": "1.0.0",
+  "hook": {
+    "path": "$executable",
+    "timeout": 45
+  },
+  "when": {
+    "always": true
+  },
+  "stages": ["createRuntime"]
+}
+EOF
+    chmod 0644 "$registration"
+    chown "$service_user:$service_group" "$registration"
+    mv -Tf -- "$registration" "$hooks_dir/kautuka_hook.json"
 }
 
 require_root() {
@@ -488,6 +567,15 @@ icu_library_available() {
 }
 
 ensure_dotnet_host_libraries() {
+    # The Native AOT host currently needs OpenSSL 3 when the distribution defaults to OpenSSL 4.
+    if command -v dnf >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 \
+        && [[ "$(openssl version)" == 'OpenSSL 4.'* ]] \
+        && ! rpm -q openssl3-libs >/dev/null 2>&1; then
+        echo 'Installing OpenSSL 3 compatibility libraries for Kautuka host services.'
+        dnf install -y openssl3-libs \
+            || fail 'could not install the OpenSSL 3 compatibility libraries; check the DNF repositories and rerun the installer'
+    fi
+
     if icu_library_available libicuuc; then
         return
     fi
@@ -567,11 +655,12 @@ ensure_nac_prerequisites() {
 }
 
 install_envoy_selinux_policy() {
-    local policy_file="$1" templates="${2:-/usr/share/udica/templates}"
+    local policy_file="$1" templates="${2:-/usr/share/udica/templates}" manager_policy="${3:-}"
     envoy_selinux_enabled=false
     if ! command -v getenforce >/dev/null 2>&1; then return 0; fi
     case "$(getenforce)" in Enforcing|Permissive) ;; *) return 0 ;; esac
     [[ -r "$policy_file" ]] || { echo 'error: the Envoy SELinux policy is missing from the release.' >&2; return 1; }
+    [[ -z "$manager_policy" || -r "$manager_policy" ]] || { echo 'error: the Manager peer SELinux policy is missing from the release.' >&2; return 1; }
     if [[ ! -r "$templates/base_container.cil" || ! -r "$templates/net_container.cil" ]]; then
         if command -v dnf >/dev/null 2>&1; then
             dnf install -y udica || true
@@ -591,6 +680,7 @@ install_envoy_selinux_policy() {
     if ! printf '%s\n' "$installed_modules" | grep -Eq '^base_container([[:space:]]|$)'; then policy_inputs+=("$templates/base_container.cil"); fi
     if ! printf '%s\n' "$installed_modules" | grep -Eq '^net_container([[:space:]]|$)'; then policy_inputs+=("$templates/net_container.cil"); fi
     policy_inputs+=("$policy_file")
+    if [[ -n "$manager_policy" ]]; then policy_inputs+=("$manager_policy"); fi
     semodule -i "${policy_inputs[@]}" || return 1
     envoy_selinux_enabled=true
 }
@@ -635,22 +725,6 @@ hooks_dir = ["$hooks_dir", { append = true }]
 EOF
     chmod 0644 "$containers_conf_dir/99-kautuka-hooks.conf"
     chown "$service_user:$service_group" "$containers_conf_dir/99-kautuka-hooks.conf"
-
-    cat > "$hooks_dir/kautuka_hook.json" <<EOF
-{
-  "version": "1.0.0",
-  "hook": {
-    "path": "$hooks_dir/kautuka_hook.py",
-    "timeout": 45
-  },
-  "when": {
-    "always": true
-  },
-  "stages": ["createRuntime"]
-}
-EOF
-    chmod 0644 "$hooks_dir/kautuka_hook.json"
-    chown "$service_user:$service_group" "$hooks_dir/kautuka_hook.json"
 
     loginctl enable-linger "$service_user"
     validate_linger_enabled "$service_user"
@@ -707,6 +781,26 @@ ensure_service_account() {
     fi
 }
 
+avoid_wsl_service_uid_conflict() {
+    local user="$1" user_slice="$2"
+    local uid candidate attempt
+    uid="$(id -u "$user")"
+    # WSL distributions can see each other's systemd cgroups. Avoid starting
+    # a user manager under a UID that another distribution is already using.
+    if ! grep -Fxq 'populated 1' "$user_slice/user-${uid}.slice/cgroup.events" 2>/dev/null ||
+        systemctl is-active --quiet "user@${uid}.service"; then
+        return
+    fi
+    for ((attempt = 0; attempt < 32; attempt++)); do
+        candidate=$((20000 + RANDOM))
+        if [[ ! -e "$user_slice/user-${candidate}.slice" ]] && ! getent passwd "$candidate" >/dev/null; then
+            usermod --uid "$candidate" "$user"
+            return
+        fi
+    done
+    fail 'could not find an unused WSL service UID'
+}
+
 ensure_isolated_service_account() {
     local user="$1"
     local group="$2"
@@ -733,6 +827,7 @@ chown_tree_excluding() {
     local containers_root="$root/.local/share/containers"
     local credentials_root="$root/credentials"
     local credentials_state_root="$root/credentialsHost"
+    local manager_state_root="$root/manager"
 
     [[ -d "$root" ]] || return 0
     chown "$owner" "$root"
@@ -741,11 +836,13 @@ chown_tree_excluding() {
     # credentials/ and credentialsHost/ belong to kautuka-credentials. A 45
     # reinstall left credentialsHost/vault as kautuka:kautuka; CredentialsHost
     # then aborted on SetUnixFileMode with EPERM.
+    # Manager owns the exact permissions on its persistent mTLS and CONNECT inventory.
     find "$root" -mindepth 1 \
         \( -path "$excluded_root" -o -path "$excluded_root/*" \
            -o -path "$containers_root" -o -path "$containers_root/*" \
            -o -path "$credentials_root" -o -path "$credentials_root/*" \
-           -o -path "$credentials_state_root" -o -path "$credentials_state_root/*" \) -prune \
+           -o -path "$credentials_state_root" -o -path "$credentials_state_root/*" \
+           -o -path "$manager_state_root" \) -prune \
         -o -exec chown -h "$owner" {} +
 }
 
@@ -769,6 +866,7 @@ grant_shared_group_write_excluding() {
     local containers_root="$root/.local/share/containers"
     local credentials_root="$root/credentials"
     local credentials_state_root="$root/credentialsHost"
+    local manager_state_root="$root/manager"
 
     [[ -d "$root" ]] || return 0
     chgrp "$group" "$root"
@@ -777,15 +875,54 @@ grant_shared_group_write_excluding() {
         \( -path "$excluded_root" -o -path "$excluded_root/*" \
            -o -path "$containers_root" -o -path "$containers_root/*" \
            -o -path "$credentials_root" -o -path "$credentials_root/*" \
-           -o -path "$credentials_state_root" -o -path "$credentials_state_root/*" \) -prune \
+           -o -path "$credentials_state_root" -o -path "$credentials_state_root/*" \
+           -o -path "$manager_state_root" \) -prune \
         -o -exec chgrp -h "$group" {} +
     find "$root" -mindepth 1 \
         \( -path "$excluded_root" -o -path "$excluded_root/*" \
            -o -path "$containers_root" -o -path "$containers_root/*" \
            -o -path "$credentials_root" -o -path "$credentials_root/*" \
-           -o -path "$credentials_state_root" -o -path "$credentials_state_root/*" \) -prune \
+           -o -path "$credentials_state_root" -o -path "$credentials_state_root/*" \
+           -o -path "$manager_state_root" \) -prune \
         -o -type d -exec chmod g+rwx {} + \
         -o -type f -exec chmod g+rw {} +
+}
+
+prepare_appliance_state_directories() {
+    local state_root="$1" service_user="$2" service_group="$3"
+    local service_uid directory
+    [[ -d "$state_root" && ! -L "$state_root" && ! -L "$state_root/logs" ]] || fail "unsafe appliance state root: $state_root"
+    service_uid="$(id -u "$service_user")"
+    for directory in "$state_root/manager" "$state_root/updateService" "$state_root/logs/manager" "$state_root/workspaces"; do
+        [[ ! -L "$directory" ]] || fail "unsafe appliance state directory: $directory"
+        if [[ ! -e "$directory" ]] ||
+            { [[ -d "$directory" && "$(stat -c '%u' -- "$directory")" == 0 ]] &&
+              [[ -z "$(find "$directory" -mindepth 1 -maxdepth 1 -print -quit)" ]]; }; then
+            # An interrupted installer can leave a root-owned directory before service startup.
+            install -d -o "$service_user" -g "$service_group" -m 0700 -- "$directory"
+        elif [[ ! -d "$directory" || "$(stat -c '%u' -- "$directory")" != "$service_uid" ]]; then
+            fail "unsafe appliance state ownership: $directory"
+        fi
+    done
+}
+
+prepare_install_state_permissions() {
+    local state_root="$1" visible_root="$2" service_user="$3" service_group="$4" appliance="$5"
+    if [[ "$appliance" != 'true' ]]; then
+        local channel_security_root="$state_root/security"
+        chown_tree_excluding "$state_root" "$service_user:$service_group" "$channel_security_root"
+        if [[ "$visible_root" != "$state_root" ]]; then
+            chown_tree_excluding "$visible_root" "$service_user:$service_group" "$channel_security_root"
+        fi
+        grant_shared_group_write_excluding "$state_root" "$service_group" "$channel_security_root"
+    fi
+    prepare_isolated_service_ancestors "$state_root" "$visible_root" "$service_group"
+    if [[ "$appliance" == 'true' ]]; then
+        # Keep shared state writable without letting the service user replace root-owned paths.
+        chmod 1771 "$state_root"
+    else
+        normalize_sidecar_data_permissions "$state_root"
+    fi
 }
 
 prepare_isolated_service_ancestors() {
@@ -815,7 +952,13 @@ write_manager_user_unit() {
     local install_root="$2"
     local visible_root="$3"
     local selinux_env=''
+    local appliance_env=''
+    local web_port_env=''
     if [[ "${4:-false}" == 'true' ]]; then selinux_env='Environment=KAUTUKA_ENVOY_SELINUX=1'; fi
+    if [[ "${5:-false}" == 'true' ]]; then
+        appliance_env='Environment=Kautuka__Appliance__Enabled=true'
+        if [[ -n "${6:-}" ]]; then web_port_env="Environment=Kautuka__Appliance__PublishedWebPort=$6"; fi
+    fi
 
     cat > "$unit_path" <<EOF
 [Unit]
@@ -831,6 +974,8 @@ Environment=Kautuka__Mode=prod
 Environment=Kautuka__ContainerStateRoot=/var/lib/kautuka
 Environment=Logging__FileLogDirectory=${visible_root}/logs/manager
 ${selinux_env}
+${appliance_env}
+${web_port_env}
 Restart=always
 RestartSec=5
 Delegate=yes
@@ -1171,16 +1316,19 @@ grant_socket_group_membership() {
 install_socket_runtime_dirs() {
     local service_user="$1"
     local service_group="${2:-$1}"
+    local appliance_image_payload="${3:-false}"
     local tmpfiles_path='/usr/lib/tmpfiles.d/kautuka-sockets.conf'
 
     install -d -m 0755 /usr/lib/tmpfiles.d
 
     # A clean Linux host does not have these groups pre-created by the WSL image builder.
     # Granting membership first creates the dedicated client groups before tmpfiles checks.
-    grant_socket_group_membership "$service_user" kautuka-gateway-client
-    grant_socket_group_membership kautuka-gateway kautuka-manager-client
-    grant_socket_group_membership kautuka-gateway kautuka-updateservice-client
-    grant_socket_group_membership kautuka-gateway kautuka-channelhost-client
+    if [[ "$appliance_image_payload" != 'true' ]]; then
+        grant_socket_group_membership "$service_user" kautuka-gateway-client
+        grant_socket_group_membership kautuka-gateway kautuka-manager-client
+        grant_socket_group_membership kautuka-gateway kautuka-updateservice-client
+        grant_socket_group_membership kautuka-gateway kautuka-channelhost-client
+    fi
 
     {
         printf '%s\n' \
@@ -1190,24 +1338,37 @@ install_socket_runtime_dirs() {
             '# makes bind() give the socket that client group instead of the service own' \
             '# group, which is what lets the socket itself be 0660 rather than world-writable.' \
             'd /run/kautuka 0755 root root -' \
-            'f /run/kautuka-db-writer.lock 0644 root root -'
+            'f /run/kautuka-db-writer.lock 0644 root root -' \
+            'f /run/kautuka-helper-run.lock 0644 root root -'
+        if [[ "$appliance_image_payload" == 'true' ]]; then
+            # Apply the installed file context to the shared root-owned inode.
+            printf '%s\n' 'z /run/kautuka-db-writer.lock - - - -' 'z /run/kautuka-helper-run.lock - - - -'
+        fi
         printf 'd /run/kautuka/networkaccess-envoy 0710 %s %s -\n' "$service_user" "$service_group"
 
         local entry
         local service_key
         local owner
         local group
-        for entry in \
+        local entries=(
             "manager:${service_user}:kautuka-manager-client" \
             "updateservice:${service_user}:kautuka-updateservice-client" \
             'gateway:kautuka-gateway:kautuka-gateway-client' \
             'credentialshost:kautuka-credentials:kautuka-credentials-client' \
-            'channelhost:kautuka-channelhost:kautuka-channelhost-client'; do
-            IFS=':' read -r service_key owner group <<<"$entry"
-            id "$owner" >/dev/null 2>&1 || fail "socket directory owner $owner does not exist yet"
-            getent group "$group" >/dev/null 2>&1 || fail "socket directory group $group does not exist yet"
-            printf 'd /run/kautuka/%s 2750 %s %s -\n' "$service_key" "$owner" "$group"
-        done
+            'channelhost:kautuka-channelhost:kautuka-channelhost-client'
+        )
+        if [[ "$appliance_image_payload" == 'true' ]]; then
+            for service_key in manager updateservice gateway credentialshost channelhost; do
+                printf 'd /run/kautuka/%s 0700 %s %s -\n' "$service_key" "$service_user" "$service_group"
+            done
+        else
+            for entry in "${entries[@]}"; do
+                IFS=':' read -r service_key owner group <<<"$entry"
+                id "$owner" >/dev/null 2>&1 || fail "socket directory owner $owner does not exist yet"
+                getent group "$group" >/dev/null 2>&1 || fail "socket directory group $group does not exist yet"
+                printf 'd /run/kautuka/%s 2750 %s %s -\n' "$service_key" "$owner" "$group"
+            done
+        fi
     } > "$tmpfiles_path"
     chmod 0644 "$tmpfiles_path"
 
@@ -1220,15 +1381,42 @@ install_socket_runtime_dirs() {
 
 install_apply_release_helper() {
     local extracted_root="$1"
-    mkdir -p /usr/local/lib/kautuka /etc/sudoers.d
-    if [[ -f "$extracted_root/bin/kautuka-apply-release" ]]; then
+    local appliance_image_payload="${2:-false}"
+    local appliance_version="${3:-}"
+    mkdir -p /usr/local/lib/kautuka
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        local generation="/opt/kautuka/manager/versions/$appliance_version"
+        [[ "$appliance_version" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ && -d "$generation" && ! -L "$generation" &&
+            -f "$generation/kautuka-apply-release" && ! -L "$generation/kautuka-apply-release" &&
+            -f "$generation/kautuka-update-recovery" && ! -L "$generation/kautuka-update-recovery" &&
+            -f "$extracted_root/bin/kautuka-apply-release-dispatch" && ! -L "$extracted_root/bin/kautuka-apply-release-dispatch" ]] \
+            || fail 'signed appliance release lacks the host recovery tools or dispatcher'
+        [[ "$(sed -n '2p' "$generation/kautuka-apply-release")" == '# Kautuka-Apply-Protocol: 6' ]] &&
+            grep -Fxq '# Kautuka-Host-Tools-Generation: 1' "$generation/kautuka-apply-release" &&
+            grep -Fq 'safe-state-recovery-v6' "$generation/kautuka-apply-release" &&
+            grep -Fq 'def prune_appliance_snapshots(' "$generation/kautuka-update-recovery" &&
+            python3 -c 'import pathlib, sys; compile(pathlib.Path(sys.argv[1]).read_bytes(), sys.argv[1], "exec")' "$generation/kautuka-update-recovery" \
+            || fail 'signed appliance host recovery tools are incompatible'
+        local selector_stage
+        selector_stage="$(mktemp -d /usr/local/lib/kautuka/.host-tools-stage.XXXXXXXX)"
+        ln -s -- "$generation" "$selector_stage/current"
+        mv -Tf -- "$selector_stage/current" /usr/local/lib/kautuka/host-tools-current
+        rmdir -- "$selector_stage"
+        sync -f /usr/local/lib/kautuka
+        local dispatch_tmp
+        dispatch_tmp="$(mktemp /usr/local/lib/kautuka/.apply-dispatch.XXXXXXXX)"
+        install -o root -g root -m 0755 "$extracted_root/bin/kautuka-apply-release-dispatch" "$dispatch_tmp"
+        sync -f "$dispatch_tmp"
+        mv -Tf -- "$dispatch_tmp" /usr/local/lib/kautuka/apply-release
+        sync -f /usr/local/lib/kautuka
+    elif [[ -f "$extracted_root/bin/kautuka-apply-release" ]]; then
         install -m 0755 "$extracted_root/bin/kautuka-apply-release" /usr/local/lib/kautuka/apply-release
         sed -i 's/\r$//' /usr/local/lib/kautuka/apply-release
     fi
     if [[ -f "$extracted_root/bin/kautuka-update-recovery" ]]; then
         install -m 0755 "$extracted_root/bin/kautuka-update-recovery" /usr/local/lib/kautuka/update-recovery.py
     fi
-    [[ -x /usr/local/lib/kautuka/apply-release && -x /usr/local/lib/kautuka/update-recovery.py ]] \
+    [[ -x /usr/local/lib/kautuka/apply-release && ( "$appliance_image_payload" == 'true' || -x /usr/local/lib/kautuka/update-recovery.py ) ]] \
         || fail 'this signed Linux package lacks safe update recovery support; refusing to install an update-capable appliance'
     cat > /etc/systemd/system/kautuka-update-recovery.service <<'EOF'
 [Unit]
@@ -1262,10 +1450,62 @@ EOF
     if [[ "$(readlink -f "$0")" != "$(readlink -f /usr/local/lib/kautuka/kautuka-install-linux.sh)" ]]; then
         install -m 0755 "$0" /usr/local/lib/kautuka/kautuka-install-linux.sh
     fi
-    cat > /etc/sudoers.d/kautuka-apply-release <<'EOF'
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        rm -f -- /etc/sudoers.d/kautuka-apply-release
+    else
+        mkdir -p /etc/sudoers.d
+        cat > /etc/sudoers.d/kautuka-apply-release <<'EOF'
 kautuka ALL=(root) NOPASSWD: /usr/local/lib/kautuka/apply-release
 EOF
-    chmod 0440 /etc/sudoers.d/kautuka-apply-release
+        chmod 0440 /etc/sudoers.d/kautuka-apply-release
+    fi
+}
+
+install_appliance_update_path() {
+    cat > /etc/systemd/system/kautuka-appliance-update.path <<'EOF'
+[Unit]
+Description=Watch for a prepared Kautuka appliance update
+Requires=kautuka-update-recovery.service
+After=kautuka-update-recovery.service
+
+[Path]
+PathExists=/var/lib/kautuka/updateService/updates/activate-appliance
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    cat > /etc/systemd/system/kautuka-appliance-update.service <<'EOF'
+[Unit]
+Description=Apply a prepared Kautuka appliance update
+
+[Service]
+Type=oneshot
+Environment=KAUTUKA_APPLY_DETACHED=1
+ExecStart=/usr/local/lib/kautuka/apply-release --consume-appliance-request
+EOF
+    cat > /etc/systemd/system/kautuka-channel-certificates.service <<'EOF'
+[Unit]
+Description=Renew Kautuka local Channel certificates
+Requires=kautuka-update-recovery.service
+After=kautuka-update-recovery.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/kautuka/apply-release --renew-channel-certificates
+EOF
+    cat > /etc/systemd/system/kautuka-channel-certificates.timer <<'EOF'
+[Unit]
+Description=Check Kautuka local Channel certificate expiry
+
+[Timer]
+OnBootSec=10min
+OnUnitInactiveSec=10min
+
+[Install]
+WantedBy=timers.target
+EOF
+    chmod 0644 /etc/systemd/system/kautuka-appliance-update.{path,service} \
+        /etc/systemd/system/kautuka-channel-certificates.{service,timer}
 }
 
 validate_exact_material_inventory() {
@@ -1505,6 +1745,49 @@ provision_or_validate_channel_security_material() {
     apply_channel_security_material_permissions "$internal_state_root"
     validate_channel_security_material_permissions "$internal_state_root"
 }
+
+provision_appliance_channel_security_material() (
+    local internal_state_root="$1" channelhost_executable="$2" owner="$3"
+    local security_root="$internal_state_root/security" channel_security_root
+    [[ ! -L "$security_root" ]] || fail 'appliance security root must be a real directory'
+    install -d -o root -g root -m 0711 "$security_root"
+    local published="$security_root/channel"
+    if [[ -e "$published" || -L "$published" ]]; then
+        [[ -d "$published" && ! -L "$published" ]] || fail 'appliance channel security root is not a real directory'
+        validate_material_owner_mode "$published" 'root:root:711'
+        validate_existing_channel_security_inventory "$internal_state_root"
+        local role_dir path
+        for role_dir in gateway-private gateway-trust channel-private channel-trust offline-authority; do
+            path="$published/$role_dir"
+            [[ -d "$path" && ! -L "$path" ]] || fail 'appliance channel security inventory is incomplete'
+            if [[ "$role_dir" == offline-authority ]]; then
+                validate_material_owner_mode "$path" 'root:root:700'
+            else
+                validate_material_owner_mode "$path" "$owner:700"
+            fi
+            [[ -z "$(find "$path" -mindepth 1 -maxdepth 1 ! -type f -print -quit)" ]] ||
+                fail 'appliance channel security material must be regular files'
+        done
+        return 0
+    fi
+    channel_security_root="$(mktemp -d "$security_root/.channel.XXXXXXXX")"
+    trap 'rm -rf -- "$channel_security_root"' EXIT
+    Kautuka__Mode=prod "$channelhost_executable" --provision-channel-security \
+        "$channel_security_root/gateway-private" "$channel_security_root/gateway-trust" \
+        "$channel_security_root/channel-private" "$channel_security_root/channel-trust" \
+        "$channel_security_root/offline-authority"
+
+    local role_dir path
+    for role_dir in gateway-private gateway-trust channel-private channel-trust; do
+        path="$channel_security_root/$role_dir"
+        chmod 0700 "$path"
+        find "$path" -maxdepth 1 -type f -exec chmod 0600 {} +
+        chown -R -- "$owner" "$path"
+    done
+    chmod 0600 "$channel_security_root/offline-authority/channel-ca.cer"
+    chmod 0711 "$channel_security_root"
+    mv -T -- "$channel_security_root" "$security_root/channel"
+)
 
 install_system_restart_helper() {
     local helper_path="$1"
@@ -2088,6 +2371,15 @@ uninstall_release() {
     local service_group="$service_user"
     local preserved_state_root=''
 
+    best_effort_systemctl disable --now kautuka-appliance-update.path
+    best_effort_systemctl disable --now kautuka-channel-certificates.timer
+    best_effort_systemctl stop kautuka-channel-certificates.service
+    best_effort_systemctl stop kautuka-appliance-update.service
+    best_effort_remove_file /etc/systemd/system/kautuka-appliance-update.path
+    best_effort_remove_file /etc/systemd/system/kautuka-channel-certificates.timer
+    best_effort_remove_file /etc/systemd/system/kautuka-channel-certificates.service
+    best_effort_remove_file /etc/systemd/system/kautuka-appliance-update.service
+
     local service_units=(
         "$unit_name"
         'kautuka-gateway.service'
@@ -2216,6 +2508,9 @@ uninstall_release() {
 
     best_effort_remove_file '/usr/local/bin/kautuka'
     best_effort_remove_file '/usr/local/bin/kautuka-tui'
+    if [[ ! -L /var/lib/kautuka-recovery ]]; then
+        best_effort_remove_file '/var/lib/kautuka-recovery/first-install.pending'
+    fi
     local legacy_config_file=''
     for legacy_config_file in "${legacy_config_files[@]}"; do
         best_effort_remove_file "$legacy_config_file"
@@ -2275,6 +2570,10 @@ wait_for_web_ui() {
     local service_user="${1:-kautuka}"
     local url="${2:-}"
     local timeout_seconds="${3:-${KAUTUKA_INSTALL_READINESS_TIMEOUT_SECONDS:-600}}"
+    local appliance_image_payload="${4:-false}"
+    local appliance_manager="${5:-}"
+    local defer_admin_setup="${6:-false}"
+    local first_install_checkpoint="${7:-}"
     local elapsed=0
     local service_uid=''
     local xdg_runtime_dir=''
@@ -2318,15 +2617,24 @@ wait_for_web_ui() {
 
     while (( elapsed < timeout_seconds )); do
         local gateway_state manager_state webhost_state
-        gateway_state="$(systemctl show -p ActiveState --value kautuka-gateway.service 2>/dev/null || true)"
-        credentials_state="$(systemctl show -p ActiveState --value kautuka-credentialshost.service 2>/dev/null || true)"
-        channelhost_state="$(systemctl show -p ActiveState --value kautuka-channelhost.service 2>/dev/null || true)"
         manager_state="$(run_as_service_user "$service_user" "$(get_service_user_home "$service_user")" "$xdg_runtime_dir" \
             systemctl --user show -p ActiveState --value kautuka-manager.service 2>/dev/null || true)"
-        webhost_state="$(run_as_service_user "$service_user" "$(get_service_user_home "$service_user")" "$xdg_runtime_dir" \
-            systemctl --user show -p ActiveState --value kautuka-webhost.service 2>/dev/null || true)"
-        updateservice_state="$(run_as_service_user "$service_user" "$(get_service_user_home "$service_user")" "$xdg_runtime_dir" \
-            systemctl --user show -p ActiveState --value kautuka-updateservice.service 2>/dev/null || true)"
+        local runtime_units_ready=false
+        if [[ "$appliance_image_payload" == 'true' ]]; then
+            gateway_state=container credentials_state=container channelhost_state=container webhost_state=container updateservice_state=container
+        else
+            gateway_state="$(systemctl show -p ActiveState --value kautuka-gateway.service 2>/dev/null || true)"
+            credentials_state="$(systemctl show -p ActiveState --value kautuka-credentialshost.service 2>/dev/null || true)"
+            channelhost_state="$(systemctl show -p ActiveState --value kautuka-channelhost.service 2>/dev/null || true)"
+            webhost_state="$(run_as_service_user "$service_user" "$(get_service_user_home "$service_user")" "$xdg_runtime_dir" \
+                systemctl --user show -p ActiveState --value kautuka-webhost.service 2>/dev/null || true)"
+            updateservice_state="$(run_as_service_user "$service_user" "$(get_service_user_home "$service_user")" "$xdg_runtime_dir" \
+                systemctl --user show -p ActiveState --value kautuka-updateservice.service 2>/dev/null || true)"
+            if [[ "$gateway_state" == 'active' && "$credentials_state" == 'active' && "$channelhost_state" == 'active' &&
+                "$webhost_state" == 'active' && "$updateservice_state" == 'active' ]]; then
+                runtime_units_ready=true
+            fi
+        fi
 
         http_status="$(curl --silent --show-error --max-time 5 --output "$health_file" --write-out '%{http_code}' "$health_url" 2>"$curl_error_file" || true)"
         if [[ "$http_status" == '200' ]]; then
@@ -2365,15 +2673,28 @@ except (OSError, ValueError, AttributeError, TypeError):
 PY
                 )"
             fi
+            local ui_ready=false
             if [[ "$readiness" == 'ready' && "$setup_http_status" == '200' \
                 && ( "$setup_needs_setup" == 'true' || "$setup_needs_setup" == 'false' ) \
-                && "$gateway_state" == 'active' && "$credentials_state" == 'active' \
-                && "$channelhost_state" == 'active' && "$manager_state" == 'active' \
-                && "$webhost_state" == 'active' && "$updateservice_state" == 'active' ]]; then
+                && "$manager_state" == 'active' ]]; then
+                ui_ready=true
+            fi
+            if [[ "$ui_ready" == 'true' && "$appliance_image_payload" == 'true' ]] &&
+                run_as_service_user "$service_user" "$(get_service_user_home "$service_user")" "$xdg_runtime_dir" \
+                    "$appliance_manager" --check-appliance-ready >/dev/null 2>&1; then
+                runtime_units_ready=true
+            fi
+            if [[ "$ui_ready" == 'true' && "$runtime_units_ready" == 'true' ]]; then
+                if [[ -n "$first_install_checkpoint" ]]; then
+                    rm -f -- "$first_install_checkpoint"
+                    sync -f "$(dirname -- "$first_install_checkpoint")"
+                fi
                 echo "Core runtime is ready (lifecycle=${lifecycle_status}; manager=${manager_health})."
                 echo "Verified web UI at: $url"
-                if [[ "$setup_needs_setup" == 'true' ]]; then
-                    confirm_first_admin_setup "$url" || fail 'first-run administrator setup token was not acknowledged'
+                if [[ "$setup_needs_setup" == 'true' && "$defer_admin_setup" != 'true' ]]; then
+                    local token_file='/var/lib/kautuka/setup-token'
+                    if [[ "$appliance_image_payload" == 'true' ]]; then token_file='/var/lib/kautuka/gateway/setup-token'; fi
+                    confirm_first_admin_setup "$url" "$token_file" || fail 'first-run administrator setup token was not acknowledged'
                 fi
                 rm -f "$health_file"
                 rm -f "$curl_error_file"
@@ -2382,6 +2703,8 @@ PY
             last_status="lifecycle=${lifecycle_status}; manager=${manager_health}"
             if [[ "$setup_http_status" != '200' ]]; then
                 last_status+="; first-run endpoint HTTP ${setup_http_status:-unknown}"
+            elif [[ "$appliance_image_payload" == 'true' && "$runtime_units_ready" != 'true' ]]; then
+                last_status+='; this appliance has not confirmed readiness'
             fi
         else
             if [[ "$http_status" =~ ^[0-9]{3}$ && "$http_status" != '000' ]]; then
@@ -2470,7 +2793,7 @@ PY
 
 confirm_first_admin_setup() {
     local url="$1"
-    local token_file='/var/lib/kautuka/setup-token'
+    local token_file="${2:-/var/lib/kautuka/setup-token}"
     local setup_token=''
     local acknowledgment=''
 
@@ -2492,7 +2815,7 @@ confirm_first_admin_setup() {
         echo 'The administrator account controls Kautuka configuration and access. The token is deleted after successful use.'
         echo 'Copy the token now. Do not share it or include it in support logs.'
         printf 'Setup token: %s\n' "$setup_token"
-        echo 'Recovery command if you close this terminal: sudo cat /var/lib/kautuka/setup-token'
+        printf 'Recovery command if you close this terminal: sudo cat %s\n' "$token_file"
     } > /dev/tty
 
     while true; do
@@ -2524,6 +2847,7 @@ main() {
     local expected_signature_url=''
     local github_release_candidate='false'
     local install_root="/opt/kautuka/manager"
+    local web_port=''
     local internal_state_root="/var/lib/kautuka"
     local visible_root="/var/lib/kautuka"
     local unit_name="kautuka-manager.service"
@@ -2533,6 +2857,7 @@ main() {
     local delete_data="false"
     local assume_yes="false"
     local skip_enable="false"
+    local defer_admin_setup="false"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -2555,6 +2880,16 @@ main() {
             --install-root)
                 install_root="${2:-}"
                 shift 2
+                ;;
+            --web-port)
+                [[ "${2:-}" =~ ^[1-9][0-9]{3,4}$ ]] && (( $2 >= 1024 && $2 <= 65535 )) \
+                    || fail '--web-port must be an integer between 1024 and 65535'
+                web_port="$2"
+                shift 2
+                ;;
+            --defer-admin-setup)
+                defer_admin_setup="true"
+                shift
                 ;;
             --internal-state-root)
                 internal_state_root="${2:-}"
@@ -2654,7 +2989,15 @@ main() {
         manifest_url="$KAUTUKA_DEFAULT_MANIFEST_URL"
     fi
 
-    if [[ -z "$artifact" && -z "$artifact_url" && -z "$manifest_url" ]]; then
+    if [[ -n "$KAUTUKA_DEFAULT_RELEASE_TAG" ]]; then
+        release_tag="$KAUTUKA_DEFAULT_RELEASE_TAG"
+        [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-preview\.[0-9]+)?$ ]] || fail 'invalid embedded release tag'
+        [[ "$KAUTUKA_DEFAULT_REPOSITORY_OWNER" =~ ^[A-Za-z0-9_-]+$ && "$KAUTUKA_DEFAULT_REPOSITORY_NAME" =~ ^[A-Za-z0-9_-]+$ ]] ||
+            fail 'canonical repository owner and name contain invalid characters'
+        [[ -z "$artifact" && -z "$artifact_url" && -z "$manifest_url" ]] || fail 'an exact release installer cannot use another artifact or feed'
+        manifest_url="https://github.com/${KAUTUKA_DEFAULT_REPOSITORY_OWNER}/${KAUTUKA_DEFAULT_REPOSITORY_NAME}/releases/download/${release_tag}/kautuka-platform-release.json"
+        github_release_candidate='true'
+    elif [[ -z "$artifact" && -z "$artifact_url" && -z "$manifest_url" ]]; then
         require_command python3
         require_command curl
         local resolved_release
@@ -2697,11 +3040,13 @@ main() {
     fi
 
     local tmp_root
-    tmp_root="$(mktemp -d)"
+    # The compressed release and extracted OCI archives can exceed a memory-backed /tmp.
+    tmp_root="$(mktemp -d -- "${TMPDIR:-/var/tmp}/kautuka-install.XXXXXXXX")"
     local quoted_tmp_root
     quoted_tmp_root="$(printf '%q' "$tmp_root")"
     trap "rm -rf ${quoted_tmp_root}" EXIT
 
+    local appliance_image_payload=false
     if [[ -n "$manifest_url" ]]; then
         require_trusted_manifest_public_key_for_network_install "$manifest_url" "$KAUTUKA_DEFAULT_MANIFEST_PUBLIC_KEY_PEM"
         local manifest_path="$tmp_root/kautuka-platform-release.json"
@@ -2806,6 +3151,30 @@ PY
             verification_args+=(--source-sha "$release_source_sha")
         fi
         verify_linux_release "${verification_args[@]}"
+        appliance_image_payload="$(python3 -c 'import json, sys; print("true" if "applianceDeployment" in json.load(sys.stdin) else "false")' < "$manifest_path")"
+        if [[ -n "$KAUTUKA_DEFAULT_RELEASE_TAG" && "$appliance_image_payload" != 'true' ]]; then
+            fail 'the exact release does not contain a container appliance deployment'
+        fi
+        if [[ "$appliance_image_payload" == 'true' ]] &&
+            [[ "${install_root%/}" != '/opt/kautuka/manager' || "${internal_state_root%/}" != '/var/lib/kautuka' ||
+                "${visible_root%/}" != '/var/lib/kautuka' || "$unit_name" != 'kautuka-manager.service' ]]; then
+            fail 'signed appliance releases require the standard Manager unit and installation paths'
+        fi
+    fi
+
+    if [[ -n "$web_port" && "$appliance_image_payload" != 'true' ]]; then
+        fail '--web-port requires a signed appliance release'
+    fi
+    if [[ "$defer_admin_setup" == 'true' && "$appliance_image_payload" != 'true' ]]; then
+        fail '--defer-admin-setup requires a signed appliance release'
+    fi
+    web_port="${web_port:-$(resolve_web_ui_port)}"
+
+    # On resume the user manager may already depend on boot recovery. Complete
+    # that root unit before taking the lock it uses to renew expired leaves.
+    if [[ "$appliance_image_payload" == 'true' && -f /var/lib/kautuka-recovery/first-install.pending &&
+        -f /etc/systemd/system/kautuka-update-recovery.service ]]; then
+        systemctl start kautuka-update-recovery.service
     fi
 
     # Share the updater's lock before changing any installed files. An update
@@ -2814,6 +3183,45 @@ PY
     exec 9>/run/kautuka-apply.lock
     flock -n 9 || fail 'another Kautuka update or installation is in progress; retry after it finishes'
     assert_no_unresolved_update
+    local first_install_checkpoint='' resuming_first_install=false selected_first_install=false
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        local recovery_dir=/var/lib/kautuka-recovery manifest_digest checkpoint_record
+        [[ ! -L "$recovery_dir" ]] || fail 'unsafe appliance recovery directory'
+        if [[ ! -e "$recovery_dir" ]]; then
+            install -d -o root -g root -m 0755 "$recovery_dir"
+        fi
+        [[ "$(stat -c '%u' "$recovery_dir")" == 0 &&
+            -z "$(find "$recovery_dir" -maxdepth 0 -perm /022 -print -quit)" ]] || fail 'unsafe appliance recovery directory'
+        first_install_checkpoint="$recovery_dir/first-install.pending"
+        manifest_digest="$(sha256sum "$manifest_path" | cut -d' ' -f1)"
+        checkpoint_record="$version $manifest_digest $web_port"
+        if [[ -e "$first_install_checkpoint" || -L "$first_install_checkpoint" ]]; then
+            [[ -f "$first_install_checkpoint" && ! -L "$first_install_checkpoint" &&
+                "$(stat -c '%u:%a' "$first_install_checkpoint")" == '0:600' ]] ||
+                fail 'unsafe initial appliance installation checkpoint'
+            local resume_version resume_digest resume_port
+            read -r resume_version resume_digest resume_port < "$first_install_checkpoint" ||
+                fail 'invalid initial appliance installation checkpoint'
+            [[ "$resume_version" =~ ^[a-zA-Z0-9][a-zA-Z0-9.+-]*$ && "$resume_digest" =~ ^[a-f0-9]{64}$ &&
+                "$resume_port" =~ ^[0-9]+$ ]] || fail 'invalid initial appliance installation checkpoint'
+            [[ "$(cat -- "$first_install_checkpoint")" == "$checkpoint_record" ]] ||
+                fail "resume the interrupted installation using signed release $resume_version and web port $resume_port"
+            resuming_first_install=true
+            echo "Resuming initial installation of signed appliance release $version."
+        else
+            if [[ -e "$install_root/current" || -L "$install_root/current" || -e "$internal_state_root/kautuka.db" ||
+                  -e "$internal_state_root/gateway" || -e "$internal_state_root/credentialsHost" ||
+                  -e "$internal_state_root/channelHost" || -e "$internal_state_root/security/channel" ]]; then
+                fail 'the installer found an existing runtime or service data. Use in-app updates for an existing appliance, or install on a clean host.'
+            fi
+            local checkpoint_temp
+            checkpoint_temp="$(mktemp "$recovery_dir/.first-install.XXXXXXXX")"
+            printf '%s\n' "$checkpoint_record" > "$checkpoint_temp"
+            sync -f "$checkpoint_temp"
+            mv -T -- "$checkpoint_temp" "$first_install_checkpoint"
+            sync -f "$recovery_dir"
+        fi
+    fi
     validate_existing_channel_security_inventory "$internal_state_root"
 
     if [[ -L "$install_root/current" && -x "$install_root/current/kautuka-manager" ]]; then
@@ -2821,27 +3229,38 @@ PY
     fi
 
     # Do not alter SELinux policy until the signed manifest and archive pass.
-    ensure_selinux_runtime_exec_policy
+    ensure_selinux_runtime_exec_policy "$appliance_image_payload"
 
     ensure_service_account "$service_user" "$service_group" "$internal_state_root"
+    if [[ "$appliance_image_payload" == 'true' && -n "${WSL_DISTRO_NAME:-}" ]]; then
+        avoid_wsl_service_uid_conflict "$service_user" /sys/fs/cgroup/user.slice
+    fi
     # Seed the installed release's channel only on a fresh install. Preserve any
     # channel the user has already chosen when reinstalling or upgrading.
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        prepare_appliance_state_directories "$internal_state_root" "$service_user" "$service_group"
+    fi
     write_initial_update_runtime_policy "$internal_state_root" "$release_channel" "$service_user" "$service_group"
-    ensure_isolated_service_account kautuka-gateway kautuka-gateway
-    ensure_isolated_service_account kautuka-channelhost kautuka-channelhost
-    ensure_isolated_service_account kautuka-credentials kautuka-credentials
-    if ! getent group kautuka-credentials-client >/dev/null 2>&1; then
-        groupadd --system kautuka-credentials-client
+    if [[ "$appliance_image_payload" != 'true' ]]; then
+        ensure_isolated_service_account kautuka-gateway kautuka-gateway
+        ensure_isolated_service_account kautuka-channelhost kautuka-channelhost
+        ensure_isolated_service_account kautuka-credentials kautuka-credentials
+        if ! getent group kautuka-credentials-client >/dev/null 2>&1; then
+            groupadd --system kautuka-credentials-client
+        fi
+        usermod --append --groups "$service_group" kautuka-gateway
+        usermod --append --groups kautuka-credentials-client kautuka-gateway
+        usermod --append --groups kautuka-credentials-client kautuka-credentials
+        if id -nG kautuka-channelhost | tr ' ' '\n' | grep -Fxq "$service_group"; then
+            fail "kautuka-channelhost must not belong to the broad appliance group: $service_group"
+        fi
     fi
-    usermod --append --groups "$service_group" kautuka-gateway
-    usermod --append --groups kautuka-credentials-client kautuka-gateway
-    usermod --append --groups kautuka-credentials-client kautuka-credentials
-    install_socket_runtime_dirs "$service_user" "$service_group"
-    if id -nG kautuka-channelhost | tr ' ' '\n' | grep -Fxq "$service_group"; then
-        fail "kautuka-channelhost must not belong to the broad appliance group: $service_group"
-    fi
+    install_socket_runtime_dirs "$service_user" "$service_group" "$appliance_image_payload"
     local service_home
     service_home="$(get_service_user_home "$service_user")"
+    if [[ "$appliance_image_payload" == 'true' && "${service_home%/}" != '/var/lib/kautuka' ]]; then
+        fail 'signed appliance releases require the Manager service account home at /var/lib/kautuka'
+    fi
 
     local versions_root="$install_root/versions"
     local version_root="$versions_root/$version"
@@ -2854,7 +3273,13 @@ PY
 
     ensure_dotnet_host_libraries
 
-    mkdir -p "$versions_root"
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        [[ ! -L /opt/kautuka && ! -L "${install_root%/}" && ! -L "$versions_root" ]] \
+            || fail 'appliance installation directories must not be symbolic links'
+        install -d -o root -g root -m 0755 /opt/kautuka "$install_root" "$versions_root"
+    else
+        mkdir -p "$versions_root"
+    fi
     mkdir -p "$internal_state_root/manager"
     mkdir -p "$visible_root/logs/manager"
     mkdir -p "$visible_root/workspaces"
@@ -2864,19 +3289,27 @@ PY
     ensure_rootless_podman_ready "$service_user" "$service_group" "$service_home" "$xdg_runtime_dir"
 
     extract_release "$artifact" "$tmp_root/extracted"
-    install_apply_release_helper "$tmp_root/extracted"
-
-    if [[ -n "$manifest_url" ]]; then
-        if [[ "$github_release_candidate" == 'true' ]]; then
-            # UpdateService independently discovers the selected signed channel
-            # snapshot; never persist a version-pinned bootstrap manifest as its source.
-            write_update_source_document '' "$service_user" "$service_group"
-        else
-            write_update_source_document "$manifest_url" "$service_user" "$service_group"
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        validate_appliance_image_payload "$tmp_root/extracted/service-images"
+        local directory selected
+        for directory in /opt /opt/kautuka "$install_root" "$versions_root"; do
+            [[ -d "$directory" && ! -L "${directory%/}" &&
+                "$(stat -c '%u' -- "$directory")" == 0 &&
+                -z "$(find "$directory" -maxdepth 0 -perm /022 -print -quit)" ]] \
+                || fail "unsafe appliance installation directory: $directory"
+        done
+        if [[ -e "$current_link" || -L "$current_link" ]]; then
+            selected="$(readlink -f -- "$current_link")" || fail 'could not resolve the active Manager release'
+            [[ "$resuming_first_install" == 'true' && "$selected" == "$(realpath -- "$version_root")" &&
+                ! -L "$version_root" && "$(stat -c '%u' "$version_root")" == 0 &&
+                -z "$(find "$version_root" -maxdepth 0 -perm /022 -print -quit)" &&
+                -f "$version_root/kautuka-platform-release.json" && ! -L "$version_root/kautuka-platform-release.json" &&
+                "$(sha256sum -- "$version_root/kautuka-platform-release.json" | cut -d' ' -f1)" == "$manifest_digest" ]] ||
+                fail 'active Manager release does not match the interrupted signed initial installation'
+            selected_first_install=true
         fi
     fi
     write_trusted_manifest_public_key "$KAUTUKA_DEFAULT_MANIFEST_PUBLIC_KEY_PEM"
-    write_service_scope_document "$service_user" 'kautuka.target'
 
     local content_root="$tmp_root/extracted"
     if [[ -d "$tmp_root/extracted/bin" ]]; then
@@ -2886,71 +3319,114 @@ PY
     echo 'Preparing Kautuka images with the service account rootless Podman before starting services.'
     prepare_install_images "$content_root" "$service_user" "$service_home" "$xdg_runtime_dir"
 
-    stop_existing_kautuka_runtime "$service_user" "$service_home" "$xdg_runtime_dir"
+    if [[ "$appliance_image_payload" != 'true' ]]; then
+        stop_existing_kautuka_runtime "$service_user" "$service_home" "$xdg_runtime_dir"
+    fi
 
-    # Clear generated workspace runtime state only after the old services stop.
-    clear_generated_agent_workspace_state "$visible_root"
-
-    rm -rf "$version_root"
-    mkdir -p "$version_root"
-    copy_runtime_payload "$content_root" "$version_root"
+    if [[ "$selected_first_install" != 'true' ]]; then
+        rm -rf "$version_root"
+        mkdir -p "$version_root"
+        copy_runtime_payload "$content_root" "$version_root"
+        if [[ -n "$manifest_url" ]]; then
+            install_verified_release_metadata "$version_root" "$manifest_path" "$signature_path" "$appliance_image_payload"
+        fi
+        if [[ "$appliance_image_payload" == 'true' ]]; then
+            install_appliance_image_payload "$tmp_root/extracted/service-images" "$version_root"
+        fi
+    fi
     chmod +x "$version_root/kautuka-manager"
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        chown -R root:root "$version_root"
+        chmod -R go-w "$version_root"
+        chmod 0755 "$version_root"
+        local native_hook="$version_root/scripts/kautuka-oci-hook"
+        [[ -f "$native_hook" && ! -L "$native_hook" && -x "$native_hook" &&
+            "$(head -c 4 -- "$native_hook")" == $'\x7fELF' ]] \
+            || fail 'signed appliance release requires an executable native OCI hook'
+        echo 'Preparing the signed application images in the service account Podman store.'
+        run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" \
+            "$version_root/kautuka-manager" --prepare-appliance-images --candidate-version "$version" \
+            || fail 'could not prepare signed appliance service images'
+        stop_existing_kautuka_runtime "$service_user" "$service_home" "$xdg_runtime_dir"
+    fi
+
+    if [[ "$resuming_first_install" != 'true' ]]; then
+        clear_generated_agent_workspace_state "$visible_root"
+    fi
+    install_apply_release_helper "$tmp_root/extracted" "$appliance_image_payload" "$version"
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        install_appliance_update_path
+    fi
+    if [[ -n "$manifest_url" ]]; then
+        if [[ "$github_release_candidate" == 'true' ]]; then
+            # UpdateService independently discovers the selected signed channel
+            # snapshot; never persist a version-pinned bootstrap manifest as its source.
+            write_update_source_document '' "$service_user" "$service_group"
+        else
+            write_update_source_document "$manifest_url" "$service_user" "$service_group"
+        fi
+    fi
+    write_service_scope_document "$service_user" 'kautuka.target' "$appliance_image_payload"
 
     local hooks_dir="$service_home/.config/containers/hooks.d"
     local envoy_selinux_enabled=false
-    install_envoy_selinux_policy "$version_root/scripts/kautuka_envoy.cil"
-    install_nac_hook_payload "$version_root/scripts/kautuka_hook.py" "$hooks_dir/kautuka_hook.py"
-    chown "$service_user:$service_group" "$hooks_dir/kautuka_hook.py"
-    chown "$service_user:$service_group" "$hooks_dir/kautuka_workload.nft.json.tmpl"
-    chown "$service_user:$service_group" "$hooks_dir/kautuka_package_proxy.nft.json.tmpl"
+    local manager_selinux_policy=''
+    if [[ "$appliance_image_payload" == 'true' ]]; then manager_selinux_policy="$version_root/scripts/kautuka_manager_peer.cil"; fi
+    install_envoy_selinux_policy "$version_root/scripts/kautuka_envoy.cil" /usr/share/udica/templates "$manager_selinux_policy"
+    if [[ "$appliance_image_payload" != 'true' ]]; then
+        install_nac_hook_payload "$version_root/scripts/kautuka_hook.py" "$hooks_dir/kautuka_hook.py"
+        chown "$service_user:$service_group" "$hooks_dir/kautuka_hook.py"
+        chown "$service_user:$service_group" "$hooks_dir/kautuka_workload.nft.json.tmpl"
+        chown "$service_user:$service_group" "$hooks_dir/kautuka_package_proxy.nft.json.tmpl"
+    fi
 
     chown -R root:root "$install_root"
     chmod -R go-w "$install_root"
-    local channel_security_root="$internal_state_root/security"
-    chown_tree_excluding "$internal_state_root" "$service_user:$service_group" "$channel_security_root"
-    if [[ "$visible_root" != "$internal_state_root" ]]; then
-        chown_tree_excluding "$visible_root" "$service_user:$service_group" "$channel_security_root"
+    prepare_install_state_permissions "$internal_state_root" "$visible_root" "$service_user" "$service_group" "$appliance_image_payload"
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        local channel_executable="$tmp_root/extracted/services/channelhost/kautuka-channelhost"
+        [[ -f "$channel_executable" && ! -L "$channel_executable" && -x "$channel_executable" ]] \
+            || fail 'signed appliance release is missing the ChannelHost trust provisioning command'
+        provision_appliance_channel_security_material "$internal_state_root" "$channel_executable" "$service_user:$service_group"
+    else
+        prepare_gateway_database_owner "$internal_state_root"
+        prepare_mcpb_bundle_share "$internal_state_root" "$service_group"
     fi
-    grant_shared_group_write_excluding "$internal_state_root" "$service_group" "$channel_security_root"
-    prepare_isolated_service_ancestors "$internal_state_root" "$visible_root" "$service_group"
-    normalize_sidecar_data_permissions "$internal_state_root"
-    prepare_gateway_database_owner "$internal_state_root"
-    prepare_mcpb_bundle_share "$internal_state_root" "$service_group"
 
     ln -sfn "$version_root" "$next_link"
     mv -Tf "$next_link" "$current_link"
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        install_oci_hook_registration "$hooks_dir" '/opt/kautuka/manager/current/scripts/kautuka-oci-hook' "$service_user" "$service_group"
+    else
+        install_oci_hook_registration "$hooks_dir" "$hooks_dir/kautuka_hook.py" "$service_user" "$service_group"
+    fi
 
-    write_manager_user_unit "$unit_path" "$install_root" "$visible_root" "$envoy_selinux_enabled"
+    write_manager_user_unit "$unit_path" "$install_root" "$visible_root" "$envoy_selinux_enabled" "$appliance_image_payload" "$web_port"
     chmod 0644 "$unit_path"
-    chown -R "$service_user:$service_group" "$unit_dir"
 
     local installed_units=()
     local installed_system_units=()
     installed_units+=("$unit_name")
 
-    if [[ -d "$tmp_root/extracted/services/credentialshost" ]]; then
-        installed_system_units+=("$(install_isolated_credentials_service_system "$tmp_root/extracted/services/credentialshost" "$version" "$visible_root" "$internal_state_root")")
-    fi
-
-    if [[ -d "$tmp_root/extracted/services/channelhost" ]]; then
-        installed_system_units+=("$(install_isolated_channel_service_system channelhost ChannelHost kautuka-channelhost "$tmp_root/extracted/services/channelhost" "$version" kautuka-channelhost kautuka-channelhost "$visible_root" "$internal_state_root")")
-    fi
-
-    if [[ -d "$tmp_root/extracted/services/gateway" ]]; then
-        [[ -d "$tmp_root/extracted/services/channelhost" ]] || fail "production Gateway installation requires the ChannelHost payload"
-        installed_system_units+=("$(install_isolated_channel_service_system gateway Gateway kautuka-gateway "$tmp_root/extracted/services/gateway" "$version" kautuka-gateway kautuka-gateway "$visible_root" "$internal_state_root")")
-        provision_or_validate_channel_security_material \
-            "$internal_state_root" \
-            "/opt/kautuka/channelhost/current/kautuka-channelhost"
-        validate_isolated_channel_runtime_access "$internal_state_root" "$visible_root"
-    fi
-
-    if [[ -d "$tmp_root/extracted/services/updateservice" ]]; then
-        installed_units+=("$(install_host_service_user updateservice UpdateService kautuka-updateservice "$tmp_root/extracted/services/updateservice" "$version" "$service_user" "$service_group" "$visible_root" "$unit_dir")")
-    fi
-
-    if [[ -d "$tmp_root/extracted/services/webhost" ]]; then
-        installed_units+=("$(install_host_service_user webhost WebHost kautuka-webhost "$tmp_root/extracted/services/webhost" "$version" "$service_user" "$service_group" "$visible_root" "$unit_dir")")
+    if [[ "$appliance_image_payload" != 'true' ]]; then
+        if [[ -d "$tmp_root/extracted/services/credentialshost" ]]; then
+            installed_system_units+=("$(install_isolated_credentials_service_system "$tmp_root/extracted/services/credentialshost" "$version" "$visible_root" "$internal_state_root")")
+        fi
+        if [[ -d "$tmp_root/extracted/services/channelhost" ]]; then
+            installed_system_units+=("$(install_isolated_channel_service_system channelhost ChannelHost kautuka-channelhost "$tmp_root/extracted/services/channelhost" "$version" kautuka-channelhost kautuka-channelhost "$visible_root" "$internal_state_root")")
+        fi
+        if [[ -d "$tmp_root/extracted/services/gateway" ]]; then
+            [[ -d "$tmp_root/extracted/services/channelhost" ]] || fail "production Gateway installation requires the ChannelHost payload"
+            installed_system_units+=("$(install_isolated_channel_service_system gateway Gateway kautuka-gateway "$tmp_root/extracted/services/gateway" "$version" kautuka-gateway kautuka-gateway "$visible_root" "$internal_state_root")")
+            provision_or_validate_channel_security_material "$internal_state_root" "/opt/kautuka/channelhost/current/kautuka-channelhost"
+            validate_isolated_channel_runtime_access "$internal_state_root" "$visible_root"
+        fi
+        if [[ -d "$tmp_root/extracted/services/updateservice" ]]; then
+            installed_units+=("$(install_host_service_user updateservice UpdateService kautuka-updateservice "$tmp_root/extracted/services/updateservice" "$version" "$service_user" "$service_group" "$visible_root" "$unit_dir")")
+        fi
+        if [[ -d "$tmp_root/extracted/services/webhost" ]]; then
+            installed_units+=("$(install_host_service_user webhost WebHost kautuka-webhost "$tmp_root/extracted/services/webhost" "$version" "$service_user" "$service_group" "$visible_root" "$unit_dir")")
+        fi
     fi
 
     # Remove the CLI installed by earlier releases; it is no longer shipped.
@@ -2961,6 +3437,7 @@ PY
     local activation_target_units=''
     activation_target_units="$(printf '%s\n' "${installed_units[@]}" | paste -sd' ' -)"
     install_user_target_unit "$unit_dir" "$activation_target_units"
+    chown -R "$service_user:$service_group" "$unit_dir"
 
     installed_units+=('kautuka.target')
 
@@ -2993,9 +3470,17 @@ PY
     fi
 
     systemctl enable kautuka-update-recovery.service
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        systemctl enable --now kautuka-appliance-update.path kautuka-channel-certificates.timer
+    fi
 
-    best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" enable "${installed_units[@]}"
-    best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" start kautuka-manager.service
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" \
+            systemctl --user enable --now "${installed_units[@]}"
+    else
+        best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" enable "${installed_units[@]}"
+        best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" start kautuka-manager.service
+    fi
     if (( ${#installed_system_units[@]} > 0 )); then
         systemctl enable "${installed_system_units[@]}"
         if [[ " ${installed_system_units[*]} " == *' kautuka-credentialshost.service '* ]]; then
@@ -3008,14 +3493,16 @@ PY
             systemctl start kautuka-gateway.service
         fi
     fi
-    best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" start kautuka.target
-    wait_for_web_ui "$service_user"
+    if [[ "$appliance_image_payload" != 'true' ]]; then
+        best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" start kautuka.target
+    fi
+    wait_for_web_ui "$service_user" "http://127.0.0.1:$web_port" '' "$appliance_image_payload" "$version_root/kautuka-manager" "$defer_admin_setup" "$first_install_checkpoint"
 
     echo "Installed Manager version '$version'."
     echo "Current symlink: $current_link -> $(readlink -f "$current_link")"
     echo "Systemd unit: $unit_path"
     echo "Rootless Podman runtime: $xdg_runtime_dir"
-    echo "Access the web UI at: http://localhost:$(resolve_web_ui_port)"
+    echo "Access the web UI at: http://localhost:$web_port"
 }
 
 if [[ "${KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY:-0}" != '1' ]]; then

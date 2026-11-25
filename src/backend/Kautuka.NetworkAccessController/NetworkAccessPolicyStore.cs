@@ -2,6 +2,12 @@ namespace Kautuka.NetworkAccessController;
 
 public sealed partial class NetworkAccessPolicyStore
 {
+    private readonly Dictionary<string, string> serviceSetupGroups;
+    public static TimeSpan DefaultPendingRequestRetention => TimeSpan.FromHours(24);
+    private bool IsExpired(NetworkAccessRequest request, DateTimeOffset now)
+        => request.Status == "pending" && now >= request.FirstSeenUtc
+            && now - request.FirstSeenUtc >= pendingRequestRetention;
+
     public NetworkAccessApprovalLimits GetApprovalLimits(NetworkAccessActor actor)
     {
         NetworkAccessPolicyAuthorizer.ValidateActor(actor);
@@ -230,6 +236,19 @@ public sealed partial class NetworkAccessPolicyStore
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
+            DateTimeOffset now = timeProvider.GetUtcNow();
+            List<NetworkAccessRequest> retained = current.Requests.Where(r => !IsExpired(r, now)).ToList();
+            if (retained.Count != current.Requests.Count)
+            {
+                current = current with { Requests = retained, Revision = checked(current.Revision + 1) };
+                SaveSync(current);
+                lastRequestActivityWatermark = Math.Max(lastRequestActivityWatermark, current.Revision);
+            }
+            foreach (string expired in probeRequestsById.Where(kv => IsExpired(kv.Value.Request, now)).Select(kv => kv.Key).ToArray())
+            {
+                probeRequestsById.Remove(expired);
+                lastRequestActivityWatermark = Math.Max(lastRequestActivityWatermark + 1, checked(current.Revision + 1));
+            }
             UserPrivileges callerPrivs = ResolveUserPrivilegesUnsafe(ref current, actor.UserId, isTargetAdmin: actor.IsAdmin);
 
             if (sinceRevision.HasValue
@@ -242,7 +261,7 @@ public sealed partial class NetworkAccessPolicyStore
             var views = new List<NetworkAccessRequestView>();
             foreach (NetworkAccessRequest req in current.Requests)
             {
-                if (!NetworkAccessPolicyAuthorizer.CanViewRequest(actor, req))
+                if (IsExpired(req, now) || !NetworkAccessPolicyAuthorizer.CanViewRequest(actor, req))
                 {
                     continue;
                 }
@@ -257,7 +276,7 @@ public sealed partial class NetworkAccessPolicyStore
             foreach (TemporaryProbePendingEntry probeEntry in probeRequestsById.Values)
             {
                 NetworkAccessRequest req = probeEntry.Request;
-                if (!NetworkAccessPolicyAuthorizer.CanViewRequest(actor, req))
+                if (IsExpired(req, now) || !NetworkAccessPolicyAuthorizer.CanViewRequest(actor, req))
                 {
                     continue;
                 }
@@ -292,7 +311,7 @@ public sealed partial class NetworkAccessPolicyStore
                 {
                     if (!overriddenIds.Contains(seed.Id))
                     {
-                        views.Add(new NetworkAccessRuleView(seed, Paused: false, OpenInternetBadge: false));
+                        views.Add(new NetworkAccessRuleView(seed, Paused: false, OpenInternetBadge: false, seed.SeedSetupService));
                     }
                 }
             }
@@ -306,7 +325,8 @@ public sealed partial class NetworkAccessPolicyStore
 
                 bool paused = NetworkAccessRuleMatcher.IsPaused(current, rule);
                 bool openInternet = rule.Allowed && string.Equals(rule.DestKind, "any-public", StringComparison.Ordinal);
-                views.Add(new NetworkAccessRuleView(rule, paused, openInternet));
+                string? setupService = actor.IsAdmin ? serviceSetupGroups.GetValueOrDefault(rule.Id) : null;
+                views.Add(new NetworkAccessRuleView(rule, paused, openInternet, setupService));
             }
 
             return (current.Revision, views);
@@ -319,7 +339,8 @@ public sealed partial class NetworkAccessPolicyStore
         bool allow,
         string? scope,
         long expectedRevision,
-        bool allowLan = false)
+        bool allowLan = false,
+        bool includeSubdomains = false)
     {
         NetworkAccessPolicyAuthorizer.ValidateActor(actor);
         ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
@@ -329,6 +350,7 @@ public sealed partial class NetworkAccessPolicyStore
             NetworkAccessPolicyState current = Load();
             if (probeRequestsById.TryGetValue(requestId, out TemporaryProbePendingEntry? probeEntry))
             {
+                if (includeSubdomains) throw new ArgumentException("Temporary probes require exact hostname approval.", nameof(includeSubdomains));
                 return DecideProbeRequestUnsafe(actor, current, probeEntry, allow, expectedRevision, allowLan);
             }
 
@@ -341,6 +363,8 @@ public sealed partial class NetworkAccessPolicyStore
                 request,
                 scope,
                 (userId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin));
+            if (request.Status != "pending" || IsExpired(request, timeProvider.GetUtcNow()))
+                throw new KeyNotFoundException("Request not found.");
             string effectiveScope = resolved.EffectiveScope;
             string? ruleUserId = resolved.RuleUserId;
             string? ruleAgentId = resolved.RuleAgentId;
@@ -351,13 +375,23 @@ public sealed partial class NetworkAccessPolicyStore
                 throw new InvalidOperationException("revision_conflict: Policy revision has changed.");
             }
 
+            string kind = request.DestKind;
+            string destination = request.Destination;
+            if (includeSubdomains)
+            {
+                if (!allow || kind != "host" || !RegistrableDomain.TryGet(destination, out string baseDomain))
+                    throw new ArgumentException("This request does not support base domain approval.", nameof(includeSubdomains));
+                kind = "domain";
+                destination = baseDomain;
+            }
             (string destKind, string normalizedDest, int port) = NetworkDestinationNormalizer.ValidateAndNormalizeRuleDestination(
-                request.DestKind,
-                request.Destination,
+                kind,
+                destination,
                 request.Port,
                 allow,
                 allow && allowLan,
-                actor.IsAdmin);
+                actor.IsAdmin,
+                registrableDomain: RegistrableDomain);
 
             string ruleId = NetworkAccessRule.ComputeId(
                 effectiveScope,
@@ -443,6 +477,36 @@ public sealed partial class NetworkAccessPolicyStore
         }
     }
 
+    public (long Revision, string Status) EnsureProviderPermission(
+        NetworkAccessActor actor, string destination, string destKind, int port, bool allowLan, long? confirmedRevision, bool checkOnly = false)
+    {
+        NetworkAccessPolicyAuthorizer.ValidateActor(actor);
+        if (!actor.IsAdmin) throw new UnauthorizedAccessException("Only an administrator can set provider permissions.");
+        if (destKind is not ("host" or "ip")) throw new ArgumentException("Provider permissions require an exact destination.", nameof(destKind));
+
+        (string kind, string host, int targetPort) = NetworkDestinationNormalizer.ValidateAndNormalizeRuleDestination(
+            destKind, destination, port, allowed: true, allowLan, actor.IsAdmin, allowLoopback: allowLan);
+
+        lock (gate)
+        {
+            NetworkAccessPolicyState current = Load();
+            IReadOnlyList<NetworkAccessRule> matching = NetworkAccessRuleMatcher.FindApplicable(RegistrableDomain, current, null, null, null, kind, host, targetPort);
+            if (current.Brake.System || matching.Any(rule => !rule.Allowed || (allowLan && !rule.AllowLan)))
+                return (current.Revision, "restricted");
+            if (matching.Count != 0 || seedRules.Any(rule => rule.ScopeKind == "system" && rule.Allowed
+                && rule.DestKind == kind && rule.Destination == host && rule.Port == targetPort && (!allowLan || rule.AllowLan)))
+                return (current.Revision, "allowed");
+            if (confirmedRevision != current.Revision)
+                return (current.Revision, "confirmation_required");
+            if (checkOnly)
+                return (current.Revision, "confirmed");
+
+            // Keep the permission check and the existing rule writer under the same policy lock.
+            (long revision, _) = SetRule(actor, new RuleWriteSpec("system", null, null, null, host, kind, targetPort, true, allowLan), current.Revision);
+            return (revision, "allowed");
+        }
+    }
+
     public (long Revision, NetworkAccessRuleView Rule) SetRule(
         NetworkAccessActor actor,
         RuleWriteSpec spec,
@@ -477,7 +541,8 @@ public sealed partial class NetworkAccessPolicyStore
                 spec.Allowed,
                 spec.Allowed && spec.AllowLan,
                 actor.IsAdmin,
-                allowLoopback: scopeKind == "system" && actor.IsAdmin && spec.Allowed && spec.AllowLan);
+                allowLoopback: scopeKind == "system" && actor.IsAdmin && spec.Allowed && spec.AllowLan,
+                registrableDomain: RegistrableDomain);
 
             string ruleId = NetworkAccessRule.ComputeId(
                 scopeKind,
@@ -669,8 +734,8 @@ public sealed partial class NetworkAccessPolicyStore
         string? compatProfile = null,
         DateTimeOffset? observedAtUtc = null)
     {
-        DateTimeOffset now = observedAtUtc ?? DateTimeOffset.UtcNow;
-        string id = NetworkAccessRequest.ComputeId(
+        DateTimeOffset now = observedAtUtc ?? timeProvider.GetUtcNow();
+        string scopeId = NetworkAccessRequest.ComputeId(
             actorKind,
             attribution,
             userId,
@@ -684,7 +749,8 @@ public sealed partial class NetworkAccessPolicyStore
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
-            NetworkAccessRequest? existing = current.Requests.FirstOrDefault(r => string.Equals(r.Id, id, StringComparison.Ordinal));
+            NetworkAccessRequest? existing = current.Requests.FirstOrDefault(r => r.Status == "pending" && !IsExpired(r, now)
+                && NetworkAccessRequest.ComputeId(r.ActorKind, r.Attribution, r.UserId, r.AgentId, r.ConnectorId, r.Origin, r.DestKind, r.Destination, r.Port) == scopeId);
             if (existing is { Status: "pending" })
             {
                 // Retries of an existing pending request increment attempts in memory without synchronous disk writes.
@@ -696,20 +762,21 @@ public sealed partial class NetworkAccessPolicyStore
                     LastSeenUtc = lastSeen,
                     CompatProfile = compatProfile ?? existing.CompatProfile,
                 };
-                var nextRequests = current.Requests.Select(r => string.Equals(r.Id, id, StringComparison.Ordinal) ? updatedPending : r).ToList();
+                var nextRequests = current.Requests.Select(r => string.Equals(r.Id, existing.Id, StringComparison.Ordinal) ? updatedPending : r).ToList();
                 EnqueuePendingRequestSave(current with { Requests = nextRequests });
                 lastRequestActivityWatermark = Math.Max(lastRequestActivityWatermark, checked(current.Revision + 1));
-                return (id, Overflow: false);
+                return (existing.Id, Overflow: false);
             }
 
+            string id = Guid.NewGuid().ToString("N");
             DateTimeOffset cutoff = now - resolvedRequestRetention;
             var activeRequests = current.Requests
-                .Where(r => !string.Equals(r.Id, id, StringComparison.Ordinal) && (r.Status == "pending" || r.LastSeenUtc >= cutoff))
+                .Where(r => !IsExpired(r, now) && (r.Status == "pending" || r.LastSeenUtc >= cutoff))
                 .ToList();
 
             NetworkAccessApprovalLimits limits = ResolveApprovalLimits(current);
-            int pendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending");
-            int userPendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending" && string.Equals(entry.Request.UserId, userId, StringComparison.Ordinal));
+            int pendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending" && !IsExpired(entry.Request, now));
+            int userPendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending" && !IsExpired(entry.Request, now) && string.Equals(entry.Request.UserId, userId, StringComparison.Ordinal));
             if (activeRequests.Count(r => r.Status == "pending" && string.Equals(r.UserId, userId, StringComparison.Ordinal)) + userPendingProbes >= limits.PerUser
                 || activeRequests.Count(r => r.Status == "pending") + pendingProbes >= limits.Global)
                 return (null, Overflow: true);
@@ -731,7 +798,7 @@ public sealed partial class NetworkAccessPolicyStore
                 }
             }
 
-            long attempts = existing is null ? 1 : (existing.Attempts == long.MaxValue ? long.MaxValue : existing.Attempts + 1);
+            long attempts = 1;
             var newRequest = new NetworkAccessRequest(
                 id,
                 userId,
@@ -742,7 +809,7 @@ public sealed partial class NetworkAccessPolicyStore
                 destKind,
                 port,
                 actorKind,
-                existing?.FirstSeenUtc ?? now,
+                now,
                 now,
                 attempts,
                 Status: "pending",
@@ -769,10 +836,10 @@ public sealed partial class NetworkAccessPolicyStore
         return EvaluatesToAllow(stateWithNewRule, req);
     }
 
-    private static bool EvaluatesToAllow(NetworkAccessPolicyState state, NetworkAccessRequest req)
+    private bool EvaluatesToAllow(NetworkAccessPolicyState state, NetworkAccessRequest req)
     {
         IReadOnlyList<NetworkAccessRule> matches = NetworkAccessRuleMatcher.FindApplicable(
-            state, req.UserId, req.AgentId, req.ConnectorId, req.DestKind, req.Destination, req.Port,
+            RegistrableDomain, state, req.UserId, req.AgentId, req.ConnectorId, req.DestKind, req.Destination, req.Port,
             allowAnyPublic: req.Origin == "container" && req.ConnectorId is not null);
         return !matches.Any(static rule => !rule.Allowed)
             && matches.Any(rule => rule.Allowed && (req.DestKind != "ip"
@@ -862,13 +929,17 @@ public sealed partial class NetworkAccessPolicyStore
         DateTimeOffset? observedAtUtc = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(containerId);
-        DateTimeOffset now = observedAtUtc ?? DateTimeOffset.UtcNow;
-        string id = NetworkAccessIdGenerator.ComputeBase32Id(
+        DateTimeOffset now = observedAtUtc ?? timeProvider.GetUtcNow();
+        string scopeId = NetworkAccessIdGenerator.ComputeBase32Id(
             $"probe|{containerId}|{attribution}|{userId ?? string.Empty}|{connectorId ?? string.Empty}|{origin}|{destKind}|{destination}|{port}");
 
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
+            foreach (string expired in probeRequestsById.Where(kv => IsExpired(kv.Value.Request, now)).Select(kv => kv.Key).ToArray())
+                probeRequestsById.Remove(expired);
+            string? existingId = probeRequestsById.Keys.FirstOrDefault(key => key == scopeId || key.StartsWith(scopeId + "-", StringComparison.Ordinal));
+            string id = existingId ?? scopeId + "-" + Guid.NewGuid().ToString("N");
             if (probeRequestsById.TryGetValue(id, out TemporaryProbePendingEntry? existing))
             {
                 long nextAttempts = existing.Request.Attempts == long.MaxValue ? long.MaxValue : existing.Request.Attempts + 1;
@@ -884,10 +955,10 @@ public sealed partial class NetworkAccessPolicyStore
             else
             {
                 NetworkAccessApprovalLimits limits = ResolveApprovalLimits(current);
-                int pendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending");
-                int userPendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending" && string.Equals(entry.Request.UserId, userId, StringComparison.Ordinal));
-                if (current.Requests.Count(r => r.Status == "pending") + pendingProbes >= limits.Global
-                    || current.Requests.Count(r => r.Status == "pending" && string.Equals(r.UserId, userId, StringComparison.Ordinal)) + userPendingProbes >= limits.PerUser)
+                int pendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending" && !IsExpired(entry.Request, now));
+                int userPendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending" && !IsExpired(entry.Request, now) && string.Equals(entry.Request.UserId, userId, StringComparison.Ordinal));
+                if (current.Requests.Count(r => r.Status == "pending" && !IsExpired(r, now)) + pendingProbes >= limits.Global
+                    || current.Requests.Count(r => r.Status == "pending" && !IsExpired(r, now) && string.Equals(r.UserId, userId, StringComparison.Ordinal)) + userPendingProbes >= limits.PerUser)
                     return null;
                 var req = new NetworkAccessRequest(
                     id,
@@ -986,6 +1057,9 @@ public sealed partial class NetworkAccessPolicyStore
             allow,
             allowLan,
             (userId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin));
+
+        if (request.Status != "pending" || IsExpired(request, timeProvider.GetUtcNow()))
+            throw new KeyNotFoundException("Request not found.");
 
         if (current.Revision != expectedRevision)
         {

@@ -29,6 +29,7 @@ public sealed partial class AuthEndpointActivationTests
         Assert.Equal("auth.kautuka.test", checker.Target!.Host);
         Assert.False(string.IsNullOrWhiteSpace(checker.Target.UserId));
         Assert.Equal("kautuka-google-mail", checker.Target.ConnectorId);
+        Assert.Equal("connector-oauth", checker.Target.Purpose);
         Assert.Null(checker.Target.AgentId);
         using JsonDocument payload = JsonDocument.Parse(await auth.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
         Assert.Equal("approval-1", payload.RootElement.GetProperty("requestId").GetString());
@@ -141,6 +142,11 @@ public sealed partial class AuthEndpointActivationTests
         using HttpResponseMessage result = await completion;
         Assert.Equal(cleanupFails ? HttpStatusCode.ServiceUnavailable : HttpStatusCode.Unauthorized, result.StatusCode);
         Assert.Equal(1, handler.Disconnects);
+        NetworkAccessScope scope = Assert.IsType<NetworkAccessScope>(handler.DisconnectScope);
+        Assert.Equal(fixture.GetUserId("admin"), scope.UserId);
+        Assert.Equal("kautuka-google-mail", scope.ConnectorId);
+        Assert.Equal("connector-oauth", scope.Purpose);
+        Assert.Equal("connector-auth", scope.Service);
         using var stateStore = new BrokerMailCredentialStore(storage);
         Assert.Null((await stateStore.ReadAsync(fixture.GetUserId("admin"), "kautuka-google-mail", CancellationToken.None)).Active);
     }
@@ -382,6 +388,7 @@ public sealed partial class AuthEndpointActivationTests
         public bool BlockAcknowledgement { get; init; }
         public string? AdmissionDenial { get; init; }
         public int Disconnects { get; private set; }
+        public NetworkAccessScope? DisconnectScope { get; private set; }
         private bool active;
         public bool AcknowledgementCommittedBeforeDisconnect { get; private set; }
         public TaskCompletionSource ExchangeStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -414,7 +421,13 @@ public sealed partial class AuthEndpointActivationTests
                 active = true; // The broker commits before its response is delayed.
                 if (BlockAcknowledgement) { AcknowledgementStarted.TrySetResult(); await ContinueAcknowledgement.Task.WaitAsync(ct); }
             }
-            if (path == "/installation/mail-disconnect") { Disconnects++; AcknowledgementCommittedBeforeDisconnect = active; active = false; }
+            if (path == "/installation/mail-disconnect")
+            {
+                Disconnects++;
+                DisconnectScope = NetworkAccessContext.Current;
+                AcknowledgementCommittedBeforeDisconnect = active;
+                active = false;
+            }
             if (path == "/installation/mail-cancel" && active) return new HttpResponseMessage(HttpStatusCode.Conflict);
             return new HttpResponseMessage(HttpStatusCode.NoContent);
         }

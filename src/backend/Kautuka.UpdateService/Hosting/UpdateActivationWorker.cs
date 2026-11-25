@@ -30,6 +30,9 @@ internal sealed class UpdateActivationWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (options.ApplianceReleaseId is not null)
+            return;
+
         while (!stoppingToken.IsCancellationRequested)
         {
             UpdateServiceContext? context = null;

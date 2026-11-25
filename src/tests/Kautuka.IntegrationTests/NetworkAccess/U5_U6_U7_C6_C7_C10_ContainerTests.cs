@@ -1402,6 +1402,26 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public void ApplianceConnectMountsOnlyListenerFilesAndAdmitsOnlyGatewaySource()
+    {
+        string certificates = Path.Combine(tempDir, "gateway-connect", "envoy");
+        IReadOnlyList<string> args = EgressTopologyManager.BuildEnvoyCreateArgs(
+            Path.Combine(tempDir, "envoy.yaml"), "sockets", "admin", gatewayConnectEnvoyDirectory: certificates);
+        Assert.Equal(new[] { "server.crt", "server.key", "gateway-ca.crt" }
+            .Select(file => $"{Path.Combine(certificates, file)}:/etc/kautuka-connect/{file}:ro,Z"),
+            args.Where(arg => arg.Contains(":/etc/kautuka-connect", StringComparison.Ordinal)));
+        Assert.DoesNotContain("--user", args);
+
+        const string sourceAndDestination = "ip saddr 10.247.0.4 ip daddr 10.247.0.2 tcp dport 15004";
+        string boundary = BoundaryRulesetRenderer.RenderBoundaryNft(includeGatewayConnect: true);
+        int exemption = boundary.IndexOf($"{sourceAndDestination} counter return", StringComparison.Ordinal);
+        int redirect = boundary.IndexOf("redirect to :15001", StringComparison.Ordinal);
+        Assert.True(exemption >= 0 && exemption < redirect);
+        Assert.Contains($"{sourceAndDestination} counter accept", boundary, StringComparison.Ordinal);
+        Assert.DoesNotContain("15004", BoundaryRulesetRenderer.RenderBoundaryNft(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void DnsAndEnvoyConfigsUseDedicatedReadOnlyRelabeledDirectoryMounts_WithNegativeControl()
     {
         string dnsDir = Path.Combine(tempDir, "nac", "dns");
@@ -2021,8 +2041,10 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
             .GetValue(manager)!);
     }
 
-    [Fact]
-    public async Task V7_54_ReconcileDoesNotLatchWhenPodInspectThrows_WithNegativeControl()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task V7_54_ReconcileRetriesAReportedPodInspectionTimeoutBeforeRecreating(bool reportTimeout)
     {
         int healthInspectCount = 0;
         var calls = new List<string>();
@@ -2038,6 +2060,11 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
                 healthInspectCount++;
                 if (healthInspectCount == 1)
                 {
+                    if (reportTimeout)
+                    {
+                        return Task.FromResult(new PodmanCommandResult(124, "", "", ProcessTerminationReason.TimedOut));
+                    }
+
                     return Task.FromException<PodmanCommandResult>(new TimeoutException("transient pod inspect timeout"));
                 }
             }
@@ -2063,6 +2090,13 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.False((bool)typeof(EgressTopologyManager)
             .GetField("topologyIncidentLatched", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
             .GetValue(manager)!);
+        if (reportTimeout)
+        {
+            Assert.DoesNotContain("pod rm -f kautuka-egress", calls);
+            await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+            Assert.False(manager.IsStartupGateOpen);
+        }
+
         Assert.Contains("pod rm -f kautuka-egress", calls);
     }
 
@@ -2650,23 +2684,24 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         await using var manager = new EgressTopologyManager(
             podman, new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-config-recreate-ip.json")),
             new WorkloadPostStartVerifier(podman), registry, tempDir);
-        System.Reflection.MethodInfo ensureConfig = typeof(EgressTopologyManager).GetMethod(
-            "EnsureExistingEgressPodUsesRenderedConfigAsync",
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
-            ?? throw new InvalidOperationException("EnsureExistingEgressPodUsesRenderedConfigAsync method was not found.");
-
-        await ((Task)ensureConfig.Invoke(manager, [boundary, envoy, corefile, false, TestContext.Current.CancellationToken])!).ConfigureAwait(false);
+        await manager.EnsureExistingEgressPodUsesRenderedConfigAsync(
+            boundary, envoy, corefile, null, false, TestContext.Current.CancellationToken);
         Assert.Contains(calls, args => args.SequenceEqual(["pod", "rm", "-f", EgressTopologyManager.EgressPodName]));
 
         calls.Clear();
         await File.WriteAllTextAsync(Path.Combine(nac, "dns", "Corefile"), corefile, TestContext.Current.CancellationToken);
-        await ((Task)ensureConfig.Invoke(manager, [boundary, envoy, corefile, false, TestContext.Current.CancellationToken])!).ConfigureAwait(false);
+        await manager.EnsureExistingEgressPodUsesRenderedConfigAsync(
+            boundary, envoy, corefile, null, false, TestContext.Current.CancellationToken);
         Assert.DoesNotContain(calls, args => args.SequenceEqual(["pod", "rm", "-f", EgressTopologyManager.EgressPodName]));
+
+        await manager.EnsureExistingEgressPodUsesRenderedConfigAsync(
+            boundary, envoy, corefile, "synthetic-new-credential", false, TestContext.Current.CancellationToken);
+        Assert.Contains(calls, args => args.SequenceEqual(["pod", "rm", "-f", EgressTopologyManager.EgressPodName]));
 
         await File.WriteAllTextAsync(Path.Combine(nac, "dns", "Corefile"), "old loaded config again", TestContext.Current.CancellationToken);
         failRemoval = true;
-        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            await (Task)ensureConfig.Invoke(manager, [boundary, envoy, corefile, false, TestContext.Current.CancellationToken])!);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => manager.EnsureExistingEgressPodUsesRenderedConfigAsync(
+            boundary, envoy, corefile, null, false, TestContext.Current.CancellationToken));
         Assert.False(manager.IsStartupGateOpen);
     }
 

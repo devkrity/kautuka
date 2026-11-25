@@ -16,6 +16,25 @@ bash "$script_dir/generate-linux-installer.sh" \
   --manifest-url 'https://github.com/devkrity/kautuka/releases/download/v0.1.20-preview.1/kautuka-platform-release.json' \
   --manifest-public-key "$tmp/public.pem"
 bash -n "$tmp/generated-kautuka-install-linux.sh"
+bash "$script_dir/generate-linux-installer.sh" \
+  --output "$tmp/wsl-bootstrap.sh" --version '0.1.20-preview.1' \
+  --release-channel preview --release-tag 'v0.1.20-preview.1' --manifest-public-key "$tmp/public.pem"
+(
+  source "$tmp/wsl-bootstrap.sh"
+  require_root() { :; }
+  require_command() { :; }
+  resolve_github_release_candidate() { fail 'WSL bootstrap must not discover the latest release'; }
+  curl() {
+    [[ "${!#}" == 'https://github.com/devkrity/kautuka/releases/download/v0.1.20-preview.1/kautuka-platform-release.json' ]] ||
+      fail 'WSL bootstrap requested an unexpected URL'
+    printf '%s\n' '{"releaseTag":"v0.1.20-preview.2","releaseId":"v0.1.20-preview.2","version":"0.1.20-preview.2","channel":"preview","sourceSha":"0123456789012345678901234567890123456789","signature":{"url":"https://github.com/devkrity/kautuka/releases/download/v0.1.20-preview.2/kautuka-platform-release.sig"},"artifacts":[{"name":"kautuka-linux-amd64.tar.gz","url":"https://github.com/devkrity/kautuka/releases/download/v0.1.20-preview.2/kautuka-linux-amd64.tar.gz"}]}' > "${@: -2:1}"
+  }
+  base_install_main --yes
+) > "$tmp/wsl-bootstrap.log" 2>&1 && {
+  echo 'error: WSL bootstrap accepted a different release.' >&2
+  exit 1
+}
+grep -q 'signed release manifest version does not match requested version' "$tmp/wsl-bootstrap.log"
 if sh "$tmp/generated-kautuka-install-linux.sh" --help >"$tmp/wrong-shell.stdout" 2>"$tmp/wrong-shell.stderr"; then
   echo 'error: generated Linux installer unexpectedly ran under sh.' >&2
   exit 1
@@ -32,6 +51,60 @@ mutation_line="$(grep -n 'ensure_service_account "$service_user"' "$tmp/generate
   echo 'error: generated installer does not verify the signed release before account creation.' >&2
   exit 1
 }
+
+handoff_line="$(grep -nF 'install_verified_release_metadata "$version_root" "$manifest_path" "$signature_path" "$appliance_image_payload"' "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
+activation_line="$(grep -nF 'mv -Tf "$next_link" "$current_link"' "$tmp/generated-kautuka-install-linux.sh" | tail -n 1 | cut -d: -f1)"
+[[ "$handoff_line" =~ ^[0-9]+$ && "$activation_line" =~ ^[0-9]+$ && "$verification_line" -lt "$handoff_line" && "$handoff_line" -lt "$activation_line" ]] || {
+  echo 'error: Linux installer must pass verified release bytes to Manager before switching versions.' >&2
+  exit 1
+}
+image_validation_line="$(grep -nF 'validate_appliance_image_payload "$tmp_root/extracted/service-images"' "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
+image_handoff_line="$(grep -nF 'install_appliance_image_payload "$tmp_root/extracted/service-images" "$version_root"' "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
+image_prepare_line="$(grep -nF '"$version_root/kautuka-manager" --prepare-appliance-images --candidate-version "$version"' "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
+appliance_stop_line="$(grep -nF 'stop_existing_kautuka_runtime "$service_user" "$service_home" "$xdg_runtime_dir"' "$tmp/generated-kautuka-install-linux.sh" | tail -n 1 | cut -d: -f1)"
+helper_install_line="$(grep -nF 'install_apply_release_helper "$tmp_root/extracted"' "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
+[[ "$verification_line" -lt "$image_validation_line" && "$image_validation_line" -lt "$image_handoff_line" &&
+   "$image_handoff_line" -lt "$image_prepare_line" && "$image_prepare_line" -lt "$appliance_stop_line" &&
+   "$appliance_stop_line" -lt "$helper_install_line" && "$helper_install_line" -lt "$activation_line" ]] || {
+  echo 'error: Linux installer must prepare signed appliance images before stopping services and selecting the release.' >&2
+  exit 1
+}
+native_hook_check_line="$(grep -nF "fail 'signed appliance release requires an executable native OCI hook'" "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
+native_hook_registration_line="$(grep -nF " '/opt/kautuka/manager/current/scripts/kautuka-oci-hook' " "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
+[[ "$image_handoff_line" -lt "$native_hook_check_line" && "$native_hook_check_line" -lt "$appliance_stop_line" &&
+   "$activation_line" -lt "$native_hook_registration_line" ]] || {
+  echo 'error: Linux installer must validate the native hook before shutdown and register it for the selected release.' >&2
+  exit 1
+}
+user_target_line="$(grep -nF 'install_user_target_unit "$unit_dir" "$activation_target_units"' "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
+user_target_owner_line="$(grep -nF 'chown -R "$service_user:$service_group" "$unit_dir"' "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
+appliance_enable_line="$(grep -nF 'systemctl --user enable --now "${installed_units[@]}"' "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
+[[ "$user_target_line" -lt "$user_target_owner_line" && "$user_target_owner_line" -lt "$appliance_enable_line" ]]
+(
+  source "$tmp/generated-kautuka-install-linux.sh"
+  getenforce() { echo Enforcing; }
+  restorecon() { return 0; }
+  semanage() { printf '%s\n' "$*" >> "$tmp/selinux-contexts"; }
+  ensure_selinux_runtime_exec_policy true
+  grep -Fxq 'fcontext -a -t container_file_t /run/kautuka-db-writer\.lock' "$tmp/selinux-contexts"
+  grep -Fxq 'fcontext -a -t container_file_t /run/kautuka-helper-run\.lock' "$tmp/selinux-contexts"
+  grep -Fq "'z /run/kautuka-helper-run.lock - - - -'" "$tmp/generated-kautuka-install-linux.sh"
+  grep -Fq "'z /run/kautuka-db-writer.lock - - - -'" "$tmp/generated-kautuka-install-linux.sh"
+  mkdir "$tmp/hooks"
+  install_oci_hook_registration "$tmp/hooks" '/opt/kautuka/manager/current/scripts/kautuka-oci-hook' "$(id -u)" "$(id -g)"
+  python3 - "$tmp/hooks/kautuka_hook.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    assert json.load(stream) == {
+        "version": "1.0.0",
+        "hook": {"path": "/opt/kautuka/manager/current/scripts/kautuka-oci-hook", "timeout": 45},
+        "when": {"always": True},
+        "stages": ["createRuntime"],
+    }
+PY
+)
 
 mock_bin="$tmp/mock-bin"
 mkdir -p "$mock_bin"
@@ -516,9 +589,69 @@ if ! env GENERATED_SOCKET_INSTALLER="$socket_installer" SOCKET_TMPFILES="$socket
   grep -q "^d /run/kautuka/networkaccess-envoy 0710 kautuka kautuka -$" "$SOCKET_TMPFILES" || { cat "$SOCKET_TMPFILES" >&2; exit 1; }
   grep -q "^d /run/kautuka/manager 2750 kautuka kautuka-manager-client -$" "$SOCKET_TMPFILES" || { cat "$SOCKET_TMPFILES" >&2; exit 1; }
   grep -q "^d /run/kautuka/updateservice 2750 kautuka kautuka-updateservice-client -$" "$SOCKET_TMPFILES" || { cat "$SOCKET_TMPFILES" >&2; exit 1; }
+  install_socket_runtime_dirs kautuka kautuka true
+  for role in manager updateservice gateway credentialshost channelhost; do
+    grep -Fxq "d /run/kautuka/$role 0700 kautuka kautuka -" "$SOCKET_TMPFILES"
+  done
+  if grep -Eq "^d /run/kautuka/.* 2750 " "$SOCKET_TMPFILES"; then exit 1; fi
 '; then
   echo 'error: generated installer did not provision clean-host client socket groups before tmpfiles validation.' >&2
   exit 1
 fi
+
+(
+  source "$tmp/generated-kautuka-install-linux.sh"
+  write_manager_user_unit "$tmp/kautuka-manager.service" /opt/kautuka/manager /var/lib/kautuka false true 23084
+  grep -Fxq 'Environment=Kautuka__Appliance__Enabled=true' "$tmp/kautuka-manager.service"
+  grep -Fxq 'Environment=Kautuka__Appliance__PublishedWebPort=23084' "$tmp/kautuka-manager.service"
+  get_service_user_home() { echo /var/lib/kautuka; }
+  run_as_service_user() {
+    shift 3
+    if [[ "$1" == systemctl && "${!#}" == 'kautuka-manager.service' ]]; then
+      echo active
+    else
+      [[ "$1" == /opt/kautuka/manager/current/kautuka-manager && "$2" == --check-appliance-ready ]]
+    fi
+  }
+  systemctl() { echo "unexpected legacy host unit query: $*" >&2; exit 99; }
+  curl() {
+    local url="${!#}"
+    while [[ "$1" != --output ]]; do shift; done
+    case "$url" in
+      http://localhost:23084/api/runtime/system-health)
+        echo '{"lifecycle":{"coreReady":true},"workspace":{"status":"healthy"}}' > "$2" ;;
+      http://localhost:23084/api/auth/setup/status)
+        echo '{"needsSetup":true}' > "$2" ;;
+      *) return 1 ;;
+    esac
+    printf '200'
+  }
+  confirm_first_admin_setup() {
+    [[ "$1" == 'http://localhost:23084' && "$2" == '/var/lib/kautuka/gateway/setup-token' ]] || return 1
+    touch "$tmp/appliance-setup-ready"
+  }
+  wait_for_web_ui "$(id -un)" http://localhost:23084 2 true /opt/kautuka/manager/current/kautuka-manager
+  [[ -f "$tmp/appliance-setup-ready" ]]
+  confirm_first_admin_setup() { fail 'delegated admin setup must not prompt or read the token'; }
+  wait_for_web_ui "$(id -un)" http://localhost:23084 2 true /opt/kautuka/manager/current/kautuka-manager true
+)
+
+(
+  source "$tmp/wsl-bootstrap.sh"
+  mkdir -p "$tmp/user.slice/user-997.slice"
+  id() { [[ "$1" == '-u' && "$2" == 'kautuka' ]] && printf '997\n'; }
+  getent() { return 2; }
+  systemctl() { return 3; }
+  usermod() {
+    [[ "$1" == '--uid' && "$2" -ge 20000 && "$2" -le 52767 && "$3" == 'kautuka' ]]
+    printf '%s\n' "$2" > "$tmp/assigned-uid"
+  }
+  printf 'populated 0\n' > "$tmp/user.slice/user-997.slice/cgroup.events"
+  avoid_wsl_service_uid_conflict kautuka "$tmp/user.slice"
+  [[ ! -e "$tmp/assigned-uid" ]]
+  printf 'populated 1\n' > "$tmp/user.slice/user-997.slice/cgroup.events"
+  avoid_wsl_service_uid_conflict kautuka "$tmp/user.slice"
+  [[ -s "$tmp/assigned-uid" ]]
+)
 
 echo 'Linux installer trust checks rejected tampering, unsigned manifests, digest mismatch, and candidate identity mismatches for both production-default and local-feed wrappers; neither wrapper mutated before authentication, and each valid path reached its mocked first persistent boundary.'

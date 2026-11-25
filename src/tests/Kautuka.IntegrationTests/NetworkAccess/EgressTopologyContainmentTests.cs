@@ -66,8 +66,10 @@ public sealed class EgressTopologyContainmentTests
         finally { Directory.Delete(root, recursive: true); }
     }
 
-    [Fact]
-    public async Task ValidEmptyPodmanSnapshotDeregistersTerminatedWorkload()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ValidEmptyPodmanSnapshotDeregistersOnlyWorkloadsRegisteredBeforeListing(bool registerDuringListing)
     {
         string root = Path.Combine(Path.GetTempPath(), $"nac-empty-ps-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
@@ -76,14 +78,59 @@ public sealed class EgressTopologyContainmentTests
             var registry = new WorkloadRegistry();
             registry.Register(new RegistryEntry("10.247.1.41", "alice", "agent", "running-container", "agent-sandbox", null,
                 "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
-            var podman = new PodmanCommandRunner((args, _) => Task.FromResult(new PodmanCommandResult(
-                0, args.SequenceEqual(["ps", "-a", "--no-trunc", "--format", "json"]) ? "[]" : string.Empty, string.Empty, ProcessTerminationReason.Completed)));
+            registry.Register(new RegistryEntry("10.247.1.43", null, null, "starting-builder", "builder", null,
+                "builder", "proxy-only", "none", null, DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry("10.247.1.44", null, null, new string('a', 64), "builder", null,
+                "builder", "proxy-only", "none", null, DateTimeOffset.UtcNow));
+            var podman = new PodmanCommandRunner((args, _) =>
+            {
+                Assert.Equal(["ps", "-a", "--no-trunc", "--format", "json"], args);
+                if (registerDuringListing)
+                {
+                    registry.Register(new RegistryEntry("10.247.1.42", "alice", "agent", "new-sandbox", "agent-sandbox", null,
+                        "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
+                }
+
+                return Task.FromResult(new PodmanCommandResult(0, "[]", string.Empty, ProcessTerminationReason.Completed));
+            });
             await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(root, "ip.json")),
                 new WorkloadPostStartVerifier(podman), registry, root);
             MethodInfo method = typeof(EgressTopologyManager).GetMethod("ReconcileWorkloadRegistryAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
             bool completed = await (Task<bool>)method.Invoke(manager, [registry, TestContext.Current.CancellationToken])!;
             Assert.True(completed);
             Assert.Null(registry.FindByIp("10.247.1.41"));
+            Assert.Equal(registerDuringListing, registry.FindByIp("10.247.1.42") is not null);
+            Assert.Equal("starting-builder", registry.FindByIp("10.247.1.43")?.ContainerId);
+            Assert.Null(registry.FindByIp("10.247.1.44"));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public async Task StoppedPackageProxySignalsTheWorkspaceSupervisorOnce()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nac-package-proxy-recovery-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string containerId = new('a', 64);
+            var registry = new WorkloadRegistry();
+            var store = new WorkspaceDesiredStateStore();
+            var podman = new PodmanCommandRunner((_, _) => Task.FromResult(new PodmanCommandResult(
+                0, $$"""[{"Id":"{{containerId}}","State":"exited"}]""", "")));
+            await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(root, "ip.json")),
+                new WorkloadPostStartVerifier(podman), registry, root, desiredStateStore: store);
+            manager.RegisterVerifiedPackageProxyContainer(containerId);
+            manager.SetPackageProxyReady(true);
+            MethodInfo reconcile = typeof(EgressTopologyManager).GetMethod("ReconcileWorkloadRegistryAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+            Assert.True(await (Task<bool>)reconcile.Invoke(manager, [registry, TestContext.Current.CancellationToken])!);
+            Assert.False(manager.IsPackageProxyReady);
+            Assert.True(store.Updates.TryRead(out WorkspaceReconcileTriggerKind trigger));
+            Assert.Equal(WorkspaceReconcileTriggerKind.RecoveryRetry, trigger);
+
+            Assert.True(await (Task<bool>)reconcile.Invoke(manager, [registry, TestContext.Current.CancellationToken])!);
+            Assert.False(store.Updates.TryRead(out _));
         }
         finally { Directory.Delete(root, recursive: true); }
     }
@@ -303,7 +350,84 @@ public sealed class EgressTopologyContainmentTests
         }
     }
 
-    private static async Task PrepareSourceDriftAsync(EgressTopologyManager manager, string root)
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task EgressInspectionTimeoutReverifiesBeforeReopeningTheExistingPod(bool timeOutBoundaryInit, bool expireSharedDeadline)
+    {
+        DirectoryInfo temp = Directory.CreateTempSubdirectory("nac-retry-inspect-");
+        try
+        {
+            const string pod = """
+                {"State":"Running","InfraContainerID":"infra","Containers":[
+                  {"Name":"kautuka-infra","State":"running"},
+                  {"Name":"kautuka-egress-boundary","State":"exited"},
+                  {"Name":"kautuka-egress-dns","State":"running"},
+                  {"Name":"kautuka-egress-envoy","State":"running"}]}
+                """;
+            const string ipv4 = """{"nftables":[{"rule":{"comment":"private_reject","expr":[]}},{"rule":{"comment":"wl_net_reject","expr":[]}}]}""";
+            const string ipv6 = """{"nftables":[{"rule":{"comment":"ipv6_drop_pod","expr":[]}}]}""";
+            bool injectedTimeout = false;
+            int nftReads = 0;
+            int podReads = 0;
+            CancellationToken? podInspectionToken = null;
+            var registry = new WorkloadRegistry();
+            var podman = new PodmanCommandRunner(async (args, token) =>
+            {
+                bool podInspection = args.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName, "--format", "json"]);
+                bool boundaryInspection = args.SequenceEqual(["inspect", "kautuka-egress-boundary", "--format", "json"]);
+                if (podInspection)
+                {
+                    podReads++;
+                    if (token != TestContext.Current.CancellationToken)
+                        podInspectionToken = token;
+                }
+                if (boundaryInspection)
+                    Assert.Equal(podInspectionToken, token);
+                if (!injectedTimeout && (timeOutBoundaryInit ? boundaryInspection : podInspection))
+                {
+                    injectedTimeout = true;
+                    if (expireSharedDeadline)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(5), token);
+                        Assert.Fail("The shared egress inspection deadline did not cancel Podman.");
+                    }
+                    return new PodmanCommandResult(124, "", "", ProcessTerminationReason.TimedOut);
+                }
+
+                string output = args[0] switch
+                {
+                    "ps" => "[]",
+                    "pod" when podInspection => pod,
+                    "inspect" when boundaryInspection => """{"State":{"Status":"exited","ExitCode":0}}""",
+                    "inspect" when args[1] == "infra" => """{"State":{"Pid":123}}""",
+                    "machine" when args[3].Contains("nft -j list table", StringComparison.Ordinal) => ++nftReads == 1 ? ipv4 : ipv6,
+                    _ => throw new InvalidOperationException("Unexpected Podman command: " + string.Join(' ', args)),
+                };
+                return new PodmanCommandResult(0, output, "");
+            });
+            await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(temp.FullName, "ip.json")),
+                new WorkloadPostStartVerifier(podman), registry, temp.FullName, windowsPodmanMachineName: "fixture",
+                windowsPodmanHookStateDirectory: "/fixture/nac", inspectionTimeoutSeconds: expireSharedDeadline ? 1 : 30);
+            await PrepareSourceDriftAsync(manager, temp.FullName, introduceDrift: false);
+            SetPrivateField(manager, "expectedBoundaryRulesetHash", EgressTopologyManager.ComputeBoundaryRulesetHash(ipv4, ipv6));
+
+            await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+            Assert.True(injectedTimeout);
+            Assert.False(manager.IsStartupGateOpen);
+            Assert.Equal(0, nftReads);
+
+            await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+            Assert.True(manager.IsStartupGateOpen);
+            Assert.Equal(2, nftReads);
+            Assert.Equal(2, podReads);
+        }
+        finally { temp.Delete(recursive: true); }
+    }
+
+    private static async Task PrepareSourceDriftAsync(EgressTopologyManager manager, string root, bool introduceDrift = true)
     {
         string rendered = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants: true);
         string boundaryDirectory = Path.Combine(root, "nac", "boundary");
@@ -316,7 +440,7 @@ public sealed class EgressTopologyContainmentTests
         string corefile = BoundaryRulesetRenderer.RenderCorefile(EgressTopologyManager.EgressPodIp);
         await File.WriteAllTextAsync(
             Path.Combine(boundaryDirectory, "boundary.nft"),
-            rendered + "# drift",
+            introduceDrift ? rendered + "# drift" : rendered,
             TestContext.Current.CancellationToken);
         await File.WriteAllTextAsync(Path.Combine(envoyDirectory, "envoy.yaml"), envoy, TestContext.Current.CancellationToken);
         await File.WriteAllTextAsync(Path.Combine(dnsDirectory, "Corefile"), corefile, TestContext.Current.CancellationToken);

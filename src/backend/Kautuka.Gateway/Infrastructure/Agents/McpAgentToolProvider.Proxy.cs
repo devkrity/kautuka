@@ -28,7 +28,7 @@ internal sealed partial class McpAgentToolProvider
         List<(McpServerDefinition Definition, ResolvedAgentConnectorBinding Binding)> activeDefs = bindings
             .Select(binding => (Definition: config.McpServers.FirstOrDefault(s =>
                 string.Equals(s.Id, binding.ConnectorId, StringComparison.Ordinal)), Binding: binding))
-            .Where(static pair => pair.Definition is not null && (pair.Definition.Enabled || pair.Definition.IsInternalSystemConnector))
+            .Where(pair => pair.Definition is not null && IsConnectorEnabled(pair.Definition, context.UserId))
             .Where(pair => GatewayOwnershipAccess.CallerCanUse(context.UserId, pair.Definition!.Scope, pair.Definition.OwnerUserId))
             .Select(static pair => (pair.Definition!, pair.Binding))
             .ToList();
@@ -103,7 +103,7 @@ internal sealed partial class McpAgentToolProvider
 
             McpServerDefinition? server = config.McpServers.FirstOrDefault(candidate =>
                 string.Equals(candidate.Id, group.Key, StringComparison.Ordinal));
-            if (server is null || !(server.Enabled || server.IsInternalSystemConnector)
+            if (server is null || !IsConnectorEnabled(server, context.UserId)
                 || !GatewayOwnershipAccess.CallerCanUse(context.UserId, server.Scope, server.OwnerUserId))
             {
                 continue;
@@ -159,7 +159,7 @@ internal sealed partial class McpAgentToolProvider
                 McpServerDefinition serverDef = config.McpServers.FirstOrDefault(candidate =>
                     string.Equals(candidate.Id, connectorId, StringComparison.Ordinal))
                     ?? throw new InvalidOperationException($"MCP connector '{connectorId}' is no longer registered.");
-                if (!(serverDef.Enabled || serverDef.IsInternalSystemConnector)
+                if (!IsConnectorEnabled(serverDef, context.UserId)
                     || !GatewayOwnershipAccess.CallerCanUse(context.UserId, serverDef.Scope, serverDef.OwnerUserId))
                     throw new InvalidOperationException($"MCP connector '{connectorId}' is not available to this caller.");
 

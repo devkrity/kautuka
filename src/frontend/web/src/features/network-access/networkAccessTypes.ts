@@ -21,6 +21,7 @@ export interface NetworkAccessRequestDto {
   compatibilityMode?: boolean;
   waitingForAdmin?: boolean;
   ownerCanApproveOwn?: boolean;
+  baseDomain?: string | null;
 }
 
 export interface UserPrivilegesSummaryDto {
@@ -52,7 +53,7 @@ export interface NetworkAccessRuleDto {
   connectorId?: string;
   connectorDisplayName?: string;
   destination: string;
-  destKind: 'host' | 'ip' | 'any-public';
+  destKind: 'host' | 'ip' | 'domain' | 'any-public';
   port: number;
   allowed: boolean;
   allowLan: boolean;
@@ -63,11 +64,13 @@ export interface NetworkAccessRuleDto {
   decidedAtUtc: string;
   openInternetBadge: boolean;
   protectedFromUser?: boolean;
+  setupService?: string;
 }
 
 export interface NetworkRulesResponseDto {
   revision: number;
   rules: NetworkAccessRuleDto[];
+  services?: { serviceId: string; total: number; granted: number; effective: number }[];
 }
 
 export interface RequestDecisionDto {
@@ -75,6 +78,7 @@ export interface RequestDecisionDto {
   scope?: 'agent' | 'user' | 'connector' | 'system';
   allowLan?: boolean;
   expectedRevision: number;
+  includeSubdomains?: boolean;
 }
 
 export interface RequestDecisionResponseDto {
@@ -89,19 +93,12 @@ export interface CreateOrUpdateRuleDto {
   agentId?: string;
   connectorId?: string;
   destination: string;
-  destKind: 'host' | 'ip' | 'any-public';
+  destKind: 'host' | 'ip' | 'domain' | 'any-public';
   port: number;
   allowed: boolean;
   allowLan?: boolean;
   expectedRevision: number;
   replaceRuleId?: string;
-}
-
-export interface ProviderNetworkTarget {
-  host: string;
-  port: number;
-  destKind: 'host' | 'ip';
-  allowLan: boolean;
 }
 
 export interface NetworkAccessActivityDto {

@@ -13,9 +13,20 @@ public static class WorkloadRulesetRenderer
     public const string WorkloadTableName = "kautuka_workload";
     public const string EgressPodIp = "10.247.0.2";
     public const string PackageProxyIp = "10.247.0.3";
+    public const string ApplianceGatewayIp = "10.247.0.4";
+    public const string ApplianceWebHostIp = "10.247.0.5";
+    public const string ObservabilityIp = "10.247.0.6";
+    public const string ApplianceCredentialsHostIp = "10.247.0.7";
+    public const string ApplianceChannelHostIp = "10.247.0.8";
+    public const string ApplianceUpdateServiceIp = "10.247.0.9";
+    public const int TelemetryIngressPort = 15005;
+    public const int ObservabilityPort = 5080;
+    public const int WebHostPort = 20229;
+    public const int GatewayConnectPort = 15004;
     public const int PackageProxyPort = 20101;
     public const int EnvoyPort = 15001;
     public const int DnsPort = 53;
+    private const string ProviderDnsAnswer = "198.18.250.250";
 
     public static readonly IReadOnlyList<string> RequiredWorkloadComments =
     [
@@ -28,17 +39,50 @@ public static class WorkloadRulesetRenderer
         "final_drop",
     ];
 
+    public static readonly IReadOnlyList<string> RequiredApplianceComments =
+    ["input_ipv6_drop", "input_drop", "ipv6_drop", "spoof_drop", "final_drop"];
+
+    private static readonly (string Role, string Address)[] ApplianceAddresses =
+    [
+        ("appliance-gateway", ApplianceGatewayIp),
+        ("appliance-webhost", ApplianceWebHostIp),
+        ("appliance-observability", ObservabilityIp),
+        ("appliance-credentialshost", ApplianceCredentialsHostIp),
+        ("appliance-channelhost", ApplianceChannelHostIp),
+        ("appliance-updateservice", ApplianceUpdateServiceIp),
+    ];
+
+    public static string? FindApplianceAddress(string? role)
+        => Array.Find(ApplianceAddresses, entry => entry.Role == role).Address;
+
+    public static string? FindApplianceRole(string address)
+        => Array.Find(ApplianceAddresses, entry => entry.Address == address).Role;
+
     /// <summary>
     /// Renders the idempotent, atomic workload ruleset for a specific allocated IPv4 address.
     /// Matches <c>kautuka_hook.py:render_ruleset</c> byte-for-byte.
     /// </summary>
-    public static string Render(string allocatedIp, bool isPackageProxy = false)
+    public static string Render(string allocatedIp, bool isPackageProxy = false, string? applianceRole = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
         string normalizedIp = allocatedIp.Trim();
         if (!IPAddress.TryParse(normalizedIp, out IPAddress? parsed) || parsed.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
         {
             throw new ArgumentException($"Invalid workload IPv4 address: '{allocatedIp}'.", nameof(allocatedIp));
+        }
+
+        if (applianceRole is not null)
+        {
+            ValidateApplianceIdentity(applianceRole, normalizedIp, isPackageProxy);
+            return applianceRole switch
+            {
+                "appliance-gateway" => RenderApplianceGateway(),
+                "appliance-webhost" => RenderApplianceWebHost(),
+                "appliance-observability" => RenderObservability(),
+                "appliance-credentialshost" => RenderTelemetryOnly(normalizedIp),
+                "appliance-channelhost" or "appliance-updateservice" => RenderTelemetryOnly(normalizedIp, providerTls: true),
+                _ => throw new ArgumentException("Unknown appliance network role.", nameof(applianceRole)),
+            };
         }
 
         var sb = new StringBuilder();
@@ -75,12 +119,124 @@ public static class WorkloadRulesetRenderer
         return sb.ToString();
     }
 
-    public static string ComputeExpectedCanonicalRulesetHash(string allocatedIp, bool isPackageProxy = false)
+    private static string RenderApplianceGateway() => $$"""
+        table inet kautuka_workload
+        delete table inet kautuka_workload
+        table inet kautuka_workload {
+          chain input { type filter hook input priority 0; policy drop;
+            meta nfproto ipv6 counter drop comment "input_ipv6_drop"
+            iifname "lo" accept
+            ct state established,related accept
+            counter drop comment "input_drop"
+          }
+          chain output { type filter hook output priority 0; policy drop;
+            meta nfproto ipv6 counter drop comment "ipv6_drop"
+            oifname "lo" accept
+            oifname != "lo" ip saddr != {{ApplianceGatewayIp}} counter drop comment "spoof_drop"
+            ip daddr {{EgressPodIp}} tcp dport {{GatewayConnectPort}} accept
+            ip daddr {{EgressPodIp}} tcp dport {{TelemetryIngressPort}} accept
+            ip daddr {{EgressPodIp}} meta l4proto { udp, tcp } th dport {{DnsPort}} accept
+            counter drop comment "final_drop"
+          }
+        }
+
+        """;
+
+    private static string RenderApplianceWebHost() => $$"""
+        table inet kautuka_workload
+        delete table inet kautuka_workload
+        table inet kautuka_workload {
+          chain input { type filter hook input priority 0; policy drop;
+            meta nfproto ipv6 counter drop comment "input_ipv6_drop"
+            iifname "lo" accept
+            ct state established accept
+            tcp dport {{WebHostPort}} accept
+            counter drop comment "input_drop"
+          }
+          chain output { type filter hook output priority 0; policy drop;
+            meta nfproto ipv6 counter drop comment "ipv6_drop"
+            oifname "lo" accept
+            oifname != "lo" ip saddr != {{ApplianceWebHostIp}} counter drop comment "spoof_drop"
+            ct state established accept
+            ip daddr {{EgressPodIp}} tcp dport {{TelemetryIngressPort}} accept
+            counter drop comment "final_drop"
+          }
+        }
+
+        """;
+    private static string RenderObservability() => $$"""
+        table inet kautuka_workload
+        delete table inet kautuka_workload
+        table inet kautuka_workload {
+          chain input { type filter hook input priority 0; policy drop;
+            meta nfproto ipv6 counter drop comment "input_ipv6_drop"
+            iifname "lo" accept
+            ip saddr {{EgressPodIp}} ip daddr {{ObservabilityIp}} tcp dport {{ObservabilityPort}} accept
+            counter drop comment "input_drop"
+          }
+          chain output { type filter hook output priority 0; policy drop;
+            meta nfproto ipv6 counter drop comment "ipv6_drop"
+            oifname "lo" accept
+            oifname != "lo" ip saddr != {{ObservabilityIp}} counter drop comment "spoof_drop"
+            ct state established accept
+            counter drop comment "final_drop"
+          }
+        }
+
+        """;
+
+    private static string RenderTelemetryOnly(string address, bool providerTls = false)
+    {
+        string providerRules = providerTls
+            ? $"    ip daddr {EgressPodIp} meta l4proto {{ udp, tcp }} th dport {DnsPort} accept\n    ip daddr {ProviderDnsAnswer} tcp dport 443 accept\n"
+            : string.Empty;
+        return $$"""
+        table inet kautuka_workload
+        delete table inet kautuka_workload
+        table inet kautuka_workload {
+          chain input { type filter hook input priority 0; policy drop;
+            meta nfproto ipv6 counter drop comment "input_ipv6_drop"
+            iifname "lo" accept
+            ct state established accept
+            counter drop comment "input_drop"
+          }
+          chain output { type filter hook output priority 0; policy drop;
+            meta nfproto ipv6 counter drop comment "ipv6_drop"
+            oifname "lo" accept
+            oifname != "lo" ip saddr != {{address}} counter drop comment "spoof_drop"
+            ip daddr {{EgressPodIp}} tcp dport {{TelemetryIngressPort}} accept
+        {{providerRules}}    counter drop comment "final_drop"
+          }
+        }
+
+        """;
+    }
+
+    public static string ComputeExpectedCanonicalRulesetHash(string allocatedIp, bool isPackageProxy = false, string? applianceRole = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
+        if (applianceRole is not null)
+        {
+            ValidateApplianceIdentity(applianceRole, allocatedIp, isPackageProxy);
+            string profile = applianceRole switch
+            {
+                "appliance-credentialshost" => "appliance_telemetry_only",
+                "appliance-updateservice" => "appliance_channelhost",
+                _ => applianceRole.Replace('-', '_'),
+            };
+            string golden = BoundaryRulesetRenderer.ResolveTemplate($"kautuka_{profile}.nft.json.tmpl")
+                .Replace("{{IP}}", allocatedIp, StringComparison.Ordinal);
+            return BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(golden, RequiredApplianceComments, allocatedIp);
+        }
         string templateName = isPackageProxy ? "kautuka_package_proxy.nft.json.tmpl" : "kautuka_workload.nft.json.tmpl";
         string tmpl = BoundaryRulesetRenderer.ResolveTemplate(templateName);
         string goldenJson = tmpl.Replace("{{IP}}", allocatedIp.Trim(), StringComparison.Ordinal);
         return BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(goldenJson, RequiredWorkloadComments, allocatedIp.Trim());
+    }
+
+    private static void ValidateApplianceIdentity(string role, string address, bool isPackageProxy)
+    {
+        if (isPackageProxy || FindApplianceAddress(role) != address)
+            throw new ArgumentException("Invalid appliance ruleset identity.", nameof(role));
     }
 }

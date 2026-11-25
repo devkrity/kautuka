@@ -11,7 +11,7 @@ namespace Kautuka.NetworkAccess.Client;
 
 /// <summary>
 /// Evaluates outbound network access by calling Kautuka.Manager's CheckOutbound gRPC RPC.
-/// Enforces fail-closed semantics with a strict 2-second deadline.
+/// Enforces a short fail-closed deadline.
 /// </summary>
 public sealed partial class GrpcNetworkAccessChecker(
     Func<ManagerService.ManagerServiceClient> clientAccessor,
@@ -69,11 +69,9 @@ public sealed partial class GrpcNetworkAccessChecker(
         {
             ManagerService.ManagerServiceClient client = clientAccessor();
             DateTime deadline = DateTime.UtcNow.Add(deadlineTimeout);
-
-            NetworkAccessCheckOutboundResponse response = await client.CheckOutboundAsync(
-                request,
-                deadline: deadline,
-                cancellationToken: cancellationToken).ResponseAsync.ConfigureAwait(false);
+            using AsyncUnaryCall<NetworkAccessCheckOutboundResponse> call = client.CheckOutboundAsync(
+                request, deadline: deadline, cancellationToken: cancellationToken);
+            NetworkAccessCheckOutboundResponse response = await call.ResponseAsync.ConfigureAwait(false);
 
             if (response.Allowed)
             {
@@ -91,8 +89,7 @@ public sealed partial class GrpcNetworkAccessChecker(
                 return NetworkAccessCheckResult.CreatePaused(reason, response.RequestId);
             }
 
-            // Controller unavailable returned as reason
-            if (reason is "controller_unavailable" or "unavailable")
+            if (reason is "controller_unavailable" or "unavailable" or "topology_closed")
             {
                 return NetworkAccessCheckResult.CreateUnavailable(reason);
             }
@@ -102,9 +99,18 @@ public sealed partial class GrpcNetworkAccessChecker(
                 response.RequestId,
                 response.OpenInternetBadge);
         }
+        catch (RpcException ex) when (ex.StatusCode == StatusCode.Cancelled && cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("Outbound check was cancelled.", ex, cancellationToken);
+        }
         catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded or StatusCode.Cancelled)
         {
             LogGrpcUnavailable(logger, ex.Status.ToString(), ex);
+            return NetworkAccessCheckResult.CreateUnavailable("controller_unavailable");
+        }
+        catch (TimeoutException ex)
+        {
+            LogGrpcUnavailable(logger, "Manager did not acknowledge the outbound check.", ex);
             return NetworkAccessCheckResult.CreateUnavailable("controller_unavailable");
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)

@@ -10,6 +10,67 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 
 public sealed class V7_55_RestartQuarantineCleanupTests
 {
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public async Task RegistryRebuildRemovesOnlyUnownedManagedPackageBuilders(bool stillOwned, bool retryRemoval)
+    {
+        string id = new('a', 64);
+        const string name = "kautuka-mcpb-pkg-0123456789ab";
+        DirectoryInfo root = Directory.CreateTempSubdirectory("kautuka-builder-restart-");
+        var desired = new WorkspaceDesiredStateStore(Path.Combine(root.FullName, "manager-desired-state.json"),
+            NullLogger<WorkspaceDesiredStateStore>.Instance);
+        var registry = new WorkloadRegistry();
+        if (stillOwned)
+        {
+            registry.Register(new RegistryEntry("10.247.1.30", null, null, name, "builder", null,
+                "builder", "proxy-only", "none", null, DateTimeOffset.UtcNow));
+        }
+
+        int removals = 0;
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            if (args[0] == "ps")
+                return Task.FromResult(new PodmanCommandResult(0, JsonSerializer.Serialize(new[] { new { Id = id, Name = name, State = "exited" } }), ""));
+            if (args[0] == "inspect")
+            {
+                var labels = new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["io.kautuka.kind"] = "builder",
+                    ["io.kautuka.exec-context"] = "builder",
+                    ["kautuka.managed"] = "manager",
+                    ["kautuka.role"] = "builder",
+                };
+                return Task.FromResult(new PodmanCommandResult(0, JsonSerializer.Serialize(new[] { new { Id = id, Name = name, Config = new { Labels = labels } } }), ""));
+            }
+            if (args[0] == "rm")
+            {
+                Assert.Equal(id, args[^1]);
+                return Task.FromResult(++removals == 1 && retryRemoval
+                    ? new PodmanCommandResult(125, "", "removal failed")
+                    : new PodmanCommandResult(0, "", ""));
+            }
+            return Task.FromResult(new PodmanCommandResult(0, "", ""));
+        });
+        await using var manager = new EgressTopologyManager(podman,
+            new WorkloadAddressAllocator(Path.Combine(root.FullName, "ip.json")),
+            new WorkloadPostStartVerifier(podman, desired), registry, root.FullName, desiredStateStore: desired);
+        try
+        {
+            await manager.RebuildRegistryFromLiveContainersAsync(registry, TestContext.Current.CancellationToken);
+            Assert.Equal(stillOwned ? 0 : 1, removals);
+            Assert.False(registry.IsVerified("10.247.1.30", id));
+            Assert.Equal(retryRemoval, desired.IsWorkloadQuarantined(id));
+            if (retryRemoval)
+            {
+                await InvokeReconcileAsync(manager, registry);
+                Assert.Equal(2, removals);
+            }
+        }
+        finally { root.Delete(recursive: true); }
+    }
+
     [Fact]
     public async Task ReconcileRetriesPersistedQuarantinedSurvivorWithoutAdoptingIt()
     {

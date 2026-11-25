@@ -24,4 +24,10 @@ internal static partial class SlackSocketModeWorkerLog
 
     [LoggerMessage(EventId = 7, Level = LogLevel.Warning, Message = "Slack response_url ephemeral delivery failed")]
     public static partial void ResponseUrlEphemeralFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 8, Level = LogLevel.Information, Message = "Slack Socket Mode hello for attachment {AttachmentId}: expected app matches={AppMatches}, active connections={ConnectionCount}")]
+    public static partial void SocketHello(ILogger logger, string attachmentId, bool? appMatches, int? connectionCount);
+
+    [LoggerMessage(EventId = 9, Level = LogLevel.Debug, Message = "Slack pairing event for attachment {AttachmentId}: {Outcome}")]
+    public static partial void PairingEvent(ILogger logger, string attachmentId, string outcome);
 }

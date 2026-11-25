@@ -387,6 +387,60 @@ public sealed class ChannelHostTrustBoundaryTests : IDisposable
     }
 
     [Fact]
+    public void ApplianceRenewalReissuesAllLeavesWithTheExistingAuthorityAfterExpiry()
+    {
+        ChannelSecurityMaterialDirectories At(string name) => new(
+            Path.Combine(root, name, "gateway-private"), Path.Combine(root, name, "gateway-trust"),
+            Path.Combine(root, name, "channel-private"), Path.Combine(root, name, "channel-trust"));
+        var current = At("current") with { AuthorityRoot = Path.Combine(root, "authority") };
+        var staged = At("staged");
+        ChannelSecurityMaterialProvisioner.Provision(current);
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        using X509Certificate2 server = X509CertificateLoader.LoadPkcs12FromFile(Path.Combine(current.ChannelPrivateRoot, ChannelSecurityMaterialProvisioner.ServerPfx), null);
+        using X509Certificate2 client = X509CertificateLoader.LoadPkcs12FromFile(Path.Combine(current.GatewayPrivateRoot, ChannelSecurityMaterialProvisioner.GatewayClientPfx), null);
+        using X509Certificate2 delegation = X509CertificateLoader.LoadPkcs12FromFile(Path.Combine(current.GatewayPrivateRoot, ChannelSecurityMaterialProvisioner.GatewayDelegationPfx), null);
+        DateTimeOffset earliest = new[] { server, client, delegation }.Min(c => new DateTimeOffset(c.NotAfter.ToUniversalTime()));
+        Assert.Equal(ChannelSecurityMaterialProvisioner.ApplianceRenewalState.Healthy, ChannelSecurityMaterialProvisioner.GetApplianceRenewalState(current, earliest.AddDays(-8)));
+        Assert.Equal(ChannelSecurityMaterialProvisioner.ApplianceRenewalState.Routine, ChannelSecurityMaterialProvisioner.GetApplianceRenewalState(current, earliest.AddDays(-2)));
+        Assert.Equal(ChannelSecurityMaterialProvisioner.ApplianceRenewalState.FinalDay, ChannelSecurityMaterialProvisioner.GetApplianceRenewalState(current, earliest.AddHours(-12)));
+        Assert.Equal(ChannelSecurityMaterialProvisioner.ApplianceRenewalState.ExpiredOrInvalid, ChannelSecurityMaterialProvisioner.GetApplianceRenewalState(current, earliest));
+        Assert.False(ChannelSecurityMaterialProvisioner.ApplianceLeavesNeedRenewal(current, now));
+        Assert.True(ChannelSecurityMaterialProvisioner.ApplianceLeavesNeedRenewal(current, now.AddDays(24)));
+        DateTimeOffset expired = now.AddDays(31);
+        Assert.True(ChannelSecurityMaterialProvisioner.ApplianceLeavesNeedRenewal(current, expired));
+
+        string authorityCertificate = Path.Combine(current.AuthorityRoot!, ChannelSecurityMaterialProvisioner.CaCertificate);
+        string authorityKey = Path.Combine(current.AuthorityRoot!, ChannelSecurityMaterialProvisioner.AuthorityKey);
+        byte[] originalCa = File.ReadAllBytes(authorityCertificate);
+        byte[] originalKey = File.ReadAllBytes(authorityKey);
+        ChannelSecurityMaterialProvisioner.StageApplianceLeaves(current.AuthorityRoot!, staged, expired);
+        Assert.False(ChannelSecurityMaterialProvisioner.ApplianceLeavesNeedRenewal(staged, expired));
+        Assert.Equal(originalCa, File.ReadAllBytes(Path.Combine(staged.GatewayTrustRoot, ChannelSecurityMaterialProvisioner.CaCertificate)));
+        Assert.Equal(originalCa, File.ReadAllBytes(Path.Combine(staged.ChannelTrustRoot, ChannelSecurityMaterialProvisioner.CaCertificate)));
+        Assert.Equal(originalKey, File.ReadAllBytes(authorityKey));
+        Assert.Empty(Directory.EnumerateFiles(Path.Combine(root, "staged"), "*.key", SearchOption.AllDirectories));
+
+        AssertRenewed(current.ChannelPrivateRoot, staged.ChannelPrivateRoot, ChannelSecurityMaterialProvisioner.ServerPfx, null);
+        AssertRenewed(current.GatewayPrivateRoot, staged.GatewayPrivateRoot,
+            ChannelSecurityMaterialProvisioner.GatewayClientPfx, ChannelSecurityMaterialProvisioner.GatewayClientCertificate);
+        AssertRenewed(current.GatewayPrivateRoot, staged.GatewayPrivateRoot,
+            ChannelSecurityMaterialProvisioner.GatewayDelegationPfx, ChannelSecurityMaterialProvisioner.GatewayDelegationCertificate);
+
+        void AssertRenewed(string oldDirectory, string newDirectory, string privateName, string? publicName)
+        {
+            using X509Certificate2 old = X509CertificateLoader.LoadPkcs12FromFile(Path.Combine(oldDirectory, privateName), null);
+            using X509Certificate2 renewed = X509CertificateLoader.LoadPkcs12FromFile(Path.Combine(newDirectory, privateName), null);
+            Assert.True(old.NotAfter.ToUniversalTime() < expired.UtcDateTime);
+            Assert.True(renewed.NotAfter.ToUniversalTime() > expired.UtcDateTime.AddDays(29));
+            Assert.NotEqual(old.Thumbprint, renewed.Thumbprint);
+            Assert.Equal(old.Subject, renewed.Subject);
+            Assert.Equal(old.Issuer, renewed.Issuer);
+            if (publicName is not null)
+                Assert.Equal(renewed.Export(X509ContentType.Cert), File.ReadAllBytes(Path.Combine(staged.ChannelTrustRoot, publicName)));
+        }
+    }
+
+    [Fact]
     public void ProductionRotationStagesActivatesBoundedOverlapAndRejectsStaleIdentityAfterCutover()
     {
         var directories = new ChannelSecurityMaterialDirectories(

@@ -6,6 +6,8 @@ using System.Text.Json;
 
 using Grpc.Core;
 
+using Kautuka.Hosting.Hosting;
+using Kautuka.Telemetry.Security;
 using Kautuka.UpdateService.Abstractions;
 using Kautuka.UpdateService.Models;
 
@@ -23,6 +25,7 @@ public sealed class UpdateServiceIntegration(
     private const string activationLauncherRelativePath = "updates/activate-updateservice.sh";
     private const string activationRequestRelativePath = "updates/activation-request.env";
     private const string pendingActivationRequestRelativePath = "updates/pending-activation.env";
+    private const string applianceActivationRequestName = "activate-appliance";
     private const string installedVersionFileName = "release-version.txt";
     private const string activationPathUnitName = "kautuka-activate.path";
     private const string serviceScopeDocumentPath = "/etc/kautuka/service-scope.json";
@@ -50,21 +53,25 @@ public sealed class UpdateServiceIntegration(
 
     public async ValueTask<UpdateServiceContext> GetHostContextAsync(CancellationToken cancellationToken)
     {
-        string managerInstallRoot = ResolveManagerInstallRoot(AppContext.BaseDirectory);
-        string managerReleaseId = TryResolveCurrentInstalledReleaseId(AppContext.BaseDirectory, "manager")
-            ?? ResolveManagerVersion(managerInstallRoot);
-        string managerVersion = ResolveManagerVersion(managerInstallRoot);
-
         int activeExecCount = 0;
         bool isReady = false;
         bool hostStatusObserved = false;
+        Kautuka.Manager.Protos.ApplianceRecoveryStatus? applianceRecovery = null;
+        Kautuka.Manager.Protos.AppliancePreflightStatus? appliancePreflight = null;
 
         try
         {
             Kautuka.Manager.Protos.ManagerStatusResponse status = await managerStatusClient.GetHostStatusAsync(cancellationToken).ConfigureAwait(false);
-            isReady = status.CoreReady;
-            activeExecCount = status.ActiveExecCount;
-            hostStatusObserved = true;
+            hostStatusObserved = updateOptions.ApplianceReleaseId is not { } expectedRelease
+                || (status.Ok && string.Equals(status.ApplianceReleaseId, expectedRelease, StringComparison.Ordinal)
+                    && status.ApplianceVerificationMode == KautukaMaintenanceMode.IsApplianceVerification);
+            if (hostStatusObserved)
+            {
+                isReady = status.CoreReady;
+                activeExecCount = status.ActiveExecCount;
+                applianceRecovery = status.ApplianceRecovery;
+                appliancePreflight = status.AppliancePreflight;
+            }
         }
         catch (RpcException)
         {
@@ -73,6 +80,27 @@ public sealed class UpdateServiceIntegration(
         {
         }
 
+        if (updateOptions.ApplianceReleaseId is { } releaseId)
+            return new UpdateServiceContext(runtimePaths.RuntimeRoot, AppContext.BaseDirectory, releaseId,
+                updateOptions.ApplianceReleaseVersion!, isReady, activeExecCount, hostStatusObserved,
+                RuntimeUnitsActive: false, CurrentPointersConsistent: false,
+                RecoveryRequired: applianceRecovery?.RecoveryRequired == true,
+                RecoveryOperationId: applianceRecovery?.OperationId,
+                RecoveryPhase: applianceRecovery?.Phase,
+                RecoverySourceRelease: applianceRecovery is { SourceVersion.Length: > 0 } ? "v" + applianceRecovery.SourceVersion : null,
+                RecoveryTargetRelease: applianceRecovery is { TargetVersion.Length: > 0 } ? "v" + applianceRecovery.TargetVersion : null,
+                ApplianceBootConfirmed: isReady && !KautukaMaintenanceMode.IsApplianceVerification
+                    && applianceRecovery is { RecoveryRequired: false },
+                ApplianceRecoveryUpdatedUnixMilliseconds: applianceRecovery?.UpdatedUnixMilliseconds ?? 0,
+                ApplianceSnapshotPruneStatus: applianceRecovery?.SnapshotPruneStatus,
+                PreflightRequestId: appliancePreflight?.RequestId,
+                PreflightSourceVersion: appliancePreflight?.SourceVersion,
+                PreflightTargetVersion: appliancePreflight?.TargetVersion,
+                PreflightCode: appliancePreflight?.Code);
+
+        string managerInstallRoot = ResolveManagerInstallRoot(AppContext.BaseDirectory);
+        string managerVersion = ResolveManagerVersion(managerInstallRoot);
+        string managerReleaseId = TryResolveCurrentInstalledReleaseId(AppContext.BaseDirectory, "manager") ?? managerVersion;
         (bool pointersConsistent, bool unitsActive) = ObserveReleaseHealth(managerReleaseId);
         bool updaterRunningCurrent = IsRunningCurrentUpdateService(AppContext.BaseDirectory);
 
@@ -104,6 +132,8 @@ public sealed class UpdateServiceIntegration(
 
     private async Task<string> RunApplyReleaseHelperAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
     {
+        if (updateOptions.ApplianceReleaseId is not null)
+            throw new InvalidOperationException("The host activation helper is unavailable inside the appliance UpdateService.");
         if (string.IsNullOrWhiteSpace(updateOptions.ApplyReleaseHelperPath))
         {
             throw new InvalidOperationException("Update:ApplyReleaseHelperPath is not configured.");
@@ -428,6 +458,12 @@ public sealed class UpdateServiceIntegration(
             throw new InvalidOperationException("Prepared update is missing a verified platform artifact.");
         }
 
+        if (updateOptions.ApplianceReleaseId is not null)
+        {
+            await RequestApplianceActivationAsync(preparedArtifacts, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         logger.LogInformation(
             "Delegating prepared update {ReleaseId} to apply-release helper {HelperPath}. Artifact={Artifact}",
             preparedArtifacts.TargetReleaseId,
@@ -471,6 +507,41 @@ public sealed class UpdateServiceIntegration(
         RequestRestartForSwitchedUpdateService("apply", preparedArtifacts.TargetReleaseId);
     }
 
+    private async Task RequestApplianceActivationAsync(UpdatePreparedArtifacts prepared, CancellationToken cancellationToken)
+    {
+        string tag = prepared.TargetReleaseId;
+        bool preview = tag.Contains("-preview.", StringComparison.Ordinal);
+        if (tag.Length > 128 || !ReleaseChannelPolicy.TryParseTag(tag, preview ? "preview" : "stable", preview, out var version)
+            || !string.Equals(tag, $"v{version.ToVersionString()}", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Prepared appliance update has an invalid release tag.");
+        }
+
+        string updates = Path.Combine(runtimePaths.RuntimeRoot, "updates");
+        string expectedArtifact = Path.Combine(updates, "staging", tag, "kautuka-linux-amd64.tar.gz");
+        if (!string.Equals(Path.GetFullPath(prepared.PlatformPackagePath), expectedArtifact, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Prepared appliance update is outside its release staging directory.");
+        }
+
+        if (prepared.ActivationRequestId is not { Length: 32 } requestId
+            || requestId.Any(static c => !char.IsAsciiDigit(c) && c is not (>= 'a' and <= 'f')))
+            throw new InvalidOperationException("Prepared appliance update has an invalid activation request identity.");
+
+        string target = Path.Combine(updates, applianceActivationRequestName);
+        string temporary = Path.Combine(updates, $".{applianceActivationRequestName}-{Guid.NewGuid():N}");
+        try
+        {
+            await File.WriteAllTextAsync(temporary, version.ToVersionString() + "\n" + requestId + "\n", cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            File.Move(temporary, target, overwrite: false);
+        }
+        finally
+        {
+            File.Delete(temporary);
+        }
+    }
+
     public ValueTask ActivateRollbackAsync(UpdateReleaseReference release, CancellationToken cancellationToken)
     {
         _ = release;
@@ -481,6 +552,8 @@ public sealed class UpdateServiceIntegration(
     public ValueTask<bool> TryContinuePendingActivationAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (updateOptions.ApplianceReleaseId is not null)
+            return ValueTask.FromResult(false);
         return ContinueSafeRecoveryAsync(cancellationToken);
     }
 

@@ -21,10 +21,12 @@ public sealed class NacAcceptanceWorkflowTests
         string root = FindRepositoryRoot();
         string workflow = File.ReadAllText(Path.Combine(root, ".github", "workflows", "nac-acceptance.yml"));
 
-        int setupNode = workflow.IndexOf("actions/setup-node@", StringComparison.Ordinal);
-        int enablePnpm = workflow.IndexOf("corepack prepare pnpm@11.5.2 --activate", StringComparison.Ordinal);
-        int install = workflow.IndexOf("pnpm install --frozen-lockfile", StringComparison.Ordinal);
-        int integrationTests = workflow.IndexOf("dotnet test src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj", StringComparison.Ordinal);
+        int linuxJob = workflow.IndexOf("  nac-linux:", StringComparison.Ordinal);
+        Assert.True(linuxJob >= 0, "The Linux network acceptance job must exist.");
+        int setupNode = workflow.IndexOf("actions/setup-node@", linuxJob, StringComparison.Ordinal);
+        int enablePnpm = workflow.IndexOf("corepack prepare pnpm@11.5.2 --activate", linuxJob, StringComparison.Ordinal);
+        int install = workflow.IndexOf("pnpm install --frozen-lockfile", linuxJob, StringComparison.Ordinal);
+        int integrationTests = workflow.IndexOf("dotnet test --project src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj", linuxJob, StringComparison.Ordinal);
 
         Assert.True(setupNode >= 0, "The acceptance workflow must set up the pinned Node runtime.");
         Assert.True(enablePnpm > setupNode, "The acceptance workflow must enable the repository-pinned pnpm version after Node setup.");

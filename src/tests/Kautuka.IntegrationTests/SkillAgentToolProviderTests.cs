@@ -660,9 +660,7 @@ public sealed class SkillAgentToolProviderTests
     {
         using var temp = new TemporarySqliteDatabase();
         string skillRoot = OwnedSkillRoot(temp.Path, "roll-dice");
-        Directory.CreateDirectory(Path.Combine(skillRoot, "scripts"));
         await File.WriteAllTextAsync(Path.Combine(skillRoot, "SKILL.md"), "# Roll Dice\n\nUse this skill to roll dice.\n\n```bash\necho $((RANDOM % <sides> + 1))\n```", TestContext.Current.CancellationToken);
-        await File.WriteAllTextAsync(Path.Combine(skillRoot, "scripts", "generated-from-markdown.sh"), "echo 17", TestContext.Current.CancellationToken);
 
         try
         {
@@ -732,6 +730,7 @@ public sealed class SkillAgentToolProviderTests
 
             IReadOnlyList<AIFunction> tools = [.. await provider.BuildToolsAsync(context, TestContext.Current.CancellationToken)];
             Assert.Empty(tools);
+            Assert.False(Directory.Exists(Path.Combine(skillRoot, "scripts")));
         }
         finally
         {
@@ -831,8 +830,11 @@ public sealed class SkillAgentToolProviderTests
         }
     }
 
-    [Fact]
-    public async Task BuildToolsRegistersRunSkillScriptWhenManifestHasScriptsFalseButMarkdownHasBashBlock()
+    [Theory]
+    [InlineData(SkillExecutionContext.AgentSandbox)]
+    [InlineData(SkillExecutionContext.Isolated)]
+    [InlineData(SkillExecutionContext.WithAgentFiles)]
+    public async Task BuildToolsRegistersRunSkillScriptWhenManifestHasScriptsFalseButMarkdownHasBashBlock(string executionContext)
     {
         // Simulate a skill imported before EnsureGeneratedScript existed:
         // HasScripts = false in the manifest, no scripts/ directory on disk, but SKILL.md has a bash block.
@@ -868,14 +870,14 @@ public sealed class SkillAgentToolProviderTests
                 new ToolExecutionPolicyService(),
                 NullLogger<SkillAgentToolProvider>.Instance);
 
-            var workspaceTool = new CapturingWorkspaceTool();
+            var workspaceTool = new CapturingWorkspaceTool(Path.Combine(Path.GetDirectoryName(temp.Path)!, "workspace"));
             var context = new AgentToolContext(
                 new AgentDefinition
                 {
                     Id = "agent-alpha",
                     Name = "Agent Alpha",
                     Sandbox = new AgentSandboxDefinition { Enabled = true },
-                    SkillAttachments = [new AgentSkillAttachmentDefinition { SkillId = "roll-dice", Mode = SkillAttachmentMode.Trusted }],
+                    SkillAttachments = [new AgentSkillAttachmentDefinition { SkillId = "roll-dice", Mode = SkillAttachmentMode.Trusted, Context = executionContext }],
                 },
                 "agent-alpha",
                 UserId: null,
@@ -889,6 +891,7 @@ public sealed class SkillAgentToolProviderTests
                         SourceScope = EffectiveSkillSourceScope.Agent,
                         SourceOwnerId = "agent-alpha",
                         Mode = SkillAttachmentMode.Trusted,
+                        Context = executionContext,
                         HasScripts = false, // stale
                         HasResources = false,
                         Name = "Roll Dice",
@@ -900,8 +903,7 @@ public sealed class SkillAgentToolProviderTests
 
             IReadOnlyList<AIFunction> tools = [.. await provider.BuildToolsAsync(context, TestContext.Current.CancellationToken)];
 
-            // run_skill_script MUST be registered despite HasScripts = false in the manifest
-            Assert.Contains(tools, static tool => string.Equals(tool.Name, "run_skill_script", StringComparison.Ordinal));
+            AIFunction runSkillTool = Assert.Single(tools, static tool => string.Equals(tool.Name, "run_skill_script", StringComparison.Ordinal));
 
             // load_skill MUST advertise the script tool
             AIFunction loadSkillTool = Assert.Single(tools, static tool => string.Equals(tool.Name, "load_skill", StringComparison.Ordinal));
@@ -911,6 +913,16 @@ public sealed class SkillAgentToolProviderTests
             JsonElement payload = Assert.IsType<JsonElement>(rawResult);
             Assert.Equal("run_skill_script", payload.GetProperty("script_tool_name").GetString());
             Assert.NotEmpty(payload.GetProperty("scripts").EnumerateArray().ToList());
+
+            await runSkillTool.InvokeAsync(
+                new AIFunctionArguments(new Dictionary<string, object?>
+                {
+                    ["skillId"] = "roll-dice",
+                    ["namedArguments"] = new JsonObject { ["sides"] = "20" },
+                }),
+                TestContext.Current.CancellationToken);
+            Assert.Contains("/usr/bin/bash \"$tmp_script\" '20'", workspaceTool.LastAgentCommand, StringComparison.Ordinal);
+            Assert.Equal(executionContext == SkillExecutionContext.AgentSandbox ? null : executionContext, workspaceTool.LastIsolatedSkillContext);
 
             // The generated script file should now exist on disk (self-healed)
             Assert.True(
@@ -1404,6 +1416,7 @@ public sealed class SkillAgentToolProviderTests
     private sealed class CapturingWorkspaceTool(string hostWorkspacePath = "D:/temp/agent") : IWorkspaceRuntimeTool
     {
         public string? LastAgentCommand { get; private set; }
+        public string? LastIsolatedSkillContext { get; private set; }
         public Dictionary<string, string> LastEnvironment { get; private set; }
             = new Dictionary<string, string>(StringComparer.Ordinal);
         public WorkspaceCommandResult Result { get; set; }
@@ -1421,6 +1434,19 @@ public sealed class SkillAgentToolProviderTests
                 DefaultTimeoutSeconds: 30,
                 BaseCapabilities: [],
                 ContainerEnvironment: new Dictionary<string, string>());
+
+        public WorkspaceRuntimeContext DescribeSkillWorkspace(string agentId, string? userId, string skillId, string executionContext)
+            => executionContext == SkillExecutionContext.AgentSandbox
+                ? DescribeAgentWorkspace(agentId, userId)
+                : DescribeAgentWorkspace(agentId, userId) with { ScopeType = executionContext };
+
+        public Task<WorkspaceCommandResult> RunSkillShellAsync(
+            WorkspaceRuntimeContext workspace, string command, IReadOnlyDictionary<string, string> environment,
+            int? timeoutSeconds, CancellationToken cancellationToken)
+        {
+            LastIsolatedSkillContext = workspace.ScopeType;
+            return RunAgentShellWithEnvironmentAsync(workspace.ScopeId, command, environment, workspace.UserId, timeoutSeconds, cancellationToken);
+        }
 
         public WorkspaceRuntimeContext RebuildAgentWorkspace(string agentId, string? userId = null) => DescribeAgentWorkspace(agentId, userId);
         public bool DeleteAgentWorkspace(string agentId) => true;

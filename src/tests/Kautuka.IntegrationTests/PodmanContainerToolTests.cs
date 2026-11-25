@@ -96,6 +96,34 @@ public sealed class PodmanContainerToolTests
     }
 
     [Fact]
+    public void SkillSandboxesUseSeparateNamesAndOnlyTheFilesModeHasAReadOnlyBind()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "skill-workspace");
+        ContainerContext shared = CreateLaunchContext("user-a", "agent-a", Path.Combine(root, "agent"));
+        ContainerContext isolated = shared with
+        {
+            ScopeType = "skill",
+            ScopeId = "skill-a",
+            AgentId = shared.ScopeId,
+            HostWorkspacePath = Path.Combine(root, "skill"),
+        };
+        ContainerContext withFiles = isolated with { ScopeType = "skill-with-agent-files", HostWorkspacePath = shared.HostWorkspacePath };
+
+        Assert.Equal(3, new[] { shared, isolated, withFiles }.Select(PodmanContainerTool.BuildContainerName).Distinct().Count());
+        List<string> ownArguments = InvokeBuildRunArguments(isolated, "skill-own");
+        List<string> filesArguments = InvokeBuildRunArguments(withFiles, "skill-files");
+        Assert.Contains("--group-add=0", ownArguments);
+        Assert.Contains("--group-add=0", filesArguments);
+        Assert.DoesNotContain(ownArguments, item => item.StartsWith(shared.HostWorkspacePath + ":", StringComparison.Ordinal));
+        Assert.Contains(filesArguments, item => item.StartsWith(shared.HostWorkspacePath + ":", StringComparison.Ordinal)
+            && item.EndsWith(":ro", StringComparison.Ordinal));
+        RegistryEntry entry = PodmanContainerTool.BuildSandboxRegistryEntry(withFiles, "10.247.1.202", "skill-files");
+        Assert.Equal("agent-a", entry.AgentId);
+        Assert.Equal("user-a", entry.UserId);
+        Assert.Equal("user-agent", entry.Attribution);
+    }
+
+    [Fact]
     public async Task V7_45_BrakedSandboxIsRejectedBeforePodman_AndOtherUserReachesRun_WithNegativeControl()
     {
         string root = Path.Combine(Path.GetTempPath(), "nac-v7-sandbox-launch-gate-" + Guid.NewGuid().ToString("N"));

@@ -1,5 +1,6 @@
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
+import { ChannelSettingsSection } from '@/features/settings';
 import React from 'react';
 import { AgentTypeScreen, type AgentTypePreset } from '../components/AgentTypeScreen';
 import { BrainPresetOption, CompactSetupScreen } from '../components/CompactSetupScreen';
@@ -7,6 +8,7 @@ import { RecommendationsScreen } from '../components/RecommendationsScreen';
 import { SuccessMilestone } from '../components/SuccessMilestone';
 import { TelegramSetupScreen } from '../components/TelegramSetupScreen';
 import { WIZARD_STAGES, useOnboardingFlow } from '../hooks/useOnboardingFlow';
+import { getRecommendedProviderModel } from '../utils/wizardNaming';
 
 const AGENT_TYPE_PRESETS: AgentTypePreset[] = [
   {
@@ -96,18 +98,6 @@ const BRAIN_PRESETS: BrainPresetOption[] = [
   },
 ];
 
-function getLifecycleSummary(status?: string) {
-  if (status === 'agents_ready') {
-    return 'Core ready. Agents ready.';
-  }
-
-  if (status === 'agents_pending') {
-    return 'Core ready. Agents pending setup.';
-  }
-
-  return 'Core services are not ready yet.';
-}
-
 function getProviderLabel(providerType: string) {
   switch (providerType) {
     case 'gemini':
@@ -185,17 +175,21 @@ class WizardErrorBoundary extends React.Component<
 
 export const OnboardingWizard: React.FC = () => {
   const [manualBrainSelection, setManualBrainSelection] = React.useState(false);
-  const [recommendationsBackStage, setRecommendationsBackStage] = React.useState<string>(WIZARD_STAGES.setup);
+  const [permissionReviewReady, setPermissionReviewReady] = React.useState(false);
+  const [permissionsConfirmed, setPermissionsConfirmed] = React.useState(false);
   const {
     stage,
     goNext,
     skipToDashboard,
+    chatWithHelper,
     configureManually,
     checkingExisting,
     hasExistingSetup,
+    canResumeSetup,
     loadExistingSetup,
     canImportConnectors,
     canImportSkills,
+    canManageServiceNetworkAccess,
     onboardingHealth,
     personaDefinitions,
     selectedAgentPresetId,
@@ -203,10 +197,12 @@ export const OnboardingWizard: React.FC = () => {
     selectedBrainPresetId,
     setSelectedBrainPresetId,
     providerForm,
+    hasSavedProviderCredential,
     setProviderForm,
     saveSetup,
     providerValidation,
     saving,
+    startingChat,
     error,
     modelForm,
     setModelForm,
@@ -255,6 +251,24 @@ export const OnboardingWizard: React.FC = () => {
     }));
   };
 
+  const changeProvider = (type: string, baseUrl: string) => {
+    const changed = type !== providerForm.type || baseUrl.trim() !== providerForm.base_url.trim();
+    setProviderForm((prev) => ({
+      ...prev,
+      ...(changed ? { id: '', apiCredential: '' } : {}),
+      type,
+      base_url: baseUrl,
+    }));
+    if (changed) {
+      setModelForm((prev) => ({
+        ...prev,
+        id: '',
+        providerId: '',
+        modelName: type !== providerForm.type ? getRecommendedProviderModel(type) : prev.modelName,
+      }));
+    }
+  };
+
   const applyBrainPreset = (presetId: string) => {
     const preset = BRAIN_PRESETS.find((item) => item.id === presetId);
     if (!preset) {
@@ -262,11 +276,10 @@ export const OnboardingWizard: React.FC = () => {
     }
 
     setSelectedBrainPresetId(presetId);
-    setProviderForm((prev) => ({
-      ...prev,
-      type: preset.providerType,
-      base_url: preset.providerType === 'ollama' ? prev.base_url.trim() || 'http://localhost:11434' : '',
-    }));
+    changeProvider(
+      preset.providerType,
+      preset.providerType === 'ollama' ? providerForm.base_url.trim() || 'http://localhost:11434' : '',
+    );
     setModelForm((prev) => ({
       ...prev,
       modelName: preset.modelName,
@@ -302,19 +315,11 @@ export const OnboardingWizard: React.FC = () => {
                     </p>
                   </div>
 
-                  <div className="w-full rounded-xl border border-border bg-card px-5 py-4 text-sm shadow-sm">
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="font-semibold text-foreground">Platform status</span>
-                      <span className="rounded-full border border-border bg-muted px-3 py-1 text-xs font-semibold text-muted-foreground">
-                        {getLifecycleSummary(onboardingHealth?.lifecycleStatus)}
-                      </span>
-                    </div>
-                    {onboardingHealth?.actionHints?.length ? (
-                      <p className="mt-3 text-muted-foreground">
-                        Suggested next actions: {onboardingHealth.actionHints.join(', ')}
-                      </p>
-                    ) : null}
-                  </div>
+                  {onboardingHealth?.coreReady === false && (
+                    <p role="status" className="text-sm text-muted-foreground">
+                      Kautuka is getting ready. If setup cannot continue, refresh this page in a moment.
+                    </p>
+                  )}
 
                   {checkingExisting ? (
                     <p className="text-sm text-muted-foreground animate-pulse">
@@ -343,6 +348,16 @@ export const OnboardingWizard: React.FC = () => {
                         </Button>
                       </div>
                     </div>
+                  ) : canResumeSetup ? (
+                    <Button
+                      variant="secondary"
+                      onClick={() => {
+                        loadExistingSetup();
+                        goNext(WIZARD_STAGES.setup);
+                      }}
+                    >
+                      Resume helper setup
+                    </Button>
                   ) : null}
                 </div>
 
@@ -367,7 +382,26 @@ export const OnboardingWizard: React.FC = () => {
               />
             )}
 
-            {stage === WIZARD_STAGES.setup && (
+            {stage === WIZARD_STAGES.setup && canManageServiceNetworkAccess && !hasExistingSetup && !permissionsConfirmed && (
+              <div className="space-y-6">
+                <div>
+                  <h2 className="text-2xl font-bold">Review service permissions</h2>
+                  <p className="mt-1 text-muted-foreground">Review the services Kautuka can reach and change any settings before continuing.</p>
+                </div>
+                <ChannelSettingsSection onReviewReady={setPermissionReviewReady} />
+                <div className="flex justify-between gap-3">
+                  <Button variant="secondary" onClick={() => {
+                    setPermissionReviewReady(false);
+                    goNext(WIZARD_STAGES.agentType);
+                  }}>Back</Button>
+                  <Button disabled={!permissionReviewReady} onClick={() => setPermissionsConfirmed(true)}>
+                    Confirm permissions and continue
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {stage === WIZARD_STAGES.setup && (!canManageServiceNetworkAccess || hasExistingSetup || permissionsConfirmed) && (
               <CompactSetupScreen
                 helperName={agentForm.name}
                 onHelperNameChange={(value) => setAgentForm((prev) => ({ ...prev, name: value }))}
@@ -396,15 +430,17 @@ export const OnboardingWizard: React.FC = () => {
                 providerType={providerForm.type}
                 onProviderTypeChange={(value) => {
                   setSelectedBrainPresetId(null);
-                  setProviderForm((prev) => ({
-                    ...prev,
-                    type: value,
-                    base_url: value === 'ollama' ? prev.base_url.trim() || 'http://localhost:11434' : '',
-                  }));
+                  changeProvider(
+                    value,
+                    value === providerForm.type
+                      ? providerForm.base_url
+                      : value === 'ollama' ? 'http://localhost:11434' : '',
+                  );
                 }}
                 providerBaseUrl={providerForm.base_url}
-                onProviderBaseUrlChange={(value) => setProviderForm((prev) => ({ ...prev, base_url: value }))}
+                onProviderBaseUrlChange={(value) => changeProvider(providerForm.type, value)}
                 providerApiCredential={providerForm.apiCredential}
+                hasSavedProviderCredential={hasSavedProviderCredential}
                 onProviderApiCredentialChange={(value) =>
                   setProviderForm((prev) => ({ ...prev, apiCredential: value }))
                 }
@@ -429,7 +465,7 @@ export const OnboardingWizard: React.FC = () => {
               <RecommendationsScreen
                 canImportConnectors={canImportConnectors}
                 canImportSkills={canImportSkills}
-                onBack={() => goNext(recommendationsBackStage as typeof stage)}
+                onBack={() => goNext(WIZARD_STAGES.success)}
                 onContinue={() => goNext(WIZARD_STAGES.success)}
                 onSetupTelegram={() => goNext(WIZARD_STAGES.telegram)}
               />
@@ -453,11 +489,9 @@ export const OnboardingWizard: React.FC = () => {
             {stage === WIZARD_STAGES.success && (
               <SuccessMilestone
                 telegramConfigured={telegramConfiguredInWizard}
-                onContinue={skipToDashboard}
-                onReviewAbilities={() => {
-                  setRecommendationsBackStage(WIZARD_STAGES.success);
-                  goNext(WIZARD_STAGES.recommendations);
-                }}
+                startingChat={startingChat}
+                onContinue={chatWithHelper}
+                onReviewAbilities={() => goNext(WIZARD_STAGES.recommendations)}
                 onOpenSettings={openSettings}
               />
             )}

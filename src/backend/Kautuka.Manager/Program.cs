@@ -12,6 +12,68 @@ using Kautuka.Telemetry.Telemetry;
 
 using Microsoft.Extensions.Options;
 
+if (args.Length > 0 && args[0] == "--maintain-channel-certificates")
+    return await ApplianceChannelCertificateMaintenance.RunAsync(args.Length == 2 ? args[1] : "").ConfigureAwait(false);
+
+if (args is ["--retire-appliance-images", .. var obsoleteVersions])
+    return await ApplianceRoleImageRetirement.RunAsync(obsoleteVersions).ConfigureAwait(false);
+
+bool verifyAppliance = KautukaMaintenanceMode.IsApplianceVerification;
+bool prepareApplianceImages = args.Contains("--prepare-appliance-images", StringComparer.Ordinal);
+bool checkApplianceReadiness = args.Contains("--check-appliance-ready", StringComparer.Ordinal);
+if (prepareApplianceImages || checkApplianceReadiness || args.Contains("--verify-appliance-release", StringComparer.Ordinal))
+{
+    bool commandFirst = args[0] is "--verify-appliance-release" or "--prepare-appliance-images" or "--check-appliance-ready";
+    bool selectCandidate = args is [_, "--candidate-version", _];
+    if (!OperatingSystem.IsLinux() || !commandFirst || (args.Length != 1 && !selectCandidate))
+    {
+        await Console.Error.WriteLineAsync("Appliance release commands require Linux and accept an optional --candidate-version argument.").ConfigureAwait(false);
+        return 1;
+    }
+
+    try
+    {
+        const string managerRoot = "/opt/kautuka/manager";
+        VerifiedApplianceRelease release = VerifiedApplianceRelease.Verify(
+            TrustedApplianceReleaseFiles.Read(managerRoot, "/etc/kautuka", selectCandidate ? args[2] : null));
+        if (checkApplianceReadiness)
+        {
+            if (verifyAppliance)
+                TrustedApplianceReleaseFiles.RequireVerificationTarget(release.Version, Path.GetDirectoryName(KautukaMaintenanceMode.MarkerPath)!);
+            if (!await ApplianceServiceReadiness.CheckManagerAsync(release.ReleaseId, verifyAppliance, CancellationToken.None)
+                    .ConfigureAwait(false))
+            {
+                await Console.Error.WriteLineAsync($"Manager has not reported readiness for {release.ReleaseId} in the requested boot mode.").ConfigureAwait(false);
+                return 1;
+            }
+            await Console.Out.WriteLineAsync($"Manager reports {release.ReleaseId} ready.").ConfigureAwait(false);
+            return 0;
+        }
+        if (prepareApplianceImages)
+        {
+            var images = new ApplianceRoleImageImporter(new PodmanCommandRunner());
+            await images.EnsureAsync(release.Deployment, Path.Combine(managerRoot, "versions", release.Version), CancellationToken.None,
+                requireVerificationFence: verifyAppliance, checkImageStoreSpace: selectCandidate && verifyAppliance)
+                .ConfigureAwait(false);
+            await Console.Out.WriteLineAsync($"Prepared appliance images for {release.ReleaseId}.").ConfigureAwait(false);
+            return 0;
+        }
+        await Console.Out.WriteLineAsync($"Verified appliance release {release.ReleaseId}.").ConfigureAwait(false);
+        return 0;
+    }
+    catch (ApplianceRoleImageImporter.InsufficientImageStoreSpaceException error)
+    {
+        await Console.Error.WriteLineAsync(error.Message).ConfigureAwait(false);
+        return 73;
+    }
+    catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException
+        or InvalidOperationException or System.Text.Json.JsonException or System.Text.DecoderFallbackException)
+    {
+        await Console.Error.WriteLineAsync($"Appliance release rejected: {error.Message}").ConfigureAwait(false);
+        return 1;
+    }
+}
+
 using var databaseWriterLease = KautukaDatabaseWriterLease.AcquireForMode(
     Environment.GetEnvironmentVariable("Kautuka__Mode"));
 
@@ -35,6 +97,80 @@ managerDataRoot = Path.GetFullPath(managerDataRoot);
 KautukaEndpoint managerEndpoint = KautukaHostNetworkPolicy.Resolve(builder.Configuration).Manager;
 string socketRoot = KautukaHostNetworkPolicy.ResolveSocketRoot(builder.Configuration);
 var podmanCommandRunner = new PodmanCommandRunner();
+string? gatewayConnectEnvoyDirectory = null;
+string? telemetryAuthorization = null;
+bool applianceEnabled = builder.Configuration.GetValue<bool>("Kautuka:Appliance:Enabled");
+int? egressInspectionTimeoutSeconds = builder.Configuration.GetValue<int?>("Kautuka:NetworkAccess:EgressInspectionTimeoutSeconds")
+    ?? (applianceEnabled ? 30 : null);
+if (verifyAppliance && !applianceEnabled)
+    throw new InvalidOperationException("Verification requires appliance service supervision.");
+
+List<ServiceDescriptor> verificationServices = [];
+void AddApplianceVerificationService(Func<IServiceProvider, IHostedService> factory)
+{
+    ServiceDescriptor service = ServiceDescriptor.Singleton(factory);
+    builder.Services.Add(service);
+    if (verifyAppliance) verificationServices.Add(service);
+}
+
+if (applianceEnabled)
+{
+    bool confineManagerPeers = Environment.GetEnvironmentVariable("KAUTUKA_ENVOY_SELINUX") == "1";
+    int publishedWebPort = WorkloadRulesetRenderer.WebHostPort;
+    if (builder.Configuration["Kautuka:Appliance:PublishedWebPort"] is { } port &&
+        (!int.TryParse(port, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out publishedWebPort)
+            || publishedWebPort is < 1024 or > 65535))
+        throw new InvalidOperationException("The appliance browser port must be an integer between 1024 and 65535.");
+
+    if (!OperatingSystem.IsLinux() || builder.Environment.IsDevelopment()
+        || !string.Equals(builder.Configuration["Kautuka:Mode"], "prod", StringComparison.OrdinalIgnoreCase))
+    {
+        throw new InvalidOperationException("Appliance service supervision requires Linux production mode.");
+    }
+
+    if (confineManagerPeers)
+    {
+        string managerSocketPath = managerEndpoint.SocketPath
+            ?? throw new InvalidOperationException("SELinux appliance supervision requires a Manager Unix socket.");
+        builder.WebHost.UseSockets(options =>
+            options.CreateBoundListenSocket = endpoint => ManagerSocketSelinux.CreateBoundSocket(endpoint, managerSocketPath));
+    }
+
+    string stateRoot = KautukaHostPathPolicy.ResolveSharedStateRoot(builder.Configuration);
+    if (Path.TrimEndingDirectorySeparator(stateRoot) == Path.TrimEndingDirectorySeparator(socketRoot))
+        throw new InvalidOperationException("Appliance service sockets must be stored separately from service state and private keys.");
+
+    const string managerRoot = "/opt/kautuka/manager";
+    VerifiedApplianceRelease release = VerifiedApplianceRelease.Verify(
+        TrustedApplianceReleaseFiles.Read(managerRoot, "/etc/kautuka"));
+    if (verifyAppliance)
+        TrustedApplianceReleaseFiles.RequireVerificationTarget(release.Version, Path.GetDirectoryName(KautukaMaintenanceMode.MarkerPath)!);
+    GatewayConnectCertificateMaterial connectMaterial = GatewayConnectCertificateMaterial.Ensure(Path.Combine(managerDataRoot, "networkAccess", "gateway-connect"));
+    gatewayConnectEnvoyDirectory = connectMaterial.EnvoyDirectory;
+    string gatewayConnectDirectory = connectMaterial.GatewayDirectory;
+    DateTimeOffset connectRenewal = connectMaterial.RenewAfterUtc;
+    if (!verifyAppliance)
+        builder.Services.AddHostedService(sp => new GatewayConnectRenewalService(
+            connectRenewal, sp.GetRequiredService<IHostApplicationLifetime>(),
+            sp.GetRequiredService<ILogger<GatewayConnectRenewalService>>()));
+    ApplianceTelemetry.EnsureRootConfiguration(stateRoot);
+    telemetryAuthorization = ApplianceTelemetry.ReadIngestionAuthorization(stateRoot);
+    builder.Services.AddSingleton(sp => new ApplianceServiceSupervisor(
+        podmanCommandRunner, release, Path.Combine(managerRoot, "versions", release.Version),
+        stateRoot, socketRoot,
+        sp.GetRequiredService<ILogger<ApplianceServiceSupervisor>>(), sp.GetRequiredService<EgressTopologyManager>(),
+        gatewayConnectDirectory, sp.GetRequiredService<PodmanImageArchiveStore>(), superviseObservability: true, superviseUpdateService: true,
+        verificationMode: verifyAppliance,
+        verificationSidecars: verifyAppliance ? sp.GetRequiredService<WorkspaceSidecarSupervisor>() : null,
+        publishedWebPort: publishedWebPort, recoveryPage: new ApplianceRecoveryPage(publishedWebPort),
+        confineManagerPeers: confineManagerPeers));
+    AddApplianceVerificationService(sp => sp.GetRequiredService<ApplianceServiceSupervisor>());
+    builder.Services.AddSingleton<Func<(string ReleaseId, bool VerificationMode, bool Ready)>>(sp =>
+    {
+        ApplianceServiceSupervisor supervisor = sp.GetRequiredService<ApplianceServiceSupervisor>();
+        return () => (release.ReleaseId, verifyAppliance, supervisor.IsReady);
+    });
+}
 WindowsPodmanDevEgressOptions? windowsPodmanDevEgress = null;
 if (OperatingSystem.IsWindows())
 {
@@ -54,10 +190,14 @@ if (OperatingSystem.IsWindows())
 
 builder.Services.AddSingleton<WorkspaceRuntimePaths>();
 builder.Services.AddSingleton(podmanCommandRunner);
-builder.Services.AddSingleton(static sp => WorkspaceSidecarCatalogLoader.Load(
-    Path.Combine(AppContext.BaseDirectory, "sidecars.json"),
-    sp.GetRequiredService<WorkspaceRuntimePaths>(),
-    sp.GetRequiredService<ILoggerFactory>().CreateLogger("Kautuka.Manager.Configuration.WorkspaceSidecarCatalogLoader")));
+builder.Services.AddSingleton(sp =>
+{
+    WorkspaceSidecarCatalog catalog = WorkspaceSidecarCatalogLoader.Load(
+        Path.Combine(AppContext.BaseDirectory, "sidecars.json"),
+        sp.GetRequiredService<WorkspaceRuntimePaths>(),
+        sp.GetRequiredService<ILoggerFactory>().CreateLogger("Kautuka.Manager.Configuration.WorkspaceSidecarCatalogLoader"));
+    return applianceEnabled ? catalog with { Sidecars = [.. catalog.Sidecars.Where(sidecar => sidecar.Name != "kautuka-openobserve")] } : catalog;
+});
 builder.Services.AddSingleton(static sp =>
 {
     IHostEnvironment environment = sp.GetRequiredService<IHostEnvironment>();
@@ -76,7 +216,13 @@ builder.Services.AddSingleton<IWorkloadRegistry>(sp =>
 builder.Services.AddSingleton(sp =>
     new NetworkAccessPolicyStore(
         Path.Combine(managerDataRoot, "networkAccess", "policy", "state.json"),
-        logger: sp.GetRequiredService<ILogger<NetworkAccessPolicyStore>>()));
+        seedRules: applianceEnabled ? null : NetworkAccessDefaultSeeds.DefaultRules.Where(rule => rule.AgentId != "updateservice").ToArray(),
+        logger: sp.GetRequiredService<ILogger<NetworkAccessPolicyStore>>(),
+        timeProvider: sp.GetService<TimeProvider>(),
+        pendingRequestRetention: builder.Configuration.GetValue<TimeSpan?>("Kautuka:NetworkAccess:PendingRequestRetention"),
+        registrableDomain: new NetworkRegistrableDomain(
+            Path.Combine(KautukaHostPathPolicy.ResolveSharedStateRoot(builder.Configuration), "updateService", NetworkRegistrableDomain.ListFileName),
+            builder.Configuration.GetValue("Update:PublicSuffixMinimumRuleCount", NetworkRegistrableDomain.DefaultMinimumRuleCount))));
 builder.Services.AddSingleton(sp =>
     new NetworkAccessAuditRing(Path.Combine(managerDataRoot, "networkAccess", "audit", "decisions.jsonl"),
         10 * 1024 * 1024, sp.GetRequiredService<ILogger<NetworkAccessAuditRing>>()));
@@ -111,16 +257,19 @@ builder.Services.AddSingleton(sp =>
             OperatingSystem.IsLinux(), builder.Environment.IsDevelopment(),
             Environment.GetEnvironmentVariable("KAUTUKA_ENVOY_SELINUX"),
             Environment.GetEnvironmentVariable("KAUTUKA_DEV_ENVOY_SELINUX")),
-        imageArchives: sp.GetRequiredService<PodmanImageArchiveStore>()));
-builder.Services.AddHostedService(sp => sp.GetRequiredService<EgressTopologyManager>());
+        imageArchives: sp.GetRequiredService<PodmanImageArchiveStore>(),
+        gatewayConnectEnvoyDirectory: gatewayConnectEnvoyDirectory,
+        telemetryAuthorization: telemetryAuthorization,
+        inspectionTimeoutSeconds: egressInspectionTimeoutSeconds));
+AddApplianceVerificationService(sp => sp.GetRequiredService<EgressTopologyManager>());
 builder.Services.AddSingleton<IHostedService, DevelopmentNacStartupGuard>();
 builder.Services.AddSingleton<IWorkloadStartupState>(sp => sp.GetRequiredService<EgressTopologyManager>());
 builder.Services.AddSingleton<WorkloadLaunchGate>();
-builder.Services.AddManagerNetworkAccessController();
+builder.Services.AddManagerNetworkAccessController(applianceEnabled);
 
 if (OperatingSystem.IsLinux())
 {
-    builder.Services.AddSingleton<IHostedService>(sp =>
+    AddApplianceVerificationService(sp =>
         EnvoyAuthorizationHost.Create(
             sp.GetRequiredService<Kautuka.NetworkAccessController.NetworkAccessController>(),
             new EnvoyAuthorizationHostOptions
@@ -154,7 +303,16 @@ builder.Services.AddSingleton<IManagerRuntimeHealthProbe, ManagerRuntimeHealthPr
 builder.Services.AddSingleton<IHostedService, ManagerRuntimeHealthWarmWorker>();
 builder.Services.AddSingleton<ManagerRuntimeContainerDiagnosticsService>();
 builder.Services.AddSingleton<PkgsProxyCacheDiagnosticsService>();
-builder.Services.AddSingleton<WorkspaceSidecarSupervisor>();
+builder.Services.AddSingleton(sp => new WorkspaceSidecarSupervisor(
+    sp.GetRequiredService<WorkspaceSidecarCatalog>(),
+    sp.GetRequiredService<IHttpClientFactory>(),
+    podmanCommandRunner,
+    sp.GetRequiredService<IOptions<ManagerContainerStartupOptions>>(),
+    sp.GetRequiredService<ILogger<WorkspaceSidecarSupervisor>>(),
+    sp.GetRequiredService<RuntimeImageAllowlist>(),
+    sp.GetRequiredService<PodmanImageArchiveStore>(),
+    sp.GetRequiredService<EgressTopologyManager>(),
+    applianceMode: applianceEnabled));
 builder.Services.AddSingleton<WorkspaceDesiredStateStore>();
 builder.Services.AddSingleton<McpbImageMaterializer>();
 builder.Services.AddSingleton<WorkspaceContainerConnectorExecutionService>();
@@ -187,6 +345,8 @@ builder.Services.AddSingleton<ManagerClientAuthorizationInterceptor>();
 KautukaMaintenanceMode.SuppressApplicationHostedServices(
     builder.Services,
     typeof(ManagerRuntimeHealthWarmWorker));
+foreach (ServiceDescriptor service in verificationServices)
+    builder.Services.Add(service);
 
 var (serverCert, caCert) = LocalCaMtlsBootstrap.EnsureAndLoad(
     managerDataRoot,
@@ -223,6 +383,13 @@ builder.WebHost.ConfigureKestrel(options =>
 
 using WebApplication app = builder.Build();
 
+if (KautukaMaintenanceMode.IsActive &&
+    app.Services.GetService<ApplianceServiceSupervisor>() is { } applianceSupervisor &&
+    !await applianceSupervisor.StopCohortAsync(CancellationToken.None).ConfigureAwait(false))
+{
+    throw new InvalidOperationException("Could not stop the appliance service containers for maintenance.");
+}
+
 app.GrantSocketGroupAccessWhenStarted(managerEndpoint);
 
 app.UseAdmissionFence(path => KautukaMaintenanceMode.IsAllowedGrpcRequest(path, "GetHostStatus", "Ping", "UpdateDesiredState"));
@@ -231,3 +398,4 @@ app.MapDefaultEndpoints();
 app.MapGrpcService<WorkspaceGrpcService>();
 
 await app.RunAsync().ConfigureAwait(false);
+return 0;

@@ -1,6 +1,9 @@
+import { createSession } from '@/features/chat';
 import { useCurrentUser } from '@/features/auth';
 import {
     apiError,
+    confirmProviderSave,
+    isProviderIdReserved,
     normalizePersonaDefinitions,
     normalizePersonaProfile,
     settingsAdmin,
@@ -11,7 +14,7 @@ import {
     type ProviderEntry,
 } from '@/features/settings';
 import { useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
     getGeneratedModelId,
@@ -90,7 +93,7 @@ export function useOnboardingFlow() {
   // Stable unique IDs per wizard session — prevents overwriting existing records on repeat runs
   const [wizardIds] = useState(() => {
     const ts = Date.now();
-    return { agentId: `agent-${ts}` };
+    return { agentId: `agent-${ts}`, providerSuffix: ts.toString(36) };
   });
 
   // Data State
@@ -130,6 +133,8 @@ export function useOnboardingFlow() {
   const [providerValidation, setProviderValidation] = useState<ProviderTestResult | null>(null);
 
   const [saving, setSaving] = useState(false);
+  const [startingChat, setStartingChat] = useState(false);
+  const startingChatRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
 
   // Existing-config detection — used at WelcomeScreen to offer edit vs create new
@@ -161,13 +166,19 @@ export function useOnboardingFlow() {
         const providers: ProviderEntry[] = provRes.data.providers;
         const models: ModelEntry[] = modRes.data.models;
         const agents: AgentSettingsEntry[] = agentRes.data.agents;
-        const existingSetupAgent = agents[0] ?? null;
+        const boundAgent = agents.flatMap((agent) => {
+          const model = models.find((item) => item.id === agent.modelId);
+          const provider = providers.find((item) => item.id === model?.providerId);
+          return model && provider ? [{ agent, model, provider }] : [];
+        })[0];
         setExistingProviders(providers);
         setExistingModels(models);
-        if (providers.length > 0 && existingSetupAgent) {
+        if (boundAgent) {
+          setExistingConfig(boundAgent);
+        } else if (providers.length === 1) {
           const provider = providers[0];
-          const model = models.find((m) => m.providerId === provider.id) ?? models[0] ?? null;
-          setExistingConfig({ provider, model, agent: existingSetupAgent });
+          const providerModels = models.filter((model) => model.providerId === provider.id);
+          setExistingConfig({ provider, model: providerModels.length === 1 ? providerModels[0] : null, agent: null });
         }
       } catch {
         // silently ignore — treat as no existing config
@@ -186,18 +197,15 @@ export function useOnboardingFlow() {
       id: provider.id,
       type: provider.type,
       base_url: (provider.settings.base_url as string) ?? '',
-      apiCredential: (provider.settings.api_key as string) ?? '',
+      apiCredential: '',
       http_timeout_seconds: String(provider.settings.http_timeout_seconds ?? DEFAULT_HTTP_TIMEOUT_SECONDS),
     });
-    if (model) {
-      setModelForm({
-        id: model.id,
-        providerId: model.providerId,
-        modelName: model.modelName,
-        custom_output_text: (model.settings?.custom_output_text as string) ?? '',
-      });
-      setAgentForm((prev) => ({ ...prev, modelId: model.id }));
-    }
+    setModelForm({
+      id: model?.id ?? '',
+      providerId: provider.id,
+      modelName: model?.modelName ?? getRecommendedProviderModel(provider.type),
+      custom_output_text: (model?.settings?.custom_output_text as string) ?? '',
+    });
     if (agent) {
       setAgentForm(agent);
     }
@@ -230,14 +238,8 @@ export function useOnboardingFlow() {
   }, [providerForm.id]);
 
   useEffect(() => {
-    const recommendedModel = getRecommendedProviderModel(providerForm.type);
     setAvailableModelNames([]);
     setProviderValidation(null);
-    setModelForm((prev) => ({
-      ...prev,
-      id: '',
-      modelName: recommendedModel || prev.modelName,
-    }));
   }, [providerForm.type]);
 
   useEffect(() => {
@@ -365,7 +367,8 @@ export function useOnboardingFlow() {
       providerForm.id.trim() ||
       getGeneratedProviderId(
         providerForm.type,
-        existingProviders.map((provider) => provider.id)
+        existingProviders.map((provider) => provider.id),
+        wizardIds.providerSuffix,
       );
     const providerType = providerForm.type.trim();
     const settings = getProviderSettings(providerType);
@@ -382,7 +385,8 @@ export function useOnboardingFlow() {
       return;
     }
 
-    if (requiresApiKey(providerType) && !providerForm.apiCredential.trim()) {
+    const storedProvider = existingProviders.find((provider) => provider.id === providerId && provider.type === providerType);
+    if (requiresApiKey(providerType) && !providerForm.apiCredential.trim() && !storedProvider?.hasApiKey) {
       setError('Please paste your provider credential before continuing.');
       setProviderValidation(null);
       return;
@@ -405,12 +409,30 @@ export function useOnboardingFlow() {
 
       setSaving(true);
       try {
+        const storedModel = existingModels.find((model) => model.id === modelForm.id && model.providerId === providerId);
+        if (storedProvider && storedModel && storedModel.modelName === providerModel
+            && settings.api_key === null
+            && (settings.base_url ?? '') === String(storedProvider.settings.base_url ?? '')
+            && settings.http_timeout_seconds === Number(storedProvider.settings.http_timeout_seconds ?? DEFAULT_HTTP_TIMEOUT_SECONDS)) {
+          await saveHelper(storedModel.id);
+          return;
+        }
         await saveProviderAndContinue(providerId, providerType, settings, providerModel);
       } finally {
         setSaving(false);
       }
     } catch (err) {
-      setError(apiError(err));
+      if (isProviderIdReserved(err)) {
+        const retryId = getGeneratedProviderId(
+          providerType,
+          [...existingProviders.map((provider) => provider.id), providerId],
+          Date.now().toString(36),
+        );
+        setProviderForm((prev) => ({ ...prev, id: retryId }));
+        setError('The previous provider ID still has a credential. Continue again to save with a fresh ID.');
+      } else {
+        setError(apiError(err));
+      }
       setProviderValidation(null);
     }
   };
@@ -421,26 +443,28 @@ export function useOnboardingFlow() {
     settings: { base_url: string | null; api_key: string | null; http_timeout_seconds: number | null },
     providerModel: string
   ) => {
-      await settingsAdmin.saveProvider({
+      const saved = await confirmProviderSave(settingsAdmin.saveProvider, {
         id: providerId,
         type: providerType,
         settings,
       });
+      if (!saved) return;
       setProviderForm((prev) => ({ ...prev, id: providerId }));
       setExistingProviders((prev) => {
         const nextProvider = {
           id: providerId,
           type: providerType,
-          settings: {},
-          hasApiKey: Boolean(providerForm.apiCredential.trim()),
+          settings: { base_url: settings.base_url, http_timeout_seconds: settings.http_timeout_seconds },
+          hasApiKey: Boolean(providerForm.apiCredential.trim()) || prev.some((provider) => provider.id === providerId && provider.hasApiKey),
         };
         const withoutCurrent = prev.filter((provider) => provider.id !== providerId);
         return [...withoutCurrent, nextProvider];
       });
 
       const modelName = providerModel;
+      const currentModel = existingModels.find((model) => model.id === modelForm.id);
       const modelId =
-        modelForm.id.trim() ||
+        (currentModel?.providerId === providerId && currentModel.modelName === modelName ? currentModel.id : '') ||
         getGeneratedModelId(
           providerType,
           modelName,
@@ -464,11 +488,12 @@ export function useOnboardingFlow() {
         return;
       }
 
+      const modelSettings = existingModels.find((model) => model.id === modelId)?.settings ?? {};
       await settingsAdmin.saveModel({
         id: modelId,
         providerId,
         modelName,
-        settings: {},
+        settings: modelSettings,
         capabilities: probedCapabilities,
       });
 
@@ -484,13 +509,17 @@ export function useOnboardingFlow() {
           id: modelId,
           providerId,
           modelName,
-          settings: {},
+          settings: modelSettings,
           capabilities: probedCapabilities,
         };
         const withoutCurrent = prev.filter((model) => model.id !== modelId);
         return [...withoutCurrent, nextModel];
       });
 
+      await saveHelper(modelId, warningMessage);
+  };
+
+  const saveHelper = async (modelId: string, warningMessage = '') => {
       await settingsAdmin.saveAgent(agentForm.id, {
         name: agentForm.name.trim(),
         modelId,
@@ -500,11 +529,7 @@ export function useOnboardingFlow() {
         skillAttachments: agentForm.skillAttachments ?? [],
         persona: normalizePersonaProfile(agentForm.persona, personaDefinitions),
         toolExposure: agentForm.toolExposure,
-        session: {
-          ...agentForm.session,
-          historyEnabled: true,
-          maxHistoryRuns: Math.max(1, agentForm.session.maxHistoryRuns),
-        },
+        session: agentForm.session,
         sandbox: agentForm.sandbox,
       });
 
@@ -519,7 +544,7 @@ export function useOnboardingFlow() {
       // stale providersCount=0 and immediately redirects back to /onboarding.
       await queryClient.invalidateQueries({ queryKey: ['system-setup-status'] });
       await queryClient.refetchQueries({ queryKey: ['system-setup-status'] });
-      goNext(WIZARD_STAGES.recommendations);
+      goNext(WIZARD_STAGES.success);
   };
 
   const saveTelegramSetup = async () => {
@@ -567,6 +592,24 @@ export function useOnboardingFlow() {
     navigate('/dashboard', { replace: true, state: createOnboardingHandoffState() });
   };
 
+  const chatWithHelper = async () => {
+    if (startingChatRef.current) return;
+    startingChatRef.current = true;
+    setStartingChat(true);
+    setError(null);
+    try {
+      const session = await createSession('agent', agentForm.id);
+      navigate(`/workspace/${encodeURIComponent(agentForm.id)}?sessionId=${encodeURIComponent(session.id)}`, {
+        replace: true,
+        state: createOnboardingHandoffState(),
+      });
+    } catch (err) {
+      setError(apiError(err));
+      startingChatRef.current = false;
+      setStartingChat(false);
+    }
+  };
+
   const configureManually = () => {
     navigate('/settings?tab=providers', { replace: true });
   };
@@ -580,19 +623,25 @@ export function useOnboardingFlow() {
     goNext,
     onboardingHealth: onboardingStatus?.health,
     saving,
+    startingChat,
     error,
     checkingExisting,
-    hasExistingSetup: existingConfig !== null,
+    hasExistingSetup: Boolean(existingConfig?.agent),
+    canResumeSetup: existingConfig !== null && existingConfig.agent === null,
     loadExistingSetup,
     canImportConnectors,
     canImportSkills,
     canUseCatalogRecommendations,
+    canManageServiceNetworkAccess: currentUser?.role === 'admin',
     personaDefinitions,
     selectedAgentPresetId,
     setSelectedAgentPresetId,
     selectedBrainPresetId,
     setSelectedBrainPresetId,
     providerForm,
+    hasSavedProviderCredential: existingProviders.some(
+      (provider) => provider.id === providerForm.id && provider.type === providerForm.type && provider.hasApiKey,
+    ),
     setProviderForm,
     saveSetup,
     providerValidation,
@@ -600,7 +649,8 @@ export function useOnboardingFlow() {
       providerForm.id.trim() ||
       getGeneratedProviderId(
         providerForm.type,
-        existingProviders.map((provider) => provider.id)
+        existingProviders.map((provider) => provider.id),
+        wizardIds.providerSuffix,
       ),
     modelForm,
     setModelForm,
@@ -625,6 +675,7 @@ export function useOnboardingFlow() {
     saveTelegramSetup,
     skipTelegramSetup,
     skipToDashboard,
+    chatWithHelper,
     configureManually,
     openSettings,
   };

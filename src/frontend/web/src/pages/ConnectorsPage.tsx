@@ -17,6 +17,7 @@ import {
   useConnectors,
   useDeleteConnector,
   useSaveConnector,
+  useSetConnectorEnabled,
   useSaveConnectorCredentials,
   useSaveConnectorDiscovery,
   type Connector,
@@ -61,6 +62,7 @@ export const ConnectorsPage: React.FC = () => {
   const { data: currentUser } = useCurrentUser();
   const { data: connectors = [], isLoading, error } = useConnectors();
   const saveMutation = useSaveConnector();
+  const enableMutation = useSetConnectorEnabled();
   const discoveryMutation = useSaveConnectorDiscovery();
   const credsMutation = useSaveConnectorCredentials();
   const deleteMutation = useDeleteConnector();
@@ -71,7 +73,7 @@ export const ConnectorsPage: React.FC = () => {
   const completeOAuth = useCompleteConnectorOAuth();
   const completeOAuthRef = useRef(completeOAuth.mutate);
   completeOAuthRef.current = completeOAuth.mutate;
-  const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [pendingToggle, setPendingToggle] = useState<Map<string, boolean>>(() => new Map());
 
   useEffect(() => {
     const hash = window.location.hash.startsWith('#')
@@ -136,18 +138,21 @@ export const ConnectorsPage: React.FC = () => {
   const canImportConnectors =
     !!currentUser && (currentUser.role === ROLE_ADMIN || Boolean(currentUser.canImportConnectors));
 
-  const handleToggle = (id: string, enabled: boolean) => {
+  const handleToggle = async (id: string, enabled: boolean) => {
     const current = connectors.find((c) => c.id === id);
     if (!current) return;
-    if (!canManageConnector(current)) {
-      toast.error('Only admins can change system connector settings.');
-      return;
+    setPendingToggle((previous) => new Map(previous).set(id, enabled));
+    try {
+      await enableMutation.mutateAsync({ connectorId: id, enabled });
+    } catch (error) {
+      toast.error(getErrorMessage(error) ?? 'Could not change connector state.');
+    } finally {
+      setPendingToggle((previous) => {
+        const next = new Map(previous);
+        next.delete(id);
+        return next;
+      });
     }
-    setTogglingId(id);
-    saveMutation.mutate(
-      { connectorId: id, data: buildSavePayload({ ...entryToDraft(current), enabled }) },
-      { onSettled: () => setTogglingId(null) }
-    );
   };
 
   const handleSave = (d: ConnectorDraft, credValues: Record<string, string>) => {
@@ -160,9 +165,7 @@ export const ConnectorsPage: React.FC = () => {
 
     if (current && !canManageConnector(current)) {
       if (Object.keys(nonEmpty).length === 0 && !httpUrlOverride) {
-        toast.error(
-          'Only admins can change system connector settings. Add credentials or a personal HTTP URL to save personal access.'
-        );
+        setModalTarget(null);
         return;
       }
 
@@ -288,13 +291,9 @@ export const ConnectorsPage: React.FC = () => {
               ? 'Saving connector credentials…'
               : 'Saving the connector. Kautuka may build its image and check its tools, which can take a few minutes.'
           }
-          saveLabel={
-            modalTarget !== 'new' && modalTarget != null && !canManageConnector(modalTarget)
-              ? 'Save Credentials'
-              : undefined
-          }
+          readOnlyDefinition={modalTarget !== 'new' && modalTarget != null && !canManageConnector(modalTarget)}
           onToolCountSaved={
-            modalTarget != null && modalTarget !== 'new'
+            modalTarget != null && modalTarget !== 'new' && canManageConnector(modalTarget)
               ? (count, names) => handleToolCountSaved(modalTarget.id, count, names)
               : undefined
           }
@@ -445,7 +444,8 @@ export const ConnectorsPage: React.FC = () => {
                     onToggle={handleToggle}
                     onEdit={(entry) => setModalTarget(entry)}
                     onDelete={handleDelete}
-                    toggling={togglingId === c.id || deleteMutation.isPending}
+                    toggling={pendingToggle.get(c.id) === !c.enabled}
+                    disabled={pendingToggle.has(c.id) || deleteMutation.isPending}
                   />
                 ))}
               </div>
@@ -467,7 +467,8 @@ export const ConnectorsPage: React.FC = () => {
                     onToggle={handleToggle}
                     onEdit={(entry) => setModalTarget(entry)}
                     onDelete={handleDelete}
-                    toggling={togglingId === c.id || deleteMutation.isPending}
+                    toggling={pendingToggle.get(c.id) === !c.enabled}
+                    disabled={pendingToggle.has(c.id) || deleteMutation.isPending}
                   />
                 ))}
               </div>

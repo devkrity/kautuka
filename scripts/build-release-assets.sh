@@ -19,6 +19,9 @@ Options:
   --artifact-base-url <url>         Absolute URL prefix for artifact `url` fields in the signed platform manifest.
   --signature-url <url>             Optional exact signature URL in the signed release manifest.
   --manifest-public-key <pem>       Required for full builds: public key PEM baked into the prewarmed rootfs.
+  --appliance-image-prefix <repo>   Package the five core service OCI images and sign their digests.
+  --appliance-runtime-base <image>  Digest-pinned Fedora minimal base for --appliance-image-prefix.
+  --linux-appliance-only           Build a signed Linux appliance preview and skip WSL prewarming.
   --rebuild-images                  Rebuild the cached WSL base rootfs and Linux release build image.
   --prewarm-only                    Layer an existing platform tarball into the cached WSL base rootfs. Skips compile.
   --platform-tarball <tar.gz>       Platform archive for --prewarm-only.
@@ -113,6 +116,7 @@ PY
 assert_packed_appliance_network_seal() {
   local rootfs_output="$1"
   local kautuka_uid="${2:-}"
+  local packed_version="$3"
 
   local sockets_conf
   sockets_conf="$(tar -xOf "$rootfs_output" ./usr/lib/tmpfiles.d/kautuka-sockets.conf 2>/dev/null || true)"
@@ -132,19 +136,58 @@ assert_packed_appliance_network_seal() {
     exit 1
   }
 
+  printf '%s\n' "$sockets_conf" | grep -Fqx 'f /run/kautuka-helper-run.lock 0644 root root -' || {
+    echo 'error: packed kautuka-sockets.conf is missing the root-owned helper run lease' >&2
+    exit 1
+  }
+
   printf '%s\n' "$sockets_conf" | grep -Fqx 'd /run/kautuka/networkaccess-envoy 0710 kautuka kautuka -' || {
     echo 'error: packed appliance is missing the Manager-owned Envoy authorization socket directory' >&2
     return 1
   }
 
   local hook_root='./var/lib/kautuka/.config/containers'
-  local hook_file
-  for hook_file in hooks.d/kautuka_hook.py hooks.d/kautuka_workload.nft.json.tmpl hooks.d/kautuka_package_proxy.nft.json.tmpl hooks.d/kautuka_hook.json containers.conf.d/99-kautuka-hooks.conf; do
-    tar -xOf "$rootfs_output" "$hook_root/$hook_file" >/dev/null || {
-      echo "error: packed appliance is missing NAC hook configuration: $hook_file" >&2
-      return 1
-    }
-  done
+  python3 - "$rootfs_output" "$hook_root" "$packed_version" <<'PY' || return 1
+import json, sys, tarfile, tomllib
+
+archive, hook_root, version = sys.argv[1:]
+manager = './opt/kautuka/manager'
+target = f'versions/{version}'
+hook = f'{manager}/{target}/scripts/kautuka-oci-hook'
+try:
+    with tarfile.open(archive, 'r:gz') as rootfs:
+        current = rootfs.getmember(f'{manager}/current')
+        if not current.issym() or current.linkname != target or current.uid != 0:
+            raise ValueError('Manager current does not select the packaged release')
+        for directory in ('./opt/kautuka', manager, f'{manager}/versions', f'{manager}/{target}', f'{manager}/{target}/scripts'):
+            member = rootfs.getmember(directory)
+            if not member.isdir() or member.uid != 0 or member.mode & 0o022:
+                raise ValueError(f'untrusted native hook directory {directory}')
+        binary = rootfs.getmember(hook)
+        if not binary.isfile() or binary.uid != 0 or binary.mode & 0o022 or not binary.mode & 0o001:
+            raise ValueError('packaged native hook is not a root-owned executable')
+        with rootfs.extractfile(binary) as stream:
+            header = stream.read(20)
+        if header[:6] != b'\x7fELF\x02\x01' or header[18:20] != b'\x3e\x00':
+            raise ValueError('packaged native hook is not a Linux x64 ELF binary')
+        with rootfs.extractfile(f'{hook_root}/hooks.d/kautuka_hook.json') as stream:
+            registration = json.load(stream)
+        if registration != {
+            'version': '1.0.0',
+            'hook': {'path': '/opt/kautuka/manager/current/scripts/kautuka-oci-hook', 'timeout': 45},
+            'when': {'always': True},
+            'stages': ['createRuntime'],
+        }:
+            raise ValueError('packed OCI registration does not select the versioned native hook')
+        if f'{hook_root}/hooks.d/kautuka_hook.py' in rootfs.getnames():
+            raise ValueError('legacy Python hook present in fresh WSL hook directory')
+        with rootfs.extractfile(f'{hook_root}/containers.conf.d/99-kautuka-hooks.conf') as stream:
+            configuration = tomllib.load(stream)
+        if configuration != {'engine': {'hooks_dir': ['/var/lib/kautuka/.config/containers/hooks.d', {'append': True}]}}:
+            raise ValueError('packed Podman configuration does not register the WSL hook directory')
+except (OSError, KeyError, ValueError, tarfile.TarError) as error:
+    raise SystemExit(f'error: invalid WSL native hook packaging: {error}') from error
+PY
 
   if [[ -n "$kautuka_uid" ]]; then
     local restart_dropin
@@ -179,6 +222,9 @@ manifest_url=''
 manifest_public_key=''
 artifact_base_url=''
 signature_url=''
+appliance_image_prefix=''
+appliance_runtime_base=''
+linux_appliance_only='false'
 rebuild_images='false'
 prewarm_only='false'
 platform_tarball_override=''
@@ -237,6 +283,18 @@ while [[ $# -gt 0 ]]; do
       manifest_public_key="$2"
       shift 2
       ;;
+    --appliance-image-prefix)
+      appliance_image_prefix="$2"
+      shift 2
+      ;;
+    --appliance-runtime-base)
+      appliance_runtime_base="$2"
+      shift 2
+      ;;
+    --linux-appliance-only)
+      linux_appliance_only='true'
+      shift
+      ;;
     --rebuild-images)
       rebuild_images='true'
       shift
@@ -280,6 +338,19 @@ if [[ "$prewarm_only" == 'true' ]]; then
   fi
 elif [[ -z "$output_root" || -z "$private_key" ]]; then
   usage >&2
+  exit 1
+fi
+
+if [[ -n "$appliance_image_prefix" || -n "$appliance_runtime_base" ]]; then
+  if [[ -z "$appliance_image_prefix" || -z "$appliance_runtime_base" || "$prewarm_only" == 'true' ]]; then
+    echo 'error: appliance image packaging requires both appliance image options on a full build.' >&2
+    exit 1
+  fi
+fi
+
+if [[ "$linux_appliance_only" == 'true' ]] &&
+   [[ "$channel" != 'preview' || -z "$appliance_image_prefix" || -z "$artifact_base_url" ]]; then
+  echo 'error: --linux-appliance-only requires the preview channel, appliance image options, and --artifact-base-url.' >&2
   exit 1
 fi
 
@@ -864,6 +935,9 @@ run_build_container \
 
     publish_host src/backend/Kautuka.Manager/Kautuka.Manager.csproj /out/bin
     copy_manager_runtime_assets /out/bin
+    publish_host src/tools/Kautuka.OciHook/Kautuka.OciHook.csproj /out/bin/scripts
+    mv /out/bin/scripts/Kautuka.OciHook /out/bin/scripts/kautuka-oci-hook
+    readelf -h /out/bin/scripts/kautuka-oci-hook >/dev/null
     publish_host src/backend/Kautuka.Gateway/Kautuka.Gateway.csproj /out/services/gateway
     copy_gateway_runtime_assets /out/services/gateway
     publish_host src/backend/Kautuka.CredentialsHost/Kautuka.CredentialsHost.csproj /out/services/credentialshost
@@ -939,9 +1013,11 @@ if [[ -n "$manifest_url" ]]; then
 fi
 
 cp "$source_root/scripts/kautuka-apply-release.sh" "$stage_dir/bin/kautuka-apply-release"
+cp "$source_root/scripts/kautuka-apply-release-dispatch.sh" "$stage_dir/bin/kautuka-apply-release-dispatch"
 cp "$source_root/scripts/kautuka-update-recovery.py" "$stage_dir/bin/kautuka-update-recovery"
 chmod +x "$stage_dir/bin/kautuka-manager" \
   "$stage_dir/bin/kautuka-apply-release" \
+  "$stage_dir/bin/kautuka-apply-release-dispatch" \
   "$stage_dir/bin/kautuka-update-recovery" \
   "$stage_dir/services/gateway/kautuka-gateway" \
   "$stage_dir/services/credentialshost/kautuka-credentialshost" \
@@ -950,6 +1026,15 @@ chmod +x "$stage_dir/bin/kautuka-manager" \
   "$stage_dir/services/webhost/kautuka-webhost"
 mkdir -p "$stage_dir/services/webhost/wwwroot"
 cp -a "$source_root/src/frontend/web/dist/." "$stage_dir/services/webhost/wwwroot/"
+
+# The packaged binaries and static assets must remain readable to the rootless run users.
+chmod -R a+rX,go-w "$stage_dir/bin" "$stage_dir/services"
+
+if [[ -n "$appliance_image_prefix" ]]; then
+  log_phase "Building digest-pinned appliance service images"
+  bash "$source_root/scripts/build-appliance-service-images.sh" \
+    "$stage_dir/services" "$stage_dir/service-images" "$appliance_runtime_base" "$appliance_image_prefix" "$version"
+fi
 
 assert_staged_sidecar_seal "$stage_dir"
 
@@ -961,47 +1046,22 @@ mkdir -p "$(dirname "$platform_tarball")"
 tar -czf "$platform_tarball" -C "$stage_dir" .
 fi
 
-# drvfs/Windows mounts often reject chmod; invoke via bash instead of relying on +x.
-chmod +x "$source_root/scripts/build-wsl-rootfs.sh" 2>/dev/null || true
-
-rootfs_cache_key="$(compute_hash "$(hash_file "$source_root/scripts/build-wsl-rootfs.sh")" "$rootfs_releasever" "$rootfs_arch" "$rootfs_image")"
-base_rootfs="$rootfs_cache_dir/kautuka-wsl-rootfs-${rootfs_cache_key:0:16}.tar.gz"
-
-log_phase "Preparing cached WSL base rootfs"
-if [[ -n "${KAUTUKA_RELEASE_WSL_ROOTFS_PATH:-}" ]]; then
-  if [[ ! -s "$KAUTUKA_RELEASE_WSL_ROOTFS_PATH" ]]; then
-    echo "error: pinned WSL rootfs archive is missing or empty: $KAUTUKA_RELEASE_WSL_ROOTFS_PATH" >&2
-    exit 1
-  fi
-  cp "$KAUTUKA_RELEASE_WSL_ROOTFS_PATH" "$base_rootfs"
-  printf 'Using the reviewed WSL base rootfs from %s\n' "$KAUTUKA_RELEASE_WSL_ROOTFS_PATH"
-elif [[ "$rebuild_images" == 'true' || ! -f "$base_rootfs" ]]; then
-  printf 'Building cached WSL base rootfs: %s\n' "$base_rootfs"
-  bash "$source_root/scripts/build-wsl-rootfs.sh" \
-    --releasever "$rootfs_releasever" \
-    --arch "$rootfs_arch" \
-    --image "$rootfs_image" \
-    --container-runtime "$container_runtime" \
-    --output "$base_rootfs"
-else
-  printf 'Reusing cached WSL base rootfs: %s\n' "$base_rootfs"
-fi
-
 stage_nac_hook_for_rootfs() {
-  local root="$1" payload="$2" uid="$3" gid="$4"
+  local root="$1" version_root="$2" uid="$3" gid="$4"
   local hook_dir="$root/var/lib/kautuka/.config/containers/hooks.d"
   local conf_dir="$root/var/lib/kautuka/.config/containers/containers.conf.d"
-  local file
-  for file in kautuka_hook.py kautuka_workload.nft.json.tmpl kautuka_package_proxy.nft.json.tmpl; do
-    [[ -f "$payload/scripts/$file" ]] || { echo "error: required NAC hook payload is missing: $file" >&2; return 1; }
-  done
+  local native_hook="$version_root/scripts/kautuka-oci-hook"
+  if [[ ! -f "$native_hook" || -L "$native_hook" || ! -x "$native_hook" ]] ||
+    ! readelf -h "$native_hook" >/dev/null 2>&1; then
+    echo "error: required native OCI hook executable is missing or invalid: $native_hook" >&2
+    return 1
+  fi
+  sudo chown root:root "$version_root" "$version_root/scripts" "$native_hook"
+  sudo chmod 0755 "$version_root" "$version_root/scripts" "$native_hook"
   sudo install -d -m 0755 -o "$uid" -g "$gid" "$root/var/lib/kautuka/.config" "$root/var/lib/kautuka/.config/containers" "$hook_dir" "$conf_dir"
-  sudo install -m 0755 -o "$uid" -g "$gid" "$payload/scripts/kautuka_hook.py" "$hook_dir/kautuka_hook.py"
-  for file in kautuka_workload.nft.json.tmpl kautuka_package_proxy.nft.json.tmpl; do
-    sudo install -m 0644 -o "$uid" -g "$gid" "$payload/scripts/$file" "$hook_dir/$file"
-  done
+  sudo rm -f -- "$hook_dir/kautuka_hook.py" "$hook_dir/kautuka_workload.nft.json.tmpl" "$hook_dir/kautuka_package_proxy.nft.json.tmpl"
   printf '[engine]\nhooks_dir = ["/var/lib/kautuka/.config/containers/hooks.d", { append = true }]\n' | sudo tee "$conf_dir/99-kautuka-hooks.conf" >/dev/null
-  printf '%s\n' '{"version":"1.0.0","hook":{"path":"/var/lib/kautuka/.config/containers/hooks.d/kautuka_hook.py","timeout":45},"when":{"always":true},"stages":["createRuntime"]}' | sudo tee "$hook_dir/kautuka_hook.json" >/dev/null
+  printf '%s\n' '{"version":"1.0.0","hook":{"path":"/opt/kautuka/manager/current/scripts/kautuka-oci-hook","timeout":45},"when":{"always":true},"stages":["createRuntime"]}' | sudo tee "$hook_dir/kautuka_hook.json" >/dev/null
   sudo chown "$uid:$gid" "$conf_dir/99-kautuka-hooks.conf" "$hook_dir/kautuka_hook.json"
   sudo chmod 0644 "$conf_dir/99-kautuka-hooks.conf" "$hook_dir/kautuka_hook.json"
 }
@@ -1301,6 +1361,7 @@ Environment=Kautuka__ChannelGateway__ProductionMaterial__GatewayTrustRoot=/var/l
         '# is what lets the socket itself be 0660 rather than world-writable.' \
         'd /run/kautuka 0755 root root -' \
         'f /run/kautuka-db-writer.lock 0644 root root -' \
+        'f /run/kautuka-helper-run.lock 0644 root root -' \
         'd /run/kautuka/networkaccess-envoy 0710 kautuka kautuka -'
 
       # service_key:owner:traversal_group
@@ -1364,7 +1425,8 @@ Environment=Kautuka__ChannelGateway__ProductionMaterial__GatewayTrustRoot=/var/l
   sudo mkdir -p "$version_root" "$visible_root/logs/manager" "$visible_root/workspaces" "$visible_root/oci-images" "$internal_state_root/manager" "$wants_dir" "$linger_dir" "$user_unit_dir/kautuka.target.wants" "$rootfs_dir/etc/kautuka"
   sudo cp -a "$manager_content_root/." "$version_root/"
   sudo chmod +x "$version_root/kautuka-manager"
-  stage_nac_hook_for_rootfs "$rootfs_dir" "$manager_content_root" "$kautuka_uid" "$kautuka_gid"
+  sudo install -d -m 0755 -o root -g root "$rootfs_dir/opt/kautuka" "$install_root" "$install_root/versions"
+  stage_nac_hook_for_rootfs "$rootfs_dir" "$version_root" "$kautuka_uid" "$kautuka_gid"
   sudo ln -sfn "versions/$version" "$current_link"
   sudo touch "$linger_dir/kautuka"
   stage_oci_image_archives "$rootfs_dir"
@@ -1669,11 +1731,49 @@ Environment=Kautuka__ChannelGateway__ProductionMaterial__GatewayTrustRoot=/var/l
     exit 1
   }
 
-  assert_packed_appliance_network_seal "$rootfs_output" "$kautuka_uid"
+  assert_packed_appliance_network_seal "$rootfs_output" "$kautuka_uid" "$version"
 }
 
-log_phase "Prewarming WSL appliance rootfs"
-prewarm_rootfs "$base_rootfs" "$final_rootfs"
+if [[ "$linux_appliance_only" != 'true' ]]; then
+  rootfs_cache_key="$(compute_hash "$(hash_file "$source_root/scripts/build-wsl-rootfs.sh")" "$rootfs_releasever" "$rootfs_arch" "$rootfs_image")"
+  base_rootfs="$rootfs_cache_dir/kautuka-wsl-rootfs-${rootfs_cache_key:0:16}.tar.gz"
+
+  log_phase "Preparing cached WSL base rootfs"
+  if [[ -n "${KAUTUKA_RELEASE_WSL_ROOTFS_PATH:-}" ]]; then
+    if [[ ! -s "$KAUTUKA_RELEASE_WSL_ROOTFS_PATH" ]]; then
+      echo "error: pinned WSL rootfs archive is missing or empty: $KAUTUKA_RELEASE_WSL_ROOTFS_PATH" >&2
+      exit 1
+    fi
+    cp "$KAUTUKA_RELEASE_WSL_ROOTFS_PATH" "$base_rootfs"
+    printf 'Using the reviewed WSL base rootfs from %s\n' "$KAUTUKA_RELEASE_WSL_ROOTFS_PATH"
+  elif [[ "$rebuild_images" == 'true' || ! -f "$base_rootfs" ]]; then
+    printf 'Building cached WSL base rootfs: %s\n' "$base_rootfs"
+    bash "$source_root/scripts/build-wsl-rootfs.sh" \
+      --releasever "$rootfs_releasever" \
+      --arch "$rootfs_arch" \
+      --image "$rootfs_image" \
+      --container-runtime "$container_runtime" \
+      --output "$base_rootfs"
+  else
+    printf 'Reusing cached WSL base rootfs: %s\n' "$base_rootfs"
+  fi
+
+  if [[ -n "$appliance_image_prefix" ]]; then
+    log_phase "Adding the shared Linux installer to the WSL base"
+    rootfs_dir="$work_dir/rootfs"
+    mkdir -p "$rootfs_dir"
+    sudo tar --numeric-owner --xattrs --acls -xzf "$base_rootfs" -C "$rootfs_dir"
+    bootstrap="$work_dir/bootstrap-wsl.sh"
+    bash "$source_root/scripts/generate-linux-installer.sh" \
+      --output "$bootstrap" --version "$version" --release-channel "$channel" \
+      --release-tag "$release_tag" --manifest-public-key "$manifest_public_key"
+    sudo install -D -o root -g root -m 0755 "$bootstrap" "$rootfs_dir/usr/local/lib/kautuka/bootstrap-wsl.sh"
+    sudo tar --numeric-owner --xattrs --acls -czf - -C "$rootfs_dir" . > "$final_rootfs"
+  else
+    log_phase "Prewarming WSL appliance rootfs"
+    prewarm_rootfs "$base_rootfs" "$final_rootfs"
+  fi
+fi
 
 if [[ "$prewarm_only" == 'true' ]]; then
   printf 'Prewarmed appliance rootfs written to %s\n' "$final_rootfs"
@@ -1682,11 +1782,20 @@ if [[ "$prewarm_only" == 'true' ]]; then
 fi
 
 manifest_args=()
+checksummed_assets=(kautuka-linux-amd64.tar.gz)
+if [[ "$linux_appliance_only" == 'true' ]]; then
+  manifest_args+=(--linux-appliance-only true)
+else
+  checksummed_assets+=(kautuka-wsl-appliance.tar.gz)
+fi
 if [[ -n "$minimum_updater_version" ]]; then
   manifest_args+=(--minimum-updater-version "$minimum_updater_version")
 fi
 if [[ -n "$signature_url" ]]; then
   manifest_args+=(--signature-url "$signature_url")
+fi
+if [[ -n "$appliance_image_prefix" ]]; then
+  manifest_args+=(--appliance-deployment "$stage_dir/service-images/appliance-deployment.json")
 fi
 
 log_phase "Generating signed release manifest"
@@ -1703,9 +1812,16 @@ run_repo_node "$source_root/scripts/generate-release-manifest.mjs" \
   --runtime-images "$source_root/src/backend/Kautuka.Manager/runtime-images.json" \
   "${manifest_args[@]}"
 
+if [[ "$linux_appliance_only" == 'true' ]]; then
+  bash "$source_root/scripts/generate-linux-installer.sh" \
+    --output "$release_dir/kautuka-install-linux.sh" --version "$version" --release-channel "$channel" \
+    --manifest-url "$manifest_url" --manifest-public-key "$manifest_public_key"
+  checksummed_assets+=(kautuka-install-linux.sh)
+fi
+
 (
   cd "$release_dir"
-  sha256sum kautuka-linux-amd64.tar.gz kautuka-wsl-appliance.tar.gz kautuka-platform-release.json kautuka-platform-release.sig > kautuka-release-assets.sha256
+  sha256sum "${checksummed_assets[@]}" kautuka-platform-release.json kautuka-platform-release.sig > kautuka-release-assets.sha256
 )
 
 printf 'Release artifacts written to %s\n' "$release_dir"

@@ -406,7 +406,46 @@ describe('App update banner', () => {
       expect(screen.getByText('You’re up to date')).toBeInTheDocument();
     });
 
+    expect(fetchUpdateStatusMock).toHaveBeenCalledOnce();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('shows a new discovery failure after a successful update and reopens it on retry', async () => {
+    const installedStatus = {
+      ok: true,
+      message: 'update-status',
+      state: 'Current',
+      effectiveReleaseChannel: 'preview',
+      eligibilityState: 'None',
+      eligibilityReason: 'AlreadyCurrent',
+      currentRelease: { releaseId: 'v1.2.0-preview.2', version: '1.2.0-preview.2' },
+      lastKnownGoodRelease: { releaseId: 'v1.2.0-preview.1', version: '1.2.0-preview.1' },
+      managerVersion: '1.2.0-preview.2',
+      lastError: null,
+    };
+    fetchUpdateStatusMock.mockResolvedValue(installedStatus);
+    refreshUpdateDiscoveryMock.mockResolvedValue({
+      ...installedStatus,
+      message: 'update-refresh',
+      lastError: 'GitHub release discovery request failed.',
+    });
+
+    renderApp();
+    await screen.findByText('Update applied: 1.2.0-preview.2');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
+    await screen.findByText('Update check needs attention');
+    expect(screen.getByText('GitHub release discovery request failed.')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Review update permissions' })).toHaveAttribute(
+      'href',
+      '/settings?tab=advanced&section=network-access'
+    );
+    expect(screen.queryByText('You’re up to date')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle('Dismiss update notice'));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('GitHub release discovery request failed.');
   });
 
   it('shows updater operation failures even when the status payload is not ok', async () => {
@@ -477,6 +516,25 @@ describe('App update banner', () => {
     expect(screen.getByText('The update apply for release 2.0.0 did not complete. The current release is still active.')).toBeInTheDocument();
   });
 
+  it('reports failed cleanup after the new release is running', async () => {
+    const failure = 'Kautuka is running the new release. The update could not confirm that superseded backup snapshots were removed.';
+    const release = { releaseId: 'v2', version: '2.0.0', channel: 'preview',
+      releaseFingerprint: '', sourceUrl: null, publishedAtUtc: null, tag: 'v2' };
+    fetchUpdateStatusMock.mockResolvedValue({
+      ok: false, message: 'update-status', state: 'VerificationFailed', effectiveReleaseChannel: 'preview',
+      eligibilityState: 'None', eligibilityReason: 'None', currentRelease: release, availableRelease: null,
+      lastKnownGoodRelease: { ...release, releaseId: 'v1', version: '1.0.0', tag: 'v1' },
+      lastDiscoveryAttemptUtc: null, lastDiscoverySuccessUtc: null, managerVersion: '2.0.0',
+      hostReady: true, activeExecCount: 0, lastError: failure,
+    });
+    renderApp();
+
+    const banner = await screen.findByRole('alert');
+    expect(banner).toHaveTextContent('Update requires attention');
+    expect(banner).toHaveTextContent(failure);
+    expect(screen.queryByText('Update applied: 2.0.0')).not.toBeInTheDocument();
+  });
+
   it('shows preflight progress messaging while apply is in progress', async () => {
     fetchUpdateStatusMock.mockResolvedValue({
       ok: true,
@@ -533,9 +591,23 @@ describe('App update banner', () => {
     ).toBeInTheDocument();
   });
 
-  it('shows preflight failure messaging when activation checks fail and the release remains available', async () => {
+  it.each([
+    {
+      title: 'Update needs more space',
+      explanation:
+        'Your current version is still running. Free up space on the computer running Kautuka, then try the update again.',
+      lastError: 'Update preflight checks failed: insufficient free space for safe update staging.',
+    },
+    {
+      title: 'Update stopped',
+      explanation:
+        'The update stopped before switching versions. Your current version is still running. Try the update again.',
+      lastError:
+        'The update stopped before switching versions. Your current version is still running. Try the update again.',
+    },
+  ])('explains $title and offers a direct retry', async ({ title, explanation, lastError }) => {
     fetchUpdateStatusMock.mockResolvedValue({
-      ok: true,
+      ok: false,
       message: 'update-status',
       state: 'Available',
       effectiveReleaseChannel: 'preview',
@@ -573,22 +645,22 @@ describe('App update banner', () => {
       managerVersion: '0.1.1-preview.20260529004354',
       hostReady: true,
       activeExecCount: 0,
-      lastError:
-        "Update preflight checks failed: Provisioned configuration destination '/etc/kautuka/update-source.json' is not writable.",
+      lastError,
     });
 
     renderApp();
 
     await waitFor(() => {
-      expect(screen.getByText('Update preflight checks failed')).toBeInTheDocument();
+      expect(screen.getByText(title)).toBeInTheDocument();
     });
 
-    expect(
-      screen.getByText(
-        "Update preflight checks failed: Provisioned configuration destination '/etc/kautuka/update-source.json' is not writable. Fix the reported preflight issue and retry the update."
-      )
-    ).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Apply update' })).not.toBeInTheDocument();
+    expect(screen.getByText(explanation)).toBeVisible();
+    if (explanation !== lastError) {
+      expect(screen.getByText('Update details')).toBeVisible();
+      expect(screen.getByText(lastError)).not.toBeVisible();
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Try update again' }));
+    await waitFor(() => expect(applyUpdateMock).toHaveBeenCalledOnce());
     expect(screen.queryByRole('button', { name: 'Roll back' })).not.toBeInTheDocument();
   });
 

@@ -16,7 +16,8 @@ namespace Kautuka.Gateway.Infrastructure.AI;
 internal sealed class OllamaAiClientProvider(
     IRunLimitResolver? runLimitResolver = null,
     string? defaultBaseUrl = null,
-    INetworkAccessChecker? checker = null) : IAiClientProvider
+    INetworkAccessChecker? checker = null,
+    Func<INetworkAccessChecker?, HttpMessageHandler>? transportFactory = null) : IAiClientProvider
 {
     private const string httpTimeoutSettingKey = "http_timeout_seconds";
 
@@ -174,9 +175,9 @@ internal sealed class OllamaAiClientProvider(
     private HttpClient CreateHttpClient(TimeSpan timeout, Uri? baseAddress = null)
     {
 #pragma warning disable CA2000 // Caller disposes or client owns
-        HttpMessageHandler handler = new NetworkAccessCheckHandler(
-            checker ?? FailClosedNetworkAccessChecker.Instance,
-            new SocketsHttpHandler { AllowAutoRedirect = false });
+        HttpMessageHandler handler = transportFactory is null
+            ? new NetworkAccessCheckHandler(checker ?? FailClosedNetworkAccessChecker.Instance, new SocketsHttpHandler { AllowAutoRedirect = false })
+            : transportFactory(checker) ?? throw new InvalidOperationException("Configured model transport returned no handler.");
         var client = new HttpClient(handler, disposeHandler: true)
         {
             Timeout = timeout,

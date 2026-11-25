@@ -774,6 +774,10 @@ public sealed class GatewayApiFlowTests
                 return Wrap(new NetworkAccessSetRuleResponse { Rule = rule, Revision = rules.Count });
             }
 
+            public override AsyncUnaryCall<NetworkAccessProviderPermissionResponse> EnsureProviderPermissionAsync(
+                NetworkAccessProviderPermissionRequest request, CallOptions options)
+                => Wrap(new NetworkAccessProviderPermissionResponse { Status = "allowed" });
+
             private static AsyncUnaryCall<T> Wrap<T>(T response) where T : class
                 => new(Task.FromResult(response), Task.FromResult(new Metadata()), () => Status.DefaultSuccess, () => new Metadata(), static () => { });
         }

@@ -26,8 +26,8 @@ internal sealed partial class GatewayCatalogStore
             : null;
 
         string name = string.IsNullOrWhiteSpace(request.Name) ? agentId : request.Name;
-        string modelId = request.ModelId;
-        string systemPrompt = request.SystemPrompt;
+        string modelId = request.ModelId ?? string.Empty;
+        string systemPrompt = request.SystemPrompt ?? string.Empty;
         string superExecMode = string.IsNullOrWhiteSpace(request.SuperExecMode) ? "disabled" : request.SuperExecMode;
         string scope = existingAgent?.Scope ?? GatewayOwnershipScopes.User;
         bool enabled = existingAgent?.Enabled ?? true;

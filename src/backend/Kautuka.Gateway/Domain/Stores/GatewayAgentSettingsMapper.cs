@@ -323,10 +323,21 @@ internal static class GatewayAgentSettingsMapper
                 continue;
             }
 
+            string skillId = item.SkillId.Trim();
+            string context = item.Context?.Trim() is { Length: > 0 } requested
+                ? requested
+                : current?.FirstOrDefault(attachment => string.Equals(attachment.SkillId, skillId, StringComparison.OrdinalIgnoreCase))?.Context
+                    ?? SkillExecutionContext.Isolated;
+            if (context is not (SkillExecutionContext.Isolated or SkillExecutionContext.WithAgentFiles or SkillExecutionContext.AgentSandbox))
+            {
+                throw new ArgumentException("Invalid skill execution context.");
+            }
+
             attachments.Add(new AgentSkillAttachmentDefinition
             {
-                SkillId = item.SkillId.Trim(),
+                SkillId = skillId,
                 Mode = ParseSkillAttachmentMode(item.Mode),
+                Context = context,
             });
         }
 

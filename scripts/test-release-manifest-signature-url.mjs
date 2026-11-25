@@ -65,6 +65,7 @@ try {
   signature = Buffer.from((await fs.readFile(path.join(outputDir, "kautuka-platform-release.sig"), "utf8")).trim(), "base64");
   assert.equal(manifest.signature.url, "http://127.0.0.1:20300/kautuka-platform-release.sig", "default remains the release-asset URL");
   assert.equal(manifest.signature.path, "kautuka-platform-release.sig", "signature asset has the published flat filename");
+  assert.equal(Object.hasOwn(manifest, "applianceDeployment"), false, "legacy releases do not opt into an appliance deployment");
   assert.equal(cryptoVerify("sha256", manifestBytes, publicKey, signature), true, "default release manifest signature remains valid");
 
   const signatureAssetName = windowsInstaller.match(/releaseManifestSignatureAssetName = "([^"]+)"/u)?.[1];
@@ -109,6 +110,76 @@ try {
     assert.deepEqual(await fs.readFile(path.join(outputDir, "kautuka-platform-release.json")), manifestBytes,
       "rejecting a key must not overwrite the existing manifest");
   }
+
+  const deploymentPath = path.join(tempRoot, "appliance-deployment.json");
+  const deployment = {
+    schemaVersion: 1,
+    hookAbi: 1,
+    services: Object.fromEntries(["credentialshost", "channelhost", "gateway", "webhost", "updateservice"]
+      .map((role) => [role, { image: `ghcr.io/devkrity/kautuka-${role}@sha256:${"a".repeat(64)}` }])),
+  };
+  deployment.services.gateway.image = `registry.example:5000/platform/core__gateway--service@sha256:${"b".repeat(64)}`;
+  await fs.writeFile(deploymentPath, JSON.stringify(deployment));
+  generate(["--appliance-deployment", deploymentPath]);
+  const applianceBytes = await fs.readFile(path.join(outputDir, "kautuka-platform-release.json"));
+  const applianceSignature = Buffer.from((await fs.readFile(path.join(outputDir, "kautuka-platform-release.sig"), "utf8")).trim(), "base64");
+  const applianceManifest = JSON.parse(applianceBytes);
+  assert.deepEqual(applianceManifest.applianceDeployment, deployment);
+  assert.equal(cryptoVerify("sha256", applianceBytes, publicKey, applianceSignature), true);
+  const changedBytes = Buffer.from(applianceBytes.toString("utf8").replace("a".repeat(64), "b".repeat(64)), "utf8");
+  assert.equal(cryptoVerify("sha256", changedBytes, publicKey, applianceSignature), false, "changing a service image invalidates the signature");
+
+  const missingRole = structuredClone(deployment);
+  delete missingRole.services.updateservice;
+  const mutableImage = structuredClone(deployment);
+  mutableImage.services.gateway.image = "ghcr.io/devkrity/kautuka-gateway:latest";
+  const shortImage = structuredClone(deployment);
+  shortImage.services.gateway.image = `devkrity/gateway@sha256:${"a".repeat(64)}`;
+  const badRegistryPort = structuredClone(deployment);
+  badRegistryPort.services.gateway.image = deployment.services.gateway.image.replace(":5000/", ":65536/");
+  const arbitraryRunOption = structuredClone(deployment);
+  arbitraryRunOption.services.gateway.privileged = true;
+  for (const invalid of [missingRole, mutableImage, shortImage, badRegistryPort, arbitraryRunOption, { ...deployment, hookAbi: 0 }]) {
+    await fs.writeFile(deploymentPath, JSON.stringify(invalid));
+    const result = generateRaw(["--appliance-deployment", deploymentPath]);
+    assert.notEqual(result.status, 0, "invalid appliance layout must not be signed");
+    assert.deepEqual(await fs.readFile(path.join(outputDir, "kautuka-platform-release.json")), applianceBytes);
+  }
+
+  const platformPayload = path.join(tempRoot, "linux-payload");
+  await fs.mkdir(path.join(platformPayload, "service-images"), { recursive: true });
+  const tar = spawnSync("tar", ["-czf", path.join(outputDir, "kautuka-linux-amd64.tar.gz"),
+    "-C", platformPayload, "service-images"], { encoding: "utf8" });
+  assert.equal(tar.status, 0, tar.stderr || tar.stdout);
+  await fs.writeFile(deploymentPath, JSON.stringify(deployment));
+  generate(["--appliance-deployment", deploymentPath]);
+  const publicKeyPath = path.join(tempRoot, "signing-public.pem");
+  await fs.writeFile(publicKeyPath, publicKeyPem);
+  const verify = (extraArgs = []) => spawnSync(process.execPath, [
+    path.join(repoRoot, "scripts", "verify-release-artifacts.mjs"),
+    "--directory", outputDir,
+    "--version", "0.1.20-preview.1",
+    "--channel", "preview",
+    "--source-sha", "7ad4cf15dd8df78e9f97ebe25ad0ba15ce2c1731",
+    "--public-key", publicKeyPath,
+    ...extraArgs,
+  ], { encoding: "utf8" });
+  const verification = verify();
+  assert.notEqual(verification.status, 0, "a valid signature is insufficient when the actual appliance image is missing");
+  assert.match(verification.stderr, /appliance image archive is missing or not a regular file: credentialshost/);
+
+  await fs.unlink(path.join(outputDir, "kautuka-wsl-appliance.tar.gz"));
+  assert.match(generateRaw(["--linux-appliance-only", "true"]).stderr, /require the preview channel and an appliance deployment descriptor/);
+  assert.match(generateRaw(["--linux-appliance-only", "true", "--channel", "stable", "--appliance-deployment", deploymentPath]).stderr,
+    /require the preview channel/);
+  generate(["--linux-appliance-only", "true", "--appliance-deployment", deploymentPath]);
+  const linuxBytes = await fs.readFile(path.join(outputDir, "kautuka-platform-release.json"));
+  const linuxManifest = JSON.parse(linuxBytes.toString("utf8"));
+  const linuxSignature = Buffer.from((await fs.readFile(path.join(outputDir, "kautuka-platform-release.sig"), "utf8")).trim(), "base64");
+  assert.deepEqual(linuxManifest.artifacts.map(({ path, platform }) => [path, platform]), [["kautuka-linux-amd64.tar.gz", "linux-x64"]]);
+  assert.equal(cryptoVerify("sha256", linuxBytes, publicKey, linuxSignature), true);
+  assert.match(verify().stderr, /do not match required release files/);
+  assert.match(verify(["--linux-appliance-only", "true"]).stderr, /appliance image archive is missing or not a regular file: credentialshost/);
 
   assert.match(buildAssets, /--signature-url\)/, "release builder parses the optional exact signature URL");
   assert.match(buildAssets, /manifest_args\+\=\(--signature-url "\$signature_url"\)/, "release builder passes the explicit URL into the signed manifest generator");

@@ -14,6 +14,7 @@ import {
     fetchConnectorOAuth,
     fetchConnectors,
     saveConnector,
+    setConnectorEnabled,
   saveConnectorDiscovery,
     saveConnectorCredentials,
     testConnector,
@@ -21,10 +22,11 @@ import {
 } from './connectors';
 import { connectorsQueryKeys } from './queryKeys';
 
-export function useConnectors() {
+export function useConnectors(options: { staleTime?: number } = {}) {
   return useQuery({
     queryKey: connectorsQueryKeys.list(),
     queryFn: fetchConnectors,
+    ...options,
   });
 }
 
@@ -41,9 +43,15 @@ export function useSaveConnector() {
   return useMutation({
     mutationFn: ({ connectorId, data }: { connectorId: string; data: ConnectorSavePayload }) =>
       saveConnector(connectorId, data),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: connectorsQueryKeys.list() });
-    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: connectorsQueryKeys.list() }),
+  });
+}
+
+export function useSetConnectorEnabled() {
+  return useMutation({
+    mutationFn: ({ connectorId, enabled }: { connectorId: string; enabled: boolean }) =>
+      setConnectorEnabled(connectorId, enabled),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['connectors'] }),
   });
 }
 
@@ -76,6 +84,9 @@ export function useSaveConnectorDiscovery() {
 export function useTestConnector() {
   return useMutation({
     mutationFn: (data: ConnectorTestPayload) => testConnector(data),
+    onSuccess: (result) => {
+      if (result.success) void queryClient.invalidateQueries({ queryKey: connectorsQueryKeys.list() });
+    },
   });
 }
 

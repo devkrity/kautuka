@@ -171,7 +171,7 @@ jobs:
           printf 'RELEASE_MANIFEST_PUBLIC_KEY_PATH=%s\n' "$public_key_path" >> "$GITHUB_ENV"
 
       - name: Install OCI archive tooling
-        run: sudo apt-get update && sudo apt-get install -y skopeo
+        run: sudo apt-get update && sudo apt-get install -y podman skopeo
 
       - name: Build Linux platform, WSL rootfs, and descriptor assets
         env:
@@ -198,7 +198,9 @@ jobs:
             --product-version "$product_version" \
             --source-sha "$SOURCE_SHA" \
             --channel "$CHANNEL" \
-            --artifact-base-url "$artifact_base_url"
+            --artifact-base-url "$artifact_base_url" \
+            --appliance-image-prefix "ghcr.io/${GITHUB_REPOSITORY,,}/appliance" \
+            --appliance-runtime-base 'quay.io/fedora/fedora-minimal@sha256:51912d3c727c1ac964470150ba280b3a0192ced3c622c78b7b68fe8d55d73fee'
 
           # build-release-assets.sh keys its output directory on the manifest version.
           release_dir="publish/release-assets/$MANIFEST_VERSION"
@@ -253,7 +255,7 @@ jobs:
           overwrite: true
           retention-days: 3
 
-      - name: Upload prewarmed WSL rootfs artifact
+      - name: Upload WSL bootstrap rootfs artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: kautuka-wsl-rootfs-${{ steps.scope.outputs.artifact_scope }}

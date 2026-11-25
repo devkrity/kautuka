@@ -35,6 +35,142 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 /// </summary>
 public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
 {
+    [Theory]
+    [InlineData(true, false, false, false, "")]
+    [InlineData(false, false, false, false, "package_proxy_unavailable")]
+    [InlineData(true, true, false, false, "blocked")]
+    [InlineData(true, false, true, false, "")]
+    [InlineData(true, false, false, true, "package_proxy_unavailable")]
+    public async Task PackageAuthorizationWaitsForVerificationAndRechecksCurrentPolicy(
+        bool verified, bool addBlock, bool repeatAudit, bool replaceProxy, string expectedDenial)
+    {
+        string directory = CreateTempDir();
+        try
+        {
+            using var policy = new NetworkAccessPolicyStore(Path.Combine(directory, "policy.json"));
+            var registry = new WorkloadRegistry();
+            const string workloadIp = "10.247.1.30";
+            const string packageIp = "198.18.250.249";
+            registry.Register(new RegistryEntry(workloadIp, "user-a", "agent-a", "ctr-a", "agent-sandbox", null,
+                "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            var admin = new NetworkAccessActor("admin", IsAdmin: true);
+            policy.SetRule(admin, new RuleWriteSpec("agent", "user-a", "agent-a", null, "example.com", "host", 443, Allowed: true), policy.Revision);
+            var readAdmission = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var audit = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var readNextAudit = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var nextAudit = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var controller = new NacController(policy, registry, packageProxyAdmission: () =>
+            {
+                readAdmission.TrySetResult();
+                if (!audit.Task.IsCompletedSuccessfully)
+                    return new PackageProxyAdmission(false, audit.Task, Generation: 1);
+                if (repeatAudit && !nextAudit.Task.IsCompletedSuccessfully)
+                {
+                    readNextAudit.TrySetResult();
+                    return new PackageProxyAdmission(false, nextAudit.Task, Generation: 1);
+                }
+                return new PackageProxyAdmission(audit.Task.Result, Generation: replaceProxy ? 2 : 1);
+            });
+            string socket = Path.Combine(directory, "auth.sock");
+            await using var host = new EnvoyAuthorizationHost(controller, new EnvoyAuthorizationHostOptions
+            {
+                TransportMode = EnvoyListenerTransportMode.UnixDomainSocket,
+                SocketPath = socket,
+                LockFilePath = Path.Combine(directory, "auth.lock"),
+            });
+            CancellationToken token = TestContext.Current.CancellationToken;
+            await host.StartAsync(token);
+            using GrpcChannel channel = CreateUdsChannel(socket);
+            var client = new EnvoyAuth.AuthorizationClient(channel);
+            DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+            using AsyncUnaryCall<CheckResponse> pending = client.CheckAsync(
+                BuildCheckRequest(workloadIp, packageIp, 20101, null), deadline: deadline, cancellationToken: token);
+            await readAdmission.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            Assert.False(pending.ResponseAsync.IsCompleted);
+
+            using AsyncUnaryCall<CheckResponse> unrelated = client.CheckAsync(
+                BuildCheckRequest(workloadIp, "198.18.250.250", 443, "example.com"), deadline: deadline, cancellationToken: token);
+            Assert.Equal(0, (await unrelated.ResponseAsync).Status.Code);
+            if (addBlock)
+                policy.SetRule(admin, new RuleWriteSpec("agent", "user-a", "agent-a", null, packageIp, "ip", 20101, Allowed: false), policy.Revision);
+
+            audit.SetResult(verified);
+            if (repeatAudit)
+            {
+                await readNextAudit.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+                Assert.False(pending.ResponseAsync.IsCompleted);
+                nextAudit.SetResult(true);
+            }
+            CheckResponse result = await pending.ResponseAsync;
+            if (string.IsNullOrEmpty(expectedDenial))
+            {
+                Assert.Equal(0, result.Status.Code);
+                Assert.Equal("pkgs_proxy", result.DynamicMetadata.Fields["cluster"].StringValue);
+            }
+            else
+            {
+                Assert.Equal(7, result.Status.Code);
+                Assert.Equal(expectedDenial, result.Status.Message);
+            }
+        }
+        finally { TryDeleteDir(directory); }
+    }
+
+    [Fact]
+    public async Task ConnectAuthorizationDeniesImmediatelyAndFreshCallSucceedsAfterApproval()
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "The appliance authorization socket uses Linux Unix domain sockets.");
+        string directory = Directory.CreateTempSubdirectory("nac-hold-").FullName;
+        try
+        {
+            using var policy = new NetworkAccessPolicyStore(Path.Combine(directory, "policy.json"), []);
+            var controller = new NacController(policy, new WorkloadRegistry(), isContainerAuthorizationGateOpen: () => true);
+            string socket = Path.Combine(directory, "auth.sock");
+            await using var host = new EnvoyAuthorizationHost(controller, new EnvoyAuthorizationHostOptions
+            {
+                TransportMode = EnvoyListenerTransportMode.UnixDomainSocket,
+                SocketPath = socket,
+                LockFilePath = Path.Combine(directory, "auth.lock"),
+            });
+            CancellationToken token = TestContext.Current.CancellationToken;
+            await host.StartAsync(token);
+            using GrpcChannel channel = CreateUdsChannel(socket);
+            var client = new EnvoyAuth.AuthorizationClient(channel);
+            var check = new CheckRequest
+            {
+                Attributes = new AttributeContext
+                {
+                    ContextExtensions = { ["kautuka.authorization"] = "gateway-connect" },
+                    Source = new Peer { Principal = "spiffe://kautuka.internal/gateway" },
+                    Request = new Request
+                    {
+                        Http = new HttpRequest
+                        {
+                            Method = "CONNECT",
+                            Host = "approval.example.test:443",
+                            Headers = { ["x-kautuka-user"] = "user-a", ["x-kautuka-agent"] = "agent-a" },
+                        }
+                    },
+                },
+            };
+            using AsyncUnaryCall<CheckResponse> call = client.CheckAsync(check, deadline: DateTime.UtcNow.AddSeconds(5), cancellationToken: token);
+
+            var admin = new NetworkAccessActor("admin", IsAdmin: true);
+            DateTimeOffset deadline = DateTimeOffset.UtcNow.AddSeconds(5);
+            while (policy.ListRequests(admin).Requests.Count == 0 && DateTimeOffset.UtcNow < deadline)
+                await Task.Delay(10, token);
+            NetworkAccessRequest request = Assert.Single(policy.ListRequests(admin).Requests).Request;
+            CheckResponse denied = await call.ResponseAsync.WaitAsync(TimeSpan.FromSeconds(3), token);
+            Assert.Equal(7, denied.Status.Code);
+            policy.DecideRequest(admin, request.Id, true, "agent", policy.Revision);
+            using AsyncUnaryCall<CheckResponse> retry = client.CheckAsync(check, deadline: DateTime.UtcNow.AddSeconds(5), cancellationToken: token);
+            CheckResponse response = await retry.ResponseAsync;
+            Assert.Equal(0, response.Status.Code);
+            Assert.Equal("public", response.DynamicMetadata.Fields["egress_class"].StringValue);
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
     [Fact]
     public async Task EnvoyAuthorizationHost_ActualLoggerFactoryUsesInformationMinimum()
     {
@@ -108,6 +244,115 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
 
                 Assert.Equal(expectedStatus, response.Status.Code);
                 Assert.Equal(expectedReason, response.Status.Message);
+            }
+        }
+        finally
+        {
+            TryDeleteDir(tempDir);
+        }
+    }
+
+    [Fact]
+    public async Task GatewayConnect_RequiresTrustedRouteAndPrincipalAndEnforcesTheExactScope()
+    {
+        string tempDir = CreateTempDir();
+        try
+        {
+            bool gateOpen = true;
+            using var store = new NetworkAccessPolicyStore(Path.Combine(tempDir, "policy.json"));
+            var actor = new NetworkAccessActor("admin", IsAdmin: true);
+            store.SetRule(actor, new RuleWriteSpec("user", "user-a", null, "connector-a", "mcp.example.test", "host", 443, Allowed: true), store.Revision);
+            store.SetRule(actor, new RuleWriteSpec("agent", "user-a", "agent-a", null, "model.example.test", "host", 443, Allowed: true), store.Revision);
+            store.SetRule(actor, new RuleWriteSpec("agent", "user-a", "agent-a", null, "local.example.test", "host", 443, Allowed: true, AllowLan: true), store.Revision);
+            store.SetRule(actor, new RuleWriteSpec("agent", "user-a", "agent-a", null, "192.168.100.50", "ip", 443, Allowed: true, AllowLan: true), store.Revision);
+            var controller = new NacController(store, new WorkloadRegistry(), isContainerAuthorizationGateOpen: () => gateOpen);
+            string socketPath = Path.Combine(tempDir, "networkaccess.sock");
+            await using var host = new EnvoyAuthorizationHost(controller, new EnvoyAuthorizationHostOptions
+            {
+                TransportMode = EnvoyListenerTransportMode.UnixDomainSocket,
+                SocketPath = socketPath,
+                LockFilePath = Path.Combine(tempDir, "networkaccess.lock"),
+            });
+            CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+            await host.StartAsync(cancellationToken);
+            using GrpcChannel channel = CreateUdsChannel(socketPath);
+            var client = new EnvoyAuth.AuthorizationClient(channel);
+            var request = new CheckRequest
+            {
+                Attributes = new AttributeContext
+                {
+                    Source = new Peer { Principal = "spiffe://kautuka.internal/gateway" },
+                    Request = new Request
+                    {
+                        Http = new HttpRequest
+                        {
+                            Method = "CONNECT",
+                            Host = "mcp.example.test:443",
+                            Headers =
+                            {
+                                ["x-kautuka-user"] = "user-a",
+                                ["x-kautuka-agent"] = "agent-a",
+                                ["x-kautuka-connector"] = "connector-a",
+                                ["x-kautuka-egress-class"] = "lan",
+                            },
+                        },
+                    },
+                    ContextExtensions = { ["kautuka.authorization"] = "gateway-connect" },
+                },
+            };
+
+            CheckResponse allowed = await client.CheckAsync(request, cancellationToken: cancellationToken);
+            Assert.Equal(0, allowed.Status.Code);
+            Assert.Equal("public", allowed.DynamicMetadata.Fields["egress_class"].StringValue);
+            Assert.Contains("x-kautuka-user", allowed.OkResponse.HeadersToRemove);
+            Assert.Contains("x-kautuka-agent", allowed.OkResponse.HeadersToRemove);
+            Assert.Contains("x-kautuka-connector", allowed.OkResponse.HeadersToRemove);
+
+            await AssertDenied(attributes => attributes.Source.Principal = string.Empty, "unauthenticated_gateway");
+            await AssertDenied(attributes => attributes.ContextExtensions.Clear(), "unauthenticated_gateway");
+            await AssertDenied(attributes => attributes.Request = null, "bad_connect_authority");
+            await AssertDenied(attributes => attributes.Request.Http.Method = "GET", "bad_connect_authority");
+            await AssertDenied(attributes =>
+            {
+                attributes.Request.Http.Method = "POST";
+                attributes.Request.Http.Host = "unapproved.example.test:443";
+            }, "bad_connect_authority");
+            await AssertDenied(attributes => attributes.Request.Http.Host = "mcp.example.test:0443", "bad_connect_authority");
+            Assert.Empty(store.ListRequests(actor).Requests);
+            await AssertDenied(attributes => attributes.Request.Http.Host = "mcp.example.test:444", "no_rule");
+            await AssertDenied(attributes => attributes.Request.Http.Headers["x-kautuka-user"] = "user-b", "no_rule");
+            await AssertDenied(attributes => attributes.Request.Http.Headers["x-kautuka-connector"] = "connector-b", "no_rule");
+            await AssertDenied(attributes => attributes.Request.Http.Headers["x-kautuka-user"] = "user-a,user-b", "invalid_gateway_scope");
+            await AssertDenied(attributes => attributes.Request.Http.Headers.Remove("x-kautuka-user"), "invalid_gateway_scope");
+            request.Attributes.Request.Http.Host = "model.example.test:443";
+            request.Attributes.Request.Http.Headers.Remove("x-kautuka-connector");
+            CheckResponse agentAllowed = await client.CheckAsync(request, cancellationToken: cancellationToken);
+            Assert.Equal(0, agentAllowed.Status.Code);
+            await AssertDenied(attributes => attributes.Request.Http.Headers["x-kautuka-agent"] = "agent-b", "no_rule");
+            request.Attributes.Request.Http.Host = "local.example.test:443";
+            CheckResponse lanAllowed = await client.CheckAsync(request, cancellationToken: cancellationToken);
+            Assert.Equal(0, lanAllowed.Status.Code);
+            Assert.Equal("lan", lanAllowed.DynamicMetadata.Fields["egress_class"].StringValue);
+            await AssertDenied(attributes => attributes.Request.Http.Headers["x-kautuka-agent"] = "agent-b", "no_rule");
+            await AssertDenied(attributes => attributes.Request.Http.Headers["x-kautuka-public-only"] = "false", "invalid_gateway_scope");
+            request.Attributes.Request.Http.Headers["x-kautuka-public-only"] = "true";
+            CheckResponse publicOnly = await client.CheckAsync(request, cancellationToken: cancellationToken);
+            Assert.Equal(0, publicOnly.Status.Code);
+            Assert.Equal("public", publicOnly.DynamicMetadata.Fields["egress_class"].StringValue);
+            Assert.Contains("x-kautuka-public-only", publicOnly.OkResponse.HeadersToRemove);
+            await AssertDenied(attributes => attributes.Request.Http.Host = "192.168.100.50:443", "not_public");
+            gateOpen = false;
+            await AssertDenied(static _ => { }, "topology_closed");
+
+            async Task AssertDenied(Action<AttributeContext> mutate, string reason)
+            {
+                CheckRequest deniedRequest = request.Clone();
+                mutate(deniedRequest.Attributes);
+                CheckResponse denied = await client.CheckAsync(deniedRequest, cancellationToken: cancellationToken);
+                Assert.Equal(7, denied.Status.Code);
+                Assert.Equal(reason, denied.Status.Message);
+                Assert.Null(denied.OkResponse);
+                Assert.Null(denied.DynamicMetadata);
             }
         }
         finally

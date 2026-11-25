@@ -11,6 +11,7 @@ Options:
   --artifact-url <url>          Default platform artifact URL.
   --feed-base-url <url>         Default feed base URL.
   --manifest-url <url>          Default manifest URL.
+  --release-tag <tag>           Install this exact canonical GitHub release.
   --release-channel <channel>   Default release channel.
   --manifest-public-key <pem>   Manifest public key PEM file to embed.
   --local-feed-defaults         Emit the local-feed wrapper behavior.
@@ -23,6 +24,7 @@ version=''
 artifact_url=''
 feed_base_url=''
 manifest_url=''
+release_tag=''
 release_channel=''
 manifest_public_key=''
 local_feed_defaults='false'
@@ -47,6 +49,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --manifest-url)
       manifest_url="$2"
+      shift 2
+      ;;
+    --release-tag)
+      release_tag="$2"
       shift 2
       ;;
     --release-channel)
@@ -103,6 +109,9 @@ release_verifier_source="$script_dir/verify-linux-release.sh"
   fi
   if [[ -n "$manifest_url" ]]; then
     printf 'KAUTUKA_DEFAULT_MANIFEST_URL=%q\n' "$manifest_url"
+  fi
+  if [[ -n "$release_tag" ]]; then
+    printf 'KAUTUKA_DEFAULT_RELEASE_TAG=%q\n' "$release_tag"
   fi
   if [[ -n "$release_channel" ]]; then
     printf 'KAUTUKA_DEFAULT_RELEASE_CHANNEL=%q\n' "$release_channel"

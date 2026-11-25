@@ -8,5 +8,8 @@ public sealed record OciSandboxSession(
     bool Running,
     string ScopeType,
     string ScopeId,
-    string? UserId);
+    string? UserId)
+{
+    internal bool Created { get; init; }
+}
 

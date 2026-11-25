@@ -179,7 +179,7 @@ export function useUsersTab() {
     setEditingUserId(null);
   };
 
-  const inviteUser = async (): Promise<boolean> => {
+  const inviteUser = async (): Promise<{ code: string | null; email: string } | null> => {
     const email = invite.email.trim();
     const username = invite.username.trim();
     const secret = invite.secret;
@@ -188,12 +188,12 @@ export function useUsersTab() {
         success: false,
         message: 'Enter the email they use with Google or Microsoft, or set a password.',
       });
-      return false;
+      return null;
     }
 
     if (secret.trim() && secret.trim().length < 8) {
       setResult({ success: false, message: 'Password must be at least 8 characters.' });
-      return false;
+      return null;
     }
 
     if (
@@ -201,7 +201,7 @@ export function useUsersTab() {
       users.some((user) => normalizeUsername(user.username) === normalizeUsername(username))
     ) {
       setResult({ success: false, message: 'Username already exists.' });
-      return false;
+      return null;
     }
 
     setResult(null);
@@ -212,19 +212,17 @@ export function useUsersTab() {
         password: secret.trim() ? secret : null,
         role: invite.role === 'elevated' ? ROLE_ADMIN : ROLE_MEMBER,
       });
-      const inviteCode = (invited.data as { inviteCode?: string } | undefined)?.inviteCode;
+      const code = readApiString(invited.data, 'inviteCode') ?? null;
       setInvite({ username: '', email: '', secret: '', role: 'standard' });
+      await load();
       setResult({
         success: true,
-        message: inviteCode
-          ? `Invited. Their one-time sign-in code is ${inviteCode}.`
-          : 'Invited. They can sign in with their local password, or redeem the sign-in code with Google or Microsoft.',
+        message: code ? 'Invitation created.' : 'User created. They can sign in with their username and password.',
       });
-      await load();
-      return true;
+      return { code, email };
     } catch (err) {
       setResult({ success: false, message: apiError(err) });
-      return false;
+      return null;
     }
   };
 

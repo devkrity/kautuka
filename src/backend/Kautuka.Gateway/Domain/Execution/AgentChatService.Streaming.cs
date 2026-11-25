@@ -1209,7 +1209,7 @@ internal sealed partial class AgentChatService
                                 Destination: aiCallNacDenial.Destination,
                                 Port: aiCallNacDenial.Port,
                                 RequestId: aiCallNacDenial.RequestId,
-                                ApprovalUrl: "/network-access")
+                                ApprovalUrl: aiCallNacDenial.Kind == NetworkAccessDenialKind.Unavailable ? null : aiCallNacDenial.ApprovalUrl)
                             : new GatewayRunState(GatewayRunPhases.Failed);
 
                         await eventWriter.WriteAsync(

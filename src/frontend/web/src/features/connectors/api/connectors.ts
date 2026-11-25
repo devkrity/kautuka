@@ -66,6 +66,7 @@ function normalizeConnector(value: unknown): Connector {
       readApiNumber(value, 'healthcheckIntervalMilliseconds') ?? null,
     mcpProtocolVersion: readApiNullableString(value, 'mcpProtocolVersion') ?? null,
     enabled: readApiBoolean(value, 'enabled') ?? true,
+    defaultEnabled: readApiBoolean(value, 'defaultEnabled') ?? undefined,
     isInternalSystemConnector: readApiBoolean(value, 'isInternalSystemConnector') ?? false,
     requiresCredentialReentry: readApiBoolean(value, 'requiresCredentialReentry') ?? false,
     toolCount: readApiNumber(value, 'toolCount') ?? null,
@@ -143,6 +144,10 @@ export async function saveConnectorDiscovery(
 ): Promise<Connector> {
   const response = await apiClient.put(`/connectors/${connectorId}/discovery`, data);
   return normalizeConnector(response.data);
+}
+
+export async function setConnectorEnabled(connectorId: string, enabled: boolean): Promise<void> {
+  await apiClient.put(`/connectors/${encodeURIComponent(connectorId)}/enabled`, { enabled });
 }
 
 export async function deleteConnector(connectorId: string): Promise<void> {

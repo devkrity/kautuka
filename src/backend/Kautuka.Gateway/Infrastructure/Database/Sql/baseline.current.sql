@@ -67,6 +67,13 @@ CREATE TABLE mcp_servers (
             healthcheck_url                TEXT NULL,
             healthcheck_interval_milliseconds INTEGER NULL
         , runtime_artifact_type TEXT NULL, runtime_artifact_source_digest TEXT NULL, runtime_artifact_build_status TEXT NULL, mcp_protocol_version TEXT NULL);
+CREATE TABLE connector_user_enablement (
+    user_id TEXT NOT NULL REFERENCES runtime_users(user_id) ON DELETE CASCADE,
+    connector_id TEXT NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    PRIMARY KEY (user_id, connector_id)
+);
+CREATE INDEX idx_connector_user_enablement_connector ON connector_user_enablement(connector_id);
 CREATE TABLE skills (
             id                   TEXT PRIMARY KEY,
             name                 TEXT NOT NULL,

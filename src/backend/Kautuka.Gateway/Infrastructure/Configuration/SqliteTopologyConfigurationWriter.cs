@@ -116,7 +116,7 @@ internal partial class SqliteTopologyConfigurationWriter(KautukaDatabase databas
         {
             using var connection = new SqliteConnection(database.ConnectionString);
             connection.Open();
-            ExecuteNonQuery(connection, static (conn, tx) => new SqliteCommand("DELETE FROM mcp_servers WHERE id = $id", conn, tx), command => command.Parameters.AddWithValue("$id", serverId));
+            ExecuteNonQuery(connection, static (conn, tx) => new SqliteCommand("PRAGMA foreign_keys=ON; DELETE FROM mcp_servers WHERE id = $id", conn, tx), command => command.Parameters.AddWithValue("$id", serverId));
             return configurationProvider.GetCurrent();
         }
     }

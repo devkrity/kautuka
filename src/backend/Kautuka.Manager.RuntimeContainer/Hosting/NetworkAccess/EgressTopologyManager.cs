@@ -69,6 +69,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     public static string CoreDnsX64Image => FindRuntimeImage("coredns").Image;
     public static string EnvoyPinnedImage => SelectRuntimeImage("envoy", RuntimeInformation.OSArchitecture);
     public static string CoreDnsPinnedImage => SelectRuntimeImage("coredns", RuntimeInformation.OSArchitecture);
+    public static string ObservabilityPinnedImage => SelectRuntimeImage("openobserve", RuntimeInformation.OSArchitecture);
     public static string BoundaryInitImage => FindRuntimeImage("egress-boundary").Image;
     public static string CanaryBasePinnedImage => ResolveCanaryBaseImage(runtimeImages);
     internal static string ResolveCanaryBaseImage(RuntimeImageAllowlist images)
@@ -137,14 +138,25 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private long unlabelledWorkloadCount;
     private CancellationTokenSource? reconcileCts;
     private Task? reconcileTask;
+    private long nextReconcileUtcTicks;
     private readonly object disposeLock = new();
     private Task? disposeTask;
     private readonly HashSet<string> knownInfraContainerIds = new(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<InfraAllowlistEntry> baseInfraAllowlistEntries = [];
     private InfraAllowlistEntry? packageProxyAllowlistEntry;
+    private readonly Dictionary<string, InfraAllowlistEntry> applianceAllowlistEntries = new(StringComparer.Ordinal);
     private readonly object infraAllowlistLock = new();
-    private volatile bool packageProxyStartupReady;
+    private string? readyPackageProxyId;
+    private long packageProxyRevocationVersion;
+    private TaskCompletionSource<bool>? packageProxyVerification;
+    private readonly SemaphoreSlim packageProxyVerificationLock = new(1, 1);
     private readonly ConcurrentDictionary<string, RegistryEntry> transientWorkloadDenials = new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly string? gatewayConnectEnvoyDirectory;
+    private string? telemetryAuthorization;
+    private readonly int? inspectionTimeoutSeconds;
+    private string? pendingTelemetryAuthorization;
+    private readonly SemaphoreSlim reconcileWake = new(0, 1);
 
     public EgressTopologyManager(
         PodmanCommandRunner podmanRunner,
@@ -163,13 +175,18 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         ImageCompatibilityStore? imageCompatibilityStore = null,
         NetworkAccessPolicyStore? policyStore = null,
         bool useDevelopmentSelinuxDomain = false,
-        PodmanImageArchiveStore? imageArchives = null)
+        PodmanImageArchiveStore? imageArchives = null,
+        string? gatewayConnectEnvoyDirectory = null,
+        string? telemetryAuthorization = null,
+        int? inspectionTimeoutSeconds = null)
     {
         ArgumentNullException.ThrowIfNull(podmanRunner);
         ArgumentNullException.ThrowIfNull(addressAllocator);
         ArgumentNullException.ThrowIfNull(postStartVerifier);
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentException.ThrowIfNullOrWhiteSpace(stateDirectory);
+        if (inspectionTimeoutSeconds is < 1 or > 60)
+            throw new ArgumentOutOfRangeException(nameof(inspectionTimeoutSeconds), "The egress inspection deadline must be between 1 and 60 seconds.");
 
         this.podmanRunner = podmanRunner;
         this.addressAllocator = addressAllocator;
@@ -179,6 +196,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         this.policyStore = policyStore;
         this.useDevelopmentSelinuxDomain = useDevelopmentSelinuxDomain;
         this.imageArchives = imageArchives;
+        this.gatewayConnectEnvoyDirectory = gatewayConnectEnvoyDirectory;
+        this.telemetryAuthorization = telemetryAuthorization;
+        this.inspectionTimeoutSeconds = inspectionTimeoutSeconds;
         this.registry = registry;
         this.windowsDecisionEndpointIp = windowsDecisionEndpointIp;
         this.windowsEnvoyCertificateDirectory = string.IsNullOrWhiteSpace(windowsEnvoyCertificateDirectory)
@@ -235,6 +255,35 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     }
 
     public bool IsStartupRetryPending => startupCanaryRetryPending;
+    public bool RequiresOperatorRecovery => topologyIncidentLatched;
+    public bool IsRecoveryWaitingForNetworkResume => startupCanaryRetryPending && IsCanaryIdentityBraked();
+    public bool TelemetryConfigurationPending => Volatile.Read(ref pendingTelemetryAuthorization) is not null;
+    public bool HasTelemetryAuthorization => Volatile.Read(ref telemetryAuthorization) is not null || TelemetryConfigurationPending;
+
+    public void ScheduleTelemetryAuthorization(string authorization)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(authorization);
+        lock (gateLock)
+        {
+            if (launchAdmissionClosed || HasTelemetryAuthorization) return;
+            Volatile.Write(ref pendingTelemetryAuthorization, authorization);
+            reconcileWake.Release();
+        }
+    }
+
+    public DateTimeOffset? NextRecoveryRetryUtc
+    {
+        get
+        {
+            long scheduled = Interlocked.Read(ref nextReconcileUtcTicks);
+            return scheduled > DateTimeOffset.UtcNow.UtcTicks
+                && !IsStartupGateOpen && !topologyIncidentLatched
+                && (startupInitializationRetryPending || transientRecoveryPending
+                    || (startupCanaryRetryPending && !IsRecoveryWaitingForNetworkResume))
+                ? new DateTimeOffset(scheduled, TimeSpan.Zero)
+                : null;
+        }
+    }
 
     public long UnlabelledWorkloadCount => Interlocked.Read(ref unlabelledWorkloadCount);
 
@@ -624,7 +673,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         logger.LogInformation("Rebuilding workload registry from live container labels...");
         PodmanCommandResult psResult = await podmanRunner
-            .RunAsync(["ps", "-a", "--format", "json"], 30, cancellationToken)
+            .RunAsync(["ps", "-a", "--no-trunc", "--format", "json"], 30, cancellationToken)
             .ConfigureAwait(false);
 
         if (psResult.ExitCode != 0)
@@ -653,8 +702,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                                 continue;
                             }
 
-                            // Skip allowlisted infra containers
-                            if (knownInfraContainerIds.Contains(cid))
+                            // The appliance supervisor re-verifies these reserved profiles independently.
+                            if (knownInfraContainerIds.Contains(cid) || IsAuthorizedApplianceService(cid))
                             {
                                 continue;
                             }
@@ -685,6 +734,22 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                             string egress = GetStringProperty(labels, "io.kautuka.egress");
                             string compat = GetStringProperty(labels, "io.kautuka.compat");
                             string purpose = GetStringProperty(labels, "io.kautuka.purpose");
+                            string inspectedContainerId = GetStringProperty(inspected, "Id");
+
+                            if (kind == "builder"
+                                && GetStringProperty(labels, "kautuka.managed") == "manager"
+                                && GetStringProperty(labels, "kautuka.role") == "builder")
+                            {
+                                string name = GetStringProperty(inspected, "Name").TrimStart('/');
+                                bool owned = registry.GetAll().Any(entry => entry.Kind == "builder"
+                                    && (string.Equals(entry.ContainerId, inspectedContainerId, StringComparison.OrdinalIgnoreCase)
+                                        || string.Equals(entry.ContainerId, name, StringComparison.Ordinal)));
+                                if (!owned)
+                                {
+                                    await RemoveRestoredBuilderAsync(inspectedContainerId, cancellationToken).ConfigureAwait(false);
+                                    continue;
+                                }
+                            }
 
                             // The package proxy is a reserved service identity. Never rebuild it
                             // from self-asserted labels; the sidecar supervisor registers it only
@@ -697,17 +762,16 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                                 {
                                     try
                                     {
-                                        await postStartVerifier.VerifyWorkloadRulesetAsync(
-                                            cid, PackageProxyIp, isPackageProxy: true, cancellationToken: cancellationToken).ConfigureAwait(false);
-                                        rebuiltEntries.Add(previouslyVerifiedPackageProxy);
+                                        if (await VerifyLivePackageProxyRulesAsync(cid, false, cancellationToken).ConfigureAwait(false) is not null)
+                                            rebuiltEntries.Add(previouslyVerifiedPackageProxy);
                                     }
                                     catch (Exception verificationException) when (verificationException is not OperationCanceledException)
                                     {
-                                        packageProxyStartupReady = false;
+                                        SetPackageProxyReady(false);
                                         logger.LogWarning(verificationException, "Previously verified package proxy {ContainerId} no longer has the required workload rules.", cid);
                                     }
                                 }
-                                else packageProxyStartupReady = false;
+                                else SetPackageProxyReady(false);
 
                                 continue;
                             }
@@ -774,7 +838,6 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                                 string.IsNullOrWhiteSpace(compat) ? null : compat,
                                 DateTimeOffset.UtcNow,
                                 string.IsNullOrWhiteSpace(purpose) ? null : purpose);
-                            string inspectedContainerId = GetStringProperty(inspected, "Id");
                             bool alreadyQuarantined = desiredStateStore?.IsWorkloadQuarantined(cid) == true
                                 || (!string.IsNullOrWhiteSpace(inspectedContainerId) && desiredStateStore?.IsWorkloadQuarantined(inspectedContainerId) == true);
                             if (alreadyQuarantined)
@@ -862,6 +925,33 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     public Task RebuildRegistryFromLiveContainersAsync(CancellationToken cancellationToken = default)
         => RebuildRegistryFromLiveContainersAsync(registry, cancellationToken);
+
+    private async Task RemoveRestoredBuilderAsync(string containerId, CancellationToken cancellationToken)
+    {
+        if (!WorkloadPostStartVerifier.IsCanonicalContainerId(containerId))
+            throw new StartupWorkloadContainmentException("Could not verify the identity of a restored package builder.");
+
+        try
+        {
+            PodmanCommandResult removed = await podmanRunner.RunAsync(
+                ["rm", "-f", "--ignore", "--time", "1", containerId], 5, cancellationToken).ConfigureAwait(false);
+            if (removed.ExitCode == 0) return;
+            throw new InvalidOperationException($"Podman could not remove package builder '{containerId}' (exit {removed.ExitCode}).");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            if (desiredStateStore is null)
+                throw new StartupWorkloadContainmentException("Could not remove a restored package builder.", ex);
+
+            try { desiredStateStore.QuarantineWorkload(containerId); }
+            catch (Exception persistenceException) when (persistenceException is not OperationCanceledException)
+            {
+                throw new StartupWorkloadContainmentException("Could not remove or persist quarantine for a restored package builder.",
+                    new AggregateException(ex, persistenceException));
+            }
+            logger.LogWarning(ex, "Restored package builder {ContainerId} was quarantined for cleanup retry.", containerId);
+        }
+    }
 
     /// <summary>
     /// Executes the startup canary test (Section 4.3.4 item 5).
@@ -1243,15 +1333,97 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 new("kautuka-egress-envoy", "egress-envoy", [EgressPodIp, OutsidePodIp, OutsideLanSourceIp], EnvoyPinnedImage),
                 new("kautuka-egress-dns", "egress-dns", [EgressPodIp, OutsidePodIp, OutsideLanSourceIp], CoreDnsPinnedImage),
             ];
-            baseInfraAllowlistEntries = entries.Where(entry => entry.Role != "pkgs-proxy").ToArray();
-            IReadOnlyList<InfraAllowlistEntry> persistedEntries = packageProxyAllowlistEntry is null
-                ? baseInfraAllowlistEntries
-                : [.. baseInfraAllowlistEntries, packageProxyAllowlistEntry];
-
-            var doc = new InfraAllowlistDocument(1, persistedEntries);
-            WriteInfraAllowlistDocument(doc);
+            baseInfraAllowlistEntries = entries.Where(entry => entry.Role != "pkgs-proxy"
+                && WorkloadRulesetRenderer.FindApplianceAddress(entry.Role) is null).ToArray();
+            PersistInfraAllowlist();
         }
     }
+
+    private void PersistInfraAllowlist()
+    {
+        List<InfraAllowlistEntry> entries = [.. baseInfraAllowlistEntries];
+        if (packageProxyAllowlistEntry is not null) entries.Add(packageProxyAllowlistEntry);
+        entries.AddRange(applianceAllowlistEntries.Values);
+        WriteInfraAllowlistDocument(new InfraAllowlistDocument(1, entries));
+    }
+
+    private bool IsAuthorizedApplianceService(string containerId)
+    {
+        lock (infraAllowlistLock) return applianceAllowlistEntries.Values.Any(entry => entry.Id == containerId);
+    }
+
+    private static string GetApplianceAddress(string role) => WorkloadRulesetRenderer.FindApplianceAddress(role)
+        ?? throw new ArgumentOutOfRangeException(nameof(role));
+
+    public void AuthorizeApplianceService(string role, string containerId, string imageId)
+    {
+        if (gatewayConnectEnvoyDirectory is null || !WorkloadPostStartVerifier.IsCanonicalContainerId(containerId)
+            || string.IsNullOrEmpty(imageId) || NormalizeContainerImageId(imageId) != imageId)
+            throw new InvalidOperationException("Invalid appliance service identity for the workload network.");
+
+        string address = GetApplianceAddress(role);
+        lock (infraAllowlistLock)
+        {
+            applianceAllowlistEntries.TryGetValue(role, out InfraAllowlistEntry? previous);
+            if (previous is not null && previous.Id != containerId)
+                throw new InvalidOperationException("A different appliance container holds the reserved address.");
+            if (previous?.ImageDigest == imageId) return;
+            SetApplianceAllowlistEntry(role, new(containerId, role, [address], imageId), previous);
+        }
+    }
+
+    public void RevokeApplianceService(string role, string containerId)
+    {
+        lock (infraAllowlistLock)
+        {
+            if (!applianceAllowlistEntries.TryGetValue(role, out InfraAllowlistEntry? previous) || previous.Id != containerId) return;
+            SetApplianceAllowlistEntry(role, null, previous);
+            if (UsesApplianceProviderEgress(role))
+                registry.Deregister(GetApplianceAddress(role), containerId);
+        }
+    }
+
+    private void SetApplianceAllowlistEntry(string role, InfraAllowlistEntry? value, InfraAllowlistEntry? previous)
+    {
+        if (value is null) applianceAllowlistEntries.Remove(role);
+        else applianceAllowlistEntries[role] = value;
+        try { PersistInfraAllowlist(); }
+        catch
+        {
+            if (previous is null) applianceAllowlistEntries.Remove(role);
+            else applianceAllowlistEntries[role] = previous;
+            throw;
+        }
+    }
+
+    public async Task<string> VerifyApplianceServiceAsync(string role, string containerId, JsonElement? inspection, CancellationToken cancellationToken)
+    {
+        string address = GetApplianceAddress(role);
+        string verifiedId = await (inspection is { } container
+            ? postStartVerifier.VerifyInspectedWorkloadRulesetAsync(container, containerId, address,
+                isPackageProxy: false, role, cancellationToken)
+            : postStartVerifier.VerifyWorkloadRulesetAsync(containerId, address,
+                applianceRole: role, cancellationToken: cancellationToken)).ConfigureAwait(false);
+
+        if (UsesApplianceProviderEgress(role))
+        {
+            lock (infraAllowlistLock)
+            {
+                if (!applianceAllowlistEntries.TryGetValue(role, out InfraAllowlistEntry? authorized) || authorized.Id != verifiedId)
+                    throw new InvalidOperationException($"The {role} identity is no longer authorized.");
+                RegistryEntry? existing = registry.FindByIp(address);
+                if (existing is not null && (existing.ContainerId != verifiedId || existing.Purpose != role))
+                    throw new InvalidOperationException($"The {role} address has a different registered identity.");
+                if (existing is null)
+                    registry.Register(new RegistryEntry(address, "system", role["appliance-".Length..], verifiedId, "agent-sandbox", null,
+                        "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow, Purpose: role));
+            }
+        }
+        return verifiedId;
+    }
+
+    private static bool UsesApplianceProviderEgress(string? role)
+        => role is "appliance-channelhost" or "appliance-updateservice";
 
     private bool IsPreviouslyAuthorizedPackageProxy(JsonElement inspected, JsonElement labels, string containerId)
     {
@@ -1343,9 +1515,11 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         lock (infraAllowlistLock)
         {
+            if (!string.Equals(packageProxyAllowlistEntry?.Id, containerId, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(packageProxyAllowlistEntry?.ImageDigest, imageId, StringComparison.OrdinalIgnoreCase))
+                SetPackageProxyReady(false);
             packageProxyAllowlistEntry = new InfraAllowlistEntry(containerId, "pkgs-proxy", [PackageProxyIp], imageId);
-            var doc = new InfraAllowlistDocument(1, [.. baseInfraAllowlistEntries, packageProxyAllowlistEntry]);
-            WriteInfraAllowlistDocument(doc);
+            PersistInfraAllowlist();
         }
 
         await SyncWindowsPodmanInfraAllowlistAsync(cancellationToken).ConfigureAwait(false);
@@ -1361,9 +1535,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             if (packageProxyAllowlistEntry is not null
                 && string.Equals(packageProxyAllowlistEntry.Id, containerId, StringComparison.OrdinalIgnoreCase))
             {
+                SetPackageProxyReady(false);
                 packageProxyAllowlistEntry = null;
-                WriteInfraAllowlistDocument(new InfraAllowlistDocument(1, baseInfraAllowlistEntries));
-                packageProxyStartupReady = false;
+                PersistInfraAllowlist();
             }
         }
 
@@ -1372,7 +1546,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             && string.Equals(registered.ContainerId, containerId, StringComparison.OrdinalIgnoreCase)
             && string.Equals(registered.AgentId, "package-proxy", StringComparison.Ordinal))
         {
-            packageProxyStartupReady = false;
+            SetPackageProxyReady(false);
             registry.Deregister(PackageProxyIp, containerId);
         }
 
@@ -1399,8 +1573,12 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     }
 
     public bool IsPackageProxyRegistered
+        => IsRegisteredPackageProxyContainer(containerId: null);
+
+    internal bool IsRegisteredPackageProxyContainer(string? containerId)
         => registry.TryGetByIp(PackageProxyIp, out RegistryEntry? entry)
             && entry is not null
+            && (containerId is null || string.Equals(entry.ContainerId, containerId, StringComparison.OrdinalIgnoreCase))
             && string.Equals(entry.Kind, "agent-sandbox", StringComparison.Ordinal)
             && string.Equals(entry.UserId, "system", StringComparison.Ordinal)
             && string.Equals(entry.AgentId, "package-proxy", StringComparison.Ordinal)
@@ -1408,17 +1586,94 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             && string.Equals(entry.Attribution, "user-agent", StringComparison.Ordinal);
 
     public void SetPackageProxyReady(bool ready)
-        => packageProxyStartupReady = ready && IsPackageProxyRegistered;
+    {
+        lock (infraAllowlistLock)
+        {
+            if (!ready)
+            {
+                readyPackageProxyId = null;
+                packageProxyRevocationVersion++;
+                packageProxyVerification?.TrySetResult(false);
+            }
+            else if (packageProxyVerification is null && IsPackageProxyRegistered)
+            {
+                readyPackageProxyId = registry.FindByIp(PackageProxyIp)?.ContainerId;
+            }
+        }
+    }
 
-    public bool IsPackageProxyReady => packageProxyStartupReady && IsPackageProxyRegistered;
+    public bool IsPackageProxyReady => GetPackageProxyAdmission().Ready;
 
-    public async Task<bool> VerifyPackageProxyRulesetAsync(string containerId, CancellationToken cancellationToken = default)
+    internal int? InspectionTimeoutSeconds => inspectionTimeoutSeconds;
+
+    public PackageProxyAdmission GetPackageProxyAdmission()
+    {
+        lock (infraAllowlistLock)
+        {
+            bool sameRegisteredProxy = readyPackageProxyId is { } id && IsRegisteredPackageProxyContainer(id);
+            return new(sameRegisteredProxy && packageProxyVerification is null,
+                sameRegisteredProxy ? packageProxyVerification?.Task : null, packageProxyRevocationVersion);
+        }
+    }
+
+    private async Task<string?> VerifyLivePackageProxyRulesAsync(string containerId, bool registerAfterVerification,
+        CancellationToken cancellationToken)
+    {
+        await packageProxyVerificationLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var verification = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        long version;
+        lock (infraAllowlistLock)
+        {
+            if (!string.Equals(readyPackageProxyId, containerId, StringComparison.OrdinalIgnoreCase))
+                readyPackageProxyId = null;
+            packageProxyVerification = verification;
+            version = packageProxyRevocationVersion;
+        }
+
+        bool ready = false;
+        try
+        {
+            string verifiedId = await postStartVerifier.VerifyWorkloadRulesetAsync(
+                containerId, PackageProxyIp, isPackageProxy: true, cancellationToken: cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (infraAllowlistLock)
+            {
+                if (version != packageProxyRevocationVersion
+                    || !string.Equals(verifiedId, containerId, StringComparison.OrdinalIgnoreCase))
+                    return null;
+
+                if (registerAfterVerification)
+                {
+                    if (!string.Equals(packageProxyAllowlistEntry?.Id, verifiedId, StringComparison.OrdinalIgnoreCase))
+                        return null;
+
+                    RegisterVerifiedPackageProxyContainer(verifiedId);
+                    readyPackageProxyId = verifiedId;
+                }
+
+                ready = readyPackageProxyId is not null && IsRegisteredPackageProxyContainer(verifiedId);
+                return verifiedId;
+            }
+        }
+        finally
+        {
+            lock (infraAllowlistLock)
+            {
+                if (!ready)
+                    readyPackageProxyId = null;
+                packageProxyVerification = null;
+                verification.TrySetResult(ready && version == packageProxyRevocationVersion);
+            }
+            packageProxyVerificationLock.Release();
+        }
+    }
+
+    public async Task<bool> VerifyPackageProxyRulesetAsync(string containerId, bool registerAfterVerification = false,
+        CancellationToken cancellationToken = default)
     {
         try
         {
-            await postStartVerifier.VerifyWorkloadRulesetAsync(
-                containerId, PackageProxyIp, isPackageProxy: true, cancellationToken: cancellationToken).ConfigureAwait(false);
-            return true;
+            return await VerifyLivePackageProxyRulesAsync(containerId, registerAfterVerification, cancellationToken).ConfigureAwait(false) is not null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1473,24 +1728,43 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         CancellationToken cancellationToken)
     {
         // Render boundary and configs
-        string boundaryNft = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants, decisionEndpointIp, [OutsideGatewayIp]);
+        bool includeGatewayConnect = gatewayConnectEnvoyDirectory is not null;
+        string? ingestionSecret = telemetryAuthorization;
+        bool includeTelemetry = ingestionSecret is not null;
+        string boundaryNft = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants, decisionEndpointIp, [OutsideGatewayIp], includeGatewayConnect, includeTelemetry);
         string envoyConfig = BoundaryRulesetRenderer.RenderEnvoyConfig(
             adminSocketPath: isWindowsHostNativeDev ? "/tmp/kautuka-admin.sock" : "/run/kautuka-admin/admin.sock",
-            isWindowsMtls: isWindowsHostNativeDev);
+            isWindowsMtls: isWindowsHostNativeDev,
+            includeGatewayConnect: includeGatewayConnect,
+            includeApplianceTelemetry: includeTelemetry);
         string corefile = BoundaryRulesetRenderer.RenderCorefile(EgressPodIp, [OutsideGatewayIp]);
 
         string nacDir = Path.Combine(stateDirectory, "nac");
+        if (includeTelemetry && OperatingSystem.IsLinux())
+        {
+            const UnixFileMode privateDirectory = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+            Directory.CreateDirectory(nacDir, privateDirectory);
+            File.SetUnixFileMode(nacDir, privateDirectory);
+        }
         string boundaryConfigDir = Path.Combine(nacDir, "boundary");
         string boundaryPath = Path.Combine(boundaryConfigDir, "boundary.nft");
         string envoyConfigDir = Path.Combine(nacDir, "envoy");
+        string ingestionSecretPath = Path.Combine(envoyConfigDir, BoundaryRulesetRenderer.TelemetrySecretFileName);
         string dnsConfigDir = Path.Combine(nacDir, "dns");
         string envoyPath = Path.Combine(envoyConfigDir, "envoy.yaml");
         string corefilePath = Path.Combine(dnsConfigDir, "Corefile");
 
-        expectedBoundaryNftSourceHash = ComputeReconcileConfigurationHash(boundaryNft, envoyConfig, corefile);
+        expectedBoundaryNftSourceHash = ComputeReconcileConfigurationHash(boundaryNft, envoyConfig, corefile, ingestionSecret);
         await EnsureExistingEgressPodUsesRenderedConfigAsync(
-            boundaryNft, envoyConfig, corefile, isWindowsHostNativeDev, cancellationToken).ConfigureAwait(false);
+            boundaryNft, envoyConfig, corefile, ingestionSecret, isWindowsHostNativeDev, cancellationToken).ConfigureAwait(false);
 
+        if (ingestionSecret is not null)
+        {
+            // The rootless Envoy image runs as a remapped UID. The owner-only
+            // nac directory protects this file on the host, and only Envoy mounts it.
+            await WriteConfigAtomicallyAsync(ingestionSecretPath, ingestionSecret, cancellationToken,
+                unixMode: UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead).ConfigureAwait(false);
+        }
         await WriteConfigAtomicallyAsync(boundaryPath, boundaryNft, cancellationToken).ConfigureAwait(false);
         await WriteConfigAtomicallyAsync(envoyPath, envoyConfig, cancellationToken).ConfigureAwait(false);
         await WriteConfigAtomicallyAsync(corefilePath, corefile, cancellationToken).ConfigureAwait(false);
@@ -1641,7 +1915,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 decisionEndpointIp,
                 envoyCertificateDirectory,
                 useDevelopmentSelinuxDomain,
-                podSelinuxLevel),
+                podSelinuxLevel,
+                gatewayConnectEnvoyDirectory),
             allowlistEntries,
             cancellationToken).ConfigureAwait(false);
 
@@ -1653,7 +1928,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             throw new InvalidOperationException($"Failed to start egress pod '{EgressPodName}' (rc {podStart.ExitCode}): {podStart.StdErr}");
         }
 
-        if (!await IsEgressPodHealthyAsync(cancellationToken).ConfigureAwait(false))
+        if ((await InspectEgressPodHealthAsync(cancellationToken).ConfigureAwait(false)).Health != EgressPodHealth.Healthy)
         {
             throw new InvalidOperationException($"Egress pod '{EgressPodName}' did not reach a healthy state.");
         }
@@ -1687,22 +1962,60 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         }
     }
 
-    private async Task<bool> IsEgressPodHealthyAsync(CancellationToken cancellationToken)
+    private enum EgressPodHealth
     {
+        Healthy,
+        Unhealthy,
+        InspectionTimedOut,
+    }
+    private readonly record struct EgressPodInspection(EgressPodHealth Health, PodmanCommandResult? Pod = null);
+
+    private async Task<EgressPodInspection> InspectEgressPodHealthAsync(CancellationToken cancellationToken)
+    {
+        if (inspectionTimeoutSeconds is not { } timeout)
+            return await ReadEgressPodHealthAsync(10, cancellationToken).ConfigureAwait(false);
+
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(timeout));
+        try
+        {
+            return await ReadEgressPodHealthAsync(timeout, deadline.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            logger.LogWarning("The shared egress inspection deadline expired after {InspectionTimeoutSeconds}s.", timeout);
+            return new(EgressPodHealth.InspectionTimedOut);
+        }
+    }
+
+    private async Task<EgressPodInspection> ReadEgressPodHealthAsync(int inspectionTimeout, CancellationToken cancellationToken)
+    {
+        long started = Stopwatch.GetTimestamp();
         PodmanCommandResult inspect = await podmanRunner
-            .RunAsync(["pod", "inspect", EgressPodName, "--format", "json"], 10, cancellationToken)
+            .RunAsync(["pod", "inspect", EgressPodName, "--format", "json"], inspectionTimeout, cancellationToken)
             .ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
 
         if (inspect.ExitCode != 0 || !IsEgressPodHealthy(inspect.StdOut))
         {
-            return false;
+            logger.LogWarning("Egress pod inspection did not verify the expected state. ExitCode={ExitCode} Termination={Termination} ElapsedMs={ElapsedMs}",
+                inspect.ExitCode, inspect.TerminationReason, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            return new(inspect.TerminationReason == ProcessTerminationReason.TimedOut
+                ? EgressPodHealth.InspectionTimedOut : EgressPodHealth.Unhealthy);
         }
 
+        started = Stopwatch.GetTimestamp();
         PodmanCommandResult boundaryInspect = await podmanRunner
-            .RunAsync(["inspect", "kautuka-egress-boundary", "--format", "json"], 10, cancellationToken)
+            .RunAsync(["inspect", "kautuka-egress-boundary", "--format", "json"], inspectionTimeout, cancellationToken)
             .ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (boundaryInspect.ExitCode == 0 && IsSuccessfulBoundaryInit(boundaryInspect.StdOut))
+            return new(EgressPodHealth.Healthy, inspect);
 
-        return boundaryInspect.ExitCode == 0 && IsSuccessfulBoundaryInit(boundaryInspect.StdOut);
+        logger.LogWarning("Egress boundary init inspection did not verify a successful exit. ExitCode={ExitCode} Termination={Termination} ElapsedMs={ElapsedMs}",
+            boundaryInspect.ExitCode, boundaryInspect.TerminationReason, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+        return new(boundaryInspect.TerminationReason == ProcessTerminationReason.TimedOut
+            ? EgressPodHealth.InspectionTimedOut : EgressPodHealth.Unhealthy);
     }
 
     internal static bool IsSuccessfulBoundaryInit(string? inspectJson)
@@ -1753,12 +2066,15 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(renderedBoundaryNft)));
     }
 
-    internal static string ComputeReconcileConfigurationHash(string boundaryNft, string envoyConfig, string corefile)
+    internal static string ComputeReconcileConfigurationHash(string boundaryNft, string envoyConfig, string corefile, string? ingestionSecret = null)
     {
         ArgumentNullException.ThrowIfNull(boundaryNft);
         ArgumentNullException.ThrowIfNull(envoyConfig);
         ArgumentNullException.ThrowIfNull(corefile);
-        return ComputeBoundaryNftSourceHash($"boundary.nft\0{boundaryNft}\0envoy.yaml\0{envoyConfig}\0Corefile\0{corefile}");
+        string contents = $"boundary.nft\0{boundaryNft}\0envoy.yaml\0{envoyConfig}\0Corefile\0{corefile}";
+        if (ingestionSecret is not null)
+            contents += $"\0otlp-ingestion\0{ingestionSecret}";
+        return ComputeBoundaryNftSourceHash(contents);
     }
 
     internal static void RequireMatchingBoundaryRulesetHash(string renderedNativeHash, string liveHash)
@@ -1816,9 +2132,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     private static string QuoteShellArgument(string value) => "'" + value.Replace("'", "'\\''", StringComparison.Ordinal) + "'";
 
-    internal async Task<string> ReadBoundaryRulesetHashAsync(CancellationToken cancellationToken)
+    internal async Task<string> ReadBoundaryRulesetHashAsync(CancellationToken cancellationToken, PodmanCommandResult? verifiedPod = null)
     {
-        PodmanCommandResult podInspect = await podmanRunner
+        PodmanCommandResult podInspect = verifiedPod ?? await podmanRunner
             .RunAsync(["pod", "inspect", EgressPodName, "--format", "json"], 10, cancellationToken)
             .ConfigureAwait(false);
         string infraId = ReadPodInfraContainerId(podInspect);
@@ -2041,7 +2357,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string? decisionEndpointIp = null,
         string? envoyCertificateDirectory = null,
         bool useDevelopmentSelinuxDomain = false,
-        string? podSelinuxLevel = null)
+        string? podSelinuxLevel = null,
+        string? gatewayConnectEnvoyDirectory = null)
     {
         List<string> args =
         [
@@ -2066,6 +2383,11 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             args.Insert(6, "keep-groups");
             args.AddRange(["-v", $"{envoySocketHostDir}:/run/kautuka-nac:z"]);
             args.AddRange(["-v", $"{adminSocketDir}:/run/kautuka-admin:z"]);
+            if (gatewayConnectEnvoyDirectory is not null)
+            {
+                foreach (string file in new[] { "server.crt", "server.key", "gateway-ca.crt" })
+                    args.AddRange(["-v", $"{Path.Combine(gatewayConnectEnvoyDirectory, file)}:/etc/kautuka-connect/{file}:ro,Z"]);
+            }
         }
         else
         {
@@ -2427,6 +2749,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         List<InfraAllowlistEntry> allowlistEntries,
         CancellationToken cancellationToken)
     {
+        if (gatewayConnectEnvoyDirectory is not null)
+            createArgs = [createArgs[0], "--pull=never", .. createArgs.Skip(1)];
+
         PodmanCommandResult inspect = await podmanRunner
             .RunAsync(["inspect", containerName], 10, cancellationToken)
             .ConfigureAwait(false);
@@ -2539,7 +2864,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string path,
         string content,
         CancellationToken cancellationToken,
-        Func<Stream, string, CancellationToken, Task>? writer = null)
+        Func<Stream, string, CancellationToken, Task>? writer = null,
+        UnixFileMode? unixMode = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(content);
@@ -2567,6 +2893,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
             }
 
+            if (OperatingSystem.IsLinux() && unixMode is { } mode)
+            {
+                File.SetUnixFileMode(tempPath, mode);
+            }
             File.Move(tempPath, fullPath, overwrite: true);
         }
         finally
@@ -2578,7 +2908,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         }
     }
 
-    private async Task EnsureBoundaryImageAsync(CancellationToken cancellationToken)
+    internal async Task EnsureBoundaryImageAsync(CancellationToken cancellationToken)
     {
         PodmanCommandResult inspect = await podmanRunner
             .RunAsync(["image", "exists", BoundaryInitImage], 10, cancellationToken)
@@ -2588,6 +2918,12 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         {
             return;
         }
+
+        if (inspect.ExitCode != 1)
+            throw new InvalidOperationException($"Could not check the pinned boundary image '{BoundaryInitImage}': {inspect.StdErr}");
+
+        if (gatewayConnectEnvoyDirectory is not null)
+            throw new InvalidOperationException($"Pinned appliance boundary image '{BoundaryInitImage}' is missing. Restore it from the verified release image archive.");
 
         PodmanCommandResult pull = await podmanRunner
             .RunAsync(["pull", BoundaryInitImage], 300, cancellationToken)
@@ -2610,12 +2946,14 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         reconcileTask = Task.Run(async () =>
         {
-            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+            TimeSpan interval = TimeSpan.FromSeconds(30);
             while (!token.IsCancellationRequested)
             {
                 try
                 {
-                    await timer.WaitForNextTickAsync(token).ConfigureAwait(false);
+                    Interlocked.Exchange(ref nextReconcileUtcTicks, (DateTimeOffset.UtcNow + interval).UtcTicks);
+                    await reconcileWake.WaitAsync(interval, token).ConfigureAwait(false);
+                    Interlocked.Exchange(ref nextReconcileUtcTicks, 0);
                     await ReconcileOnceAsync(registry, token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
@@ -2626,6 +2964,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 {
                     logger.LogError(ex, "Error in 30s egress topology reconcile loop.");
                 }
+                finally { Interlocked.Exchange(ref nextReconcileUtcTicks, 0); }
             }
         }, token);
     }
@@ -2776,10 +3115,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             }
         }
 
-        bool egressPodHealthy;
+        EgressPodInspection podInspection;
         try
         {
-            egressPodHealthy = await IsEgressPodHealthyAsync(cancellationToken).ConfigureAwait(false);
+            podInspection = await InspectEgressPodHealthAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -2792,7 +3131,14 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             return;
         }
 
-        if (!egressPodHealthy)
+        if (podInspection.Health == EgressPodHealth.InspectionTimedOut)
+        {
+            logger.LogWarning("Egress inspection timed out; closing the startup gate and retrying verification before replacing the pod.");
+            CloseForQuarantineCleanupRetry();
+            return;
+        }
+
+        if (podInspection.Health != EgressPodHealth.Healthy)
         {
             logger.LogWarning("Egress pod health check failed during reconcile; recreating the egress pod with the startup gate closed.");
             await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false);
@@ -2803,7 +3149,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         {
             try
             {
-                string liveBoundaryHash = await ReadBoundaryRulesetHashAsync(cancellationToken).ConfigureAwait(false);
+                string liveBoundaryHash = await ReadBoundaryRulesetHashAsync(cancellationToken, podInspection.Pod).ConfigureAwait(false);
                 if (string.IsNullOrWhiteSpace(expectedBoundaryRulesetHash) || string.IsNullOrWhiteSpace(liveBoundaryHash))
                 {
                     logger.LogWarning("Boundary nft ruleset verification returned an empty hash; recreating the egress pod with the startup gate closed.");
@@ -2833,6 +3179,14 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             }
         }
 
+        if (Volatile.Read(ref pendingTelemetryAuthorization) is { } authorization)
+        {
+            // Validate the current boundary above before replacing its configuration.
+            Volatile.Write(ref telemetryAuthorization, authorization);
+            try { await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false); }
+            finally { Volatile.Write(ref pendingTelemetryAuthorization, null); }
+            return;
+        }
         await ReconcileWorkloadRegistryAsync(registry, cancellationToken).ConfigureAwait(false);
     }
 
@@ -2851,6 +3205,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         // Only consider quarantines recorded before the snapshot. A workload may
         // be created and quarantined while Podman is producing the listing.
         IReadOnlyList<string> quarantineBeforeSnapshot = desiredStateStore?.QuarantinedWorkloadIds ?? [];
+        IReadOnlyList<RegistryEntry> registryBeforeSnapshot = registry.GetAll();
         // Compare running containers to registry using full immutable IDs.
         PodmanCommandResult psResult;
         try
@@ -2977,9 +3332,14 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             }
         }
 
+        bool packageProxyStopped = false;
         // Deregister dead containers (matching both canonical hex container IDs and pre-start registered names).
-        foreach (RegistryEntry entry in registry.GetAll())
+        foreach (RegistryEntry entry in registryBeforeSnapshot)
         {
+            if (registry.FindByIp(entry.Ip) != entry)
+            {
+                continue;
+            }
 
             bool hasDirectId = liveCids.Contains(entry.ContainerId);
             bool hasNameMatch = cidByName.TryGetValue(entry.ContainerId, out string? matchedCid);
@@ -2988,7 +3348,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             bool isPackageProxy = string.Equals(entry.AgentId, "package-proxy", StringComparison.Ordinal);
             if (isPackageProxy && !isActive)
             {
-                packageProxyStartupReady = false;
+                PackageProxyAdmission admission = GetPackageProxyAdmission();
+                packageProxyStopped |= admission.Ready || admission.Verification is not null;
+                SetPackageProxyReady(false);
             }
             bool isQuarantined = desiredStateStore?.IsWorkloadQuarantined(entry.ContainerId) == true
                 || (liveCid is not null && desiredStateStore?.IsWorkloadQuarantined(liveCid) == true);
@@ -3026,17 +3388,24 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             }
             if (isActive)
             {
+                // The appliance supervisor verifies this profile and its image identity every cycle.
+                // The sandbox verifier has a different ruleset and would quarantine a healthy service.
+                if (UsesApplianceProviderEgress(entry.Purpose) && entry.Ip == WorkloadRulesetRenderer.FindApplianceAddress(entry.Purpose))
+                    continue;
+
                 try
                 {
                     if (isPackageProxy && !await IsPreviouslyAuthorizedPackageProxyAsync(liveCid!, cancellationToken).ConfigureAwait(false))
                     {
-                        packageProxyStartupReady = false;
+                        SetPackageProxyReady(false);
                         continue;
                     }
 
-                    string canonicalId = await postStartVerifier.VerifyWorkloadRulesetAsync(liveCid!, entry.Ip,
-                        isPackageProxy: isPackageProxy,
-                        cancellationToken: cancellationToken).ConfigureAwait(false);
+                    string? canonicalId = isPackageProxy
+                        ? await VerifyLivePackageProxyRulesAsync(liveCid!, false, cancellationToken).ConfigureAwait(false)
+                        : await postStartVerifier.VerifyWorkloadRulesetAsync(liveCid!, entry.Ip,
+                            cancellationToken: cancellationToken).ConfigureAwait(false);
+                    if (canonicalId is null) continue;
                     if (!string.Equals(canonicalId, entry.ContainerId, StringComparison.OrdinalIgnoreCase)) registry.UpdateContainerId(entry.Ip, entry.ContainerId, canonicalId);
                     if (transientWorkloadDenials.TryGetValue(entry.Ip, out RegistryEntry? prior)
                         && string.Equals(prior.ContainerId, entry.ContainerId, StringComparison.OrdinalIgnoreCase)
@@ -3049,7 +3418,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 catch (WorkloadRulesetVerificationException ex)
                 {
                     transientWorkloadDenials.TryRemove(entry.Ip, out _);
-                    if (isPackageProxy) packageProxyStartupReady = false;
+                    if (isPackageProxy) SetPackageProxyReady(false);
                     string? canonicalId = ex is WorkloadRulesetVerificationException drift ? drift.CanonicalContainerId : null;
                     canonicalId ??= WorkloadPostStartVerifier.IsCanonicalContainerId(liveCid) ? liveCid : null;
                     if (canonicalId is null)
@@ -3092,7 +3461,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    if (isPackageProxy) packageProxyStartupReady = false;
+                    if (isPackageProxy) SetPackageProxyReady(false);
                     if (registry.IsVerified(entry.Ip, entry.ContainerId))
                         transientWorkloadDenials[entry.Ip] = entry;
                     registry.TryQuarantine(entry.Ip, entry.ContainerId, liveCid);
@@ -3112,10 +3481,18 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 continue;
             }
 
+            if (entry.Kind == "builder" && !WorkloadPostStartVerifier.IsCanonicalContainerId(entry.ContainerId))
+            {
+                // The materializer registers the name before Podman creates the container and owns cleanup.
+                continue;
+            }
+
             logger.LogInformation("Reconcile: Deregistering terminated container '{ContainerId}' (IP: {Ip}).", entry.ContainerId, entry.Ip);
             transientWorkloadDenials.TryRemove(entry.Ip, out _);
             registry.Deregister(entry.Ip, entry.ContainerId);
         }
+        if (packageProxyStopped)
+            _ = desiredStateStore?.SignalReconcile(WorkspaceReconcileTriggerKind.RecoveryRetry);
         return cleanupComplete;
     }
 
@@ -3131,7 +3508,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 await LatchTopologyIncidentAndContainAsync(registry, "rendered egress configuration drift during snapshot retry", cancellationToken).ConfigureAwait(false);
                 return;
             }
-            if (!await IsEgressPodHealthyAsync(cancellationToken).ConfigureAwait(false))
+            EgressPodInspection podInspection = await InspectEgressPodHealthAsync(cancellationToken).ConfigureAwait(false);
+            if (podInspection.Health != EgressPodHealth.Healthy)
             {
                 workloadSnapshotRetryPending = false;
                 await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false);
@@ -3139,7 +3517,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             }
             if (OperatingSystem.IsLinux() || !string.IsNullOrWhiteSpace(windowsPodmanMachineName))
             {
-                string liveHash = await ReadBoundaryRulesetHashAsync(cancellationToken).ConfigureAwait(false);
+                string liveHash = await ReadBoundaryRulesetHashAsync(cancellationToken, podInspection.Pod).ConfigureAwait(false);
                 if (string.IsNullOrWhiteSpace(liveHash) || string.IsNullOrWhiteSpace(expectedBoundaryRulesetHash)) return;
                 if (!string.Equals(liveHash, expectedBoundaryRulesetHash, StringComparison.Ordinal))
                 {
@@ -3660,20 +4038,25 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string boundaryNft = await File.ReadAllTextAsync(boundaryPath, cancellationToken).ConfigureAwait(false);
         string envoyConfig = await File.ReadAllTextAsync(envoyPath, cancellationToken).ConfigureAwait(false);
         string corefile = await File.ReadAllTextAsync(corefilePath, cancellationToken).ConfigureAwait(false);
-        return ComputeReconcileConfigurationHash(boundaryNft, envoyConfig, corefile);
+        string? ingestionSecret = telemetryAuthorization is null ? null : await File.ReadAllTextAsync(
+            Path.Combine(Path.GetDirectoryName(envoyPath)!, BoundaryRulesetRenderer.TelemetrySecretFileName), cancellationToken).ConfigureAwait(false);
+        return ComputeReconcileConfigurationHash(boundaryNft, envoyConfig, corefile, ingestionSecret);
     }
 
     private async Task<bool> ExistingReconcileConfigurationMatchesAsync(
         string boundaryNft,
         string envoyConfig,
         string corefile,
+        string? ingestionSecret,
         CancellationToken cancellationToken)
     {
         string nacDirectory = Path.Combine(stateDirectory, "nac");
         string boundaryPath = Path.Combine(nacDirectory, "boundary", "boundary.nft");
         string envoyPath = Path.Combine(nacDirectory, "envoy", "envoy.yaml");
         string corefilePath = Path.Combine(nacDirectory, "dns", "Corefile");
-        if (!File.Exists(boundaryPath) || !File.Exists(envoyPath) || !File.Exists(corefilePath))
+        string secretPath = Path.Combine(nacDirectory, "envoy", BoundaryRulesetRenderer.TelemetrySecretFileName);
+        if (!File.Exists(boundaryPath) || !File.Exists(envoyPath) || !File.Exists(corefilePath)
+            || (ingestionSecret is not null && !File.Exists(secretPath)))
         {
             return false;
         }
@@ -3681,21 +4064,23 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string existingBoundary = await File.ReadAllTextAsync(boundaryPath, cancellationToken).ConfigureAwait(false);
         string existingEnvoy = await File.ReadAllTextAsync(envoyPath, cancellationToken).ConfigureAwait(false);
         string existingCorefile = await File.ReadAllTextAsync(corefilePath, cancellationToken).ConfigureAwait(false);
+        string? existingSecret = ingestionSecret is null ? null : await File.ReadAllTextAsync(secretPath, cancellationToken).ConfigureAwait(false);
         return string.Equals(
-            ComputeReconcileConfigurationHash(existingBoundary, existingEnvoy, existingCorefile),
-            ComputeReconcileConfigurationHash(boundaryNft, envoyConfig, corefile),
+            ComputeReconcileConfigurationHash(existingBoundary, existingEnvoy, existingCorefile, existingSecret),
+            ComputeReconcileConfigurationHash(boundaryNft, envoyConfig, corefile, ingestionSecret),
             StringComparison.Ordinal);
     }
 
-    private async Task EnsureExistingEgressPodUsesRenderedConfigAsync(
+    internal async Task EnsureExistingEgressPodUsesRenderedConfigAsync(
         string boundaryNft,
         string envoyConfig,
         string corefile,
+        string? ingestionSecret,
         bool isWindowsHostNativeDev,
         CancellationToken cancellationToken)
     {
         if (isWindowsHostNativeDev
-            || await ExistingReconcileConfigurationMatchesAsync(boundaryNft, envoyConfig, corefile, cancellationToken).ConfigureAwait(false))
+            || await ExistingReconcileConfigurationMatchesAsync(boundaryNft, envoyConfig, corefile, ingestionSecret, cancellationToken).ConfigureAwait(false))
         {
             return;
         }
@@ -3769,5 +4154,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
             cts.Dispose();
         }
+        packageProxyVerificationLock.Dispose();
+        reconcileWake.Dispose();
     }
 }

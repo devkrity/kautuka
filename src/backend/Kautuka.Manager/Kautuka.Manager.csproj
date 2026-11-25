@@ -16,6 +16,7 @@
     <ProjectReference Include="..\..\shared\Kautuka.Telemetry\Kautuka.Telemetry.csproj" />
     <ProjectReference Include="..\..\shared\Kautuka.Manager.Protos\Kautuka.Manager.Protos.csproj" />
     <ProjectReference Include="..\..\shared\Kautuka.NetworkAccess.Protos\Kautuka.NetworkAccess.Protos.csproj" />
+    <ProjectReference Include="..\..\shared\Kautuka.Security\Kautuka.Security.csproj" />
     <ProjectReference Include="..\Kautuka.Manager.RuntimeContainer\Kautuka.Manager.RuntimeContainer.csproj" />
     <ProjectReference Include="..\Kautuka.NetworkAccessController\Kautuka.NetworkAccessController.csproj" />
   </ItemGroup>
@@ -29,6 +30,7 @@
   <ItemGroup>
     <PackageReference Include="ModelContextProtocol.Core" />
     <PackageReference Include="Grpc.AspNetCore" />
+    <PackageReference Include="Grpc.Net.Client" />
     <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" />
     <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" />
@@ -52,6 +54,11 @@
     </Content>
     <Content Include="..\..\..\scripts\nac\kautuka_envoy.cil">
       <TargetPath>scripts\kautuka_envoy.cil</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\..\..\scripts\nac\kautuka_manager_peer.cil">
+      <TargetPath>scripts\kautuka_manager_peer.cil</TargetPath>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>

@@ -41,6 +41,7 @@ export const connectorSchema = z.object({
   healthcheckIntervalMilliseconds: z.number().nullable().default(null),
   mcpProtocolVersion: z.string().nullable().default(null),
   enabled: z.boolean().default(true),
+  defaultEnabled: z.boolean().optional(),
   isInternalSystemConnector: z.boolean().default(false),
   toolCount: z.number().nullable().default(null),
   toolNames: z.array(z.string()).nullable().default(null),

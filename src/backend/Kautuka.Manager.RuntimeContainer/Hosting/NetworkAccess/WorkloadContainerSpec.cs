@@ -296,7 +296,8 @@ public sealed record WorkloadContainerSpec
             }
             else
             {
-                args.AddRange(["sh", "-lc", "tail -f /dev/null"]);
+                // Podman signals PID 1 first. Handle TERM so replacing an idle sandbox does not wait for SIGKILL.
+                args.AddRange(["sh", "-lc", "trap 'exit 0' TERM; tail -f /dev/null & wait"]);
             }
         }
         else if (!string.IsNullOrWhiteSpace(Command))

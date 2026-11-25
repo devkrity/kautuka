@@ -1,0 +1,19 @@
+ARG RUNTIME_BASE
+FROM ${RUNTIME_BASE}
+
+RUN microdnf -y install ca-certificates libatomic libicu openssl-libs tzdata zlib \
+    && microdnf clean all
+
+ARG SERVICE_ROLE
+ARG SERVICE_VERSION
+LABEL org.opencontainers.image.source="https://github.com/devkrity/kautuka" \
+      org.opencontainers.image.version="${SERVICE_VERSION}" \
+      io.kautuka.service.role="${SERVICE_ROLE}" \
+      io.kautuka.service.appliance-fence="1"
+
+WORKDIR /opt/kautuka
+COPY --chown=0:0 . .
+RUN ln -s "kautuka-$SERVICE_ROLE" /opt/kautuka/service
+
+USER 65532:65532
+ENTRYPOINT ["/opt/kautuka/service"]

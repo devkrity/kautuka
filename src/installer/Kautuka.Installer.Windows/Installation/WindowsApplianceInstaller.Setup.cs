@@ -41,9 +41,10 @@ internal static partial class WindowsApplianceInstaller
         return null;
     }
 
-    private static async Task EnsureWslPrerequisitesAsync(
+    private static async Task<bool> EnableWslPrerequisitesAsync(
         WindowsApplianceInstallState state,
         Func<string, Task> log,
+        bool express,
         CancellationToken cancellationToken)
     {
         if (!CommandAvailable("wsl.exe"))
@@ -55,14 +56,14 @@ internal static partial class WindowsApplianceInstaller
         if (wslEnabled)
         {
             await log("WSL prerequisites already enabled.").ConfigureAwait(false);
-            return;
+            return true;
         }
 
         if (!IsAdministrator())
             throw new InvalidOperationException("Enabling WSL prerequisites requires an elevated installer session.");
 
         WindowsApplianceStateStore.Save(state);
-        RegisterResumeRunOnce(state.DistroName);
+        RegisterResumeRunOnce(state.DistroName, express);
 
         await log("Enabling WSL prerequisites...").ConfigureAwait(false);
         var installAttempt = await RunProcessAsync(
@@ -87,7 +88,7 @@ internal static partial class WindowsApplianceInstaller
                 throw new InvalidOperationException("Failed to enable WSL prerequisites.");
         }
 
-        throw new InvalidOperationException("WSL prerequisites were enabled. Restart Windows to resume the appliance installation.");
+        return false;
     }
 
     private static WindowsApplianceInstallState StageAssets(WindowsApplianceInstallState state)
@@ -150,20 +151,30 @@ internal static partial class WindowsApplianceInstaller
         Func<string, Task> log,
         CancellationToken cancellationToken)
     {
-        await log("Starting imported distro and verifying the prewarmed appliance image...").ConfigureAwait(false);
+        await log("Starting the imported distro and installing the signed Kautuka appliance...").ConfigureAwait(false);
         await RunWslBashAsync(
             state.DistroName,
-            "set -euo pipefail; test -d /opt/kautuka/manager/current; systemctl is-system-running --wait >/dev/null 2>&1 || true",
+            """
+            set -euo pipefail
+            systemctl is-system-running --wait >/dev/null 2>&1 || true
+            test -x /usr/local/lib/kautuka/bootstrap-wsl.sh
+            if [[ ! -f /opt/kautuka/manager/current/kautuka-platform-release.json ||
+                -e /var/lib/kautuka-recovery/first-install.pending ||
+                -L /var/lib/kautuka-recovery/first-install.pending ]]; then
+                /usr/local/lib/kautuka/bootstrap-wsl.sh --defer-admin-setup
+            fi
+            """,
             cancellationToken).ConfigureAwait(false);
     }
 
-    private static void RegisterResumeRunOnce(string distroName)
+    private static void RegisterResumeRunOnce(string distroName, bool express)
     {
         var installerExecutablePath = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(installerExecutablePath))
             throw new InvalidOperationException("Unable to determine the installer executable path for resume registration.");
 
-        var command = $"\"{installerExecutablePath}\" --express --resume --distro-name \"{distroName}\"";
+        string stagedInstaller = WindowsApplianceStateStore.StageResumeExecutable(installerExecutablePath);
+        var command = $"\"{stagedInstaller}\"{(express ? " --express" : string.Empty)} --resume --distro-name \"{distroName}\"";
         using var hive = PlatformInstaller.OpenUserHive(writable: true);
         using var key = hive.CreateSubKey(
             @"Software\Microsoft\Windows\CurrentVersion\RunOnce");

@@ -1,0 +1,24 @@
+; Manager assigns this type only to the appliance RPC listening socket.
+(type kautuka_manager_rpc_socket_t)
+(allow unconfined_t kautuka_manager_rpc_socket_t
+  (unix_stream_socket (create bind listen accept getattr getopt setopt read write shutdown connectto)))
+; The signed installer and host recovery helper check readiness as the service
+; account. Fedora may retain the systemd-launched shell's initrc_t domain.
+(allow initrc_t kautuka_manager_rpc_socket_t (unix_stream_socket (connectto)))
+
+(block kautuka_manager_client
+  (blockinherit container)
+  (blockinherit net_container)
+  (allow process kautuka_manager_rpc_socket_t (unix_stream_socket (connectto)))
+)
+
+(block kautuka_service_peer
+  (blockinherit container)
+  (blockinherit net_container)
+)
+
+; The supervisor mounts only the intended service sockets. These rules retain
+; Gateway's peer connections and WebHost's route to Gateway across MCS labels.
+(allow kautuka_manager_client.process kautuka_manager_client.process (unix_stream_socket (connectto)))
+(allow kautuka_manager_client.process kautuka_service_peer.process (unix_stream_socket (connectto)))
+(allow kautuka_service_peer.process kautuka_manager_client.process (unix_stream_socket (connectto)))

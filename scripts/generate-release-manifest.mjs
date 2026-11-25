@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash, createPrivateKey, sign as cryptoSign } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
@@ -44,14 +45,18 @@ function stable(value) {
 
 async function fileMetadata(rootDir, relativePath, name, platform) {
   const fullPath = path.join(rootDir, relativePath);
-  const fileBytes = await fs.readFile(fullPath);
-  const stats = await fs.stat(fullPath);
+  const hash = createHash("sha256");
+  let size = 0;
+  for await (const chunk of createReadStream(fullPath)) {
+    hash.update(chunk);
+    size += chunk.length;
+  }
   return {
     name,
     platform,
     path: relativePath,
-    sha256: createHash("sha256").update(fileBytes).digest("hex").toLowerCase(),
-    size: stats.size,
+    sha256: hash.digest("hex"),
+    size,
   };
 }
 
@@ -90,6 +95,45 @@ async function loadRuntimeImages(runtimeImagesPath) {
       archive: entry.archive ?? null,
     });
   });
+}
+
+const applianceServiceRoles = ["credentialshost", "channelhost", "gateway", "webhost", "updateservice"];
+const registryLabel = "[a-z0-9](?:[a-z0-9-]*[a-z0-9])?";
+const repositorySegment = "[a-z0-9]+(?:(?:[.]|__?|[-]+)[a-z0-9]+)*";
+const pinnedImage = new RegExp(
+  `^(?:localhost|${registryLabel}(?:[.]${registryLabel})+)(?::([1-9][0-9]{0,4}))?(?:/${repositorySegment})+@sha256:[a-f0-9]{64}$`,
+  "u",
+);
+
+function hasFields(value, fields) {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).length === fields.length
+    && fields.every((field) => Object.hasOwn(value, field));
+}
+
+async function loadApplianceDeployment(deploymentPath) {
+  const deploymentBytes = await fs.readFile(path.resolve(deploymentPath));
+  if (deploymentBytes.length > 16 * 1024) {
+    throw new Error("Appliance deployment descriptor exceeds 16 KiB.");
+  }
+  const deployment = JSON.parse(deploymentBytes.toString("utf8"));
+  if (!hasFields(deployment, ["schemaVersion", "hookAbi", "services"])
+      || deployment.schemaVersion !== 1 || !Number.isInteger(deployment.hookAbi)
+      || deployment.hookAbi < 1 || deployment.hookAbi > 2147483647) {
+    throw new Error("Appliance deployment requires schemaVersion 1, a positive hookAbi, and services.");
+  }
+  if (!hasFields(deployment.services, applianceServiceRoles)) {
+    throw new Error("Appliance deployment must declare exactly the five supported service roles.");
+  }
+  for (const role of applianceServiceRoles) {
+    const service = deployment.services[role];
+    const image = service?.image;
+    const match = typeof image === "string" && image.length <= 512 && pinnedImage.exec(image);
+    if (!hasFields(service, ["image"]) || !match || match[0] !== image || Number(match[1] ?? 0) > 65535) {
+      throw new Error(`Appliance service '${role}' requires a canonical digest-pinned OCI image reference.`);
+    }
+  }
+  return deployment;
 }
 
 function signatureUrlFor(signatureName, signatureBaseUrl, artifactBaseUrl) {
@@ -131,6 +175,10 @@ async function main() {
     }
   }
 
+  const linuxApplianceOnly = options["linux-appliance-only"] === "true";
+  if (linuxApplianceOnly && (options.channel !== "preview" || !options["appliance-deployment"])) {
+    throw new Error("Linux appliance-only releases require the preview channel and an appliance deployment descriptor.");
+  }
   const artifacts = [
     await fileMetadata(
       outputDir,
@@ -138,18 +186,20 @@ async function main() {
       "kautuka-linux-amd64.tar.gz",
       "linux-x64",
     ),
-    await fileMetadata(
+  ];
+  if (!linuxApplianceOnly) {
+    artifacts.push(await fileMetadata(
       outputDir,
       "kautuka-wsl-appliance.tar.gz",
       "kautuka-wsl-appliance.tar.gz",
       "wsl-amd64",
-    ),
-  ].map((artifact) => ({
-    ...artifact,
-    url: artifactUrlFor(artifact.path, artifactBaseUrl),
-  }));
+    ));
+  }
 
   const runtimeImages = await loadRuntimeImages(options["runtime-images"]);
+  const applianceDeployment = options["appliance-deployment"]
+    ? await loadApplianceDeployment(options["appliance-deployment"])
+    : undefined;
 
   const manifest = stable({
     schemaVersion: 2,
@@ -160,8 +210,12 @@ async function main() {
     sourceSha: options["source-sha"],
     publishedAt,
     minimumUpdaterVersion: options["minimum-updater-version"] || null,
-    artifacts,
+    artifacts: artifacts.map((artifact) => ({
+      ...artifact,
+      url: artifactUrlFor(artifact.path, artifactBaseUrl),
+    })),
     runtimeImages,
+    applianceDeployment,
     signature: {
       algorithm: "ecdsa-p256-sha256",
       path: signatureName,

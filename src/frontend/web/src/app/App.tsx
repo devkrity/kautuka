@@ -17,7 +17,7 @@ import { useOnboardingGuard } from '@/features/onboarding';
 import { ROLE_ADMIN } from '@/features/settings';
 import { AlertTriangle, Loader2, X } from 'lucide-react';
 import React from 'react';
-import { BrowserRouter } from 'react-router-dom';
+import { BrowserRouter, Link } from 'react-router-dom';
 import { Toaster } from 'sonner';
 import { captureLoginCallbackHash } from '@/pages/loginCallbackHash';
 import { AppRoutes } from './AppRoutes';
@@ -57,7 +57,7 @@ function AppShell() {
   const [updateActionPending, setUpdateActionPending] = React.useState<
     'refresh' | 'apply' | null
   >(null);
-  const [updateCheckFeedback, setUpdateCheckFeedback] = React.useState<string | null>(null);
+  const [updateCheckFeedback, setUpdateCheckFeedback] = React.useState<'current' | 'error' | null>(null);
   const [dismissedUpdateBannerKey, setDismissedUpdateBannerKey] = React.useState<string | null>(
     () => {
       try {
@@ -88,7 +88,7 @@ function AppShell() {
 
   const isAdmin = currentUser?.role?.toLowerCase() === ROLE_ADMIN.toLowerCase();
 
-  useBuiltInToolRefresh(authenticated && isAdmin);
+  useBuiltInToolRefresh(authenticated, isAdmin);
 
   // System Setup Guard
   useOnboardingGuard(authenticated, isAdmin);
@@ -109,7 +109,7 @@ function AppShell() {
       const state = nextStatus?.state.toLowerCase();
       const version = nextStatus?.currentRelease?.version ?? nextStatus?.managerVersion;
       if (restart && (Date.now() >= restart.until ||
-          (nextStatus?.ok === true && state === 'current' && version === restart.targetVersion) ||
+          (nextStatus?.ok === true && (state === 'current' || state === 'verificationfailed') && version === restart.targetVersion) ||
           (state === 'available' && Boolean(nextStatus?.lastError)) ||
           (nextStatus?.ok === false && nextStatus.message !== 'update-status-unavailable'))) {
         updateRestartRef.current = null;
@@ -133,6 +133,7 @@ function AppShell() {
     }
   }, [applyObservedUpdateStatus]);
 
+  const isUpdateApplying = updateStatus?.state.toLowerCase() === 'applying';
   React.useEffect(() => {
     let cancelled = false;
 
@@ -162,7 +163,7 @@ function AppShell() {
     };
 
     void poll();
-    const pollInterval = updateStatus?.state.toLowerCase() === 'applying' ? 3000 : 30000;
+    const pollInterval = isUpdateApplying ? 3000 : 30000;
     const intervalId = window.setInterval(() => {
       void poll();
     }, pollInterval);
@@ -171,7 +172,7 @@ function AppShell() {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [applyObservedUpdateStatus, authenticated, updateStatus?.state]);
+  }, [applyObservedUpdateStatus, authenticated, isUpdateApplying]);
 
   const runUpdateAction = React.useCallback(
     async (action: 'refresh' | 'apply') => {
@@ -194,13 +195,17 @@ function AppShell() {
             : await applyUpdate();
         applyObservedUpdateStatus(nextStatus);
 
+        if (action === 'refresh' && nextStatus.lastError) {
+          setDismissedUpdateBannerKey(null);
+        }
+
         if (
           action === 'refresh' &&
           nextStatus.ok === true &&
           nextStatus.state.toLowerCase() === 'current' &&
           nextStatus.eligibilityState?.toLowerCase() !== 'blocked'
         ) {
-          setUpdateCheckFeedback('You’re up to date');
+          setUpdateCheckFeedback(nextStatus.lastError ? 'error' : 'current');
         }
 
       } catch {
@@ -213,7 +218,7 @@ function AppShell() {
   );
 
   React.useEffect(() => {
-    if (!updateCheckFeedback) {
+    if (updateCheckFeedback !== 'current') {
       return undefined;
     }
 
@@ -228,10 +233,20 @@ function AppShell() {
   const hasUpdateStatusFailure = updateStatus?.ok === false;
   const hasUpdateError =
     Boolean(updateStatus?.lastError) &&
-    !(updateStatus?.ok === true && updateState === 'current' && hasPreviousRelease);
+    (updateCheckFeedback === 'error' ||
+      !(updateStatus?.ok === true && updateState === 'current' && hasPreviousRelease));
   const hasPreflightFailure =
     updateState === 'available' &&
+    updateStatus?.hostReady === true &&
     (updateStatus?.lastError?.toLowerCase().startsWith('update preflight checks failed:') ?? false);
+  const hasDiskSpaceFailure =
+    hasPreflightFailure &&
+    /insufficient (free |disk )?space|no space left on device/i.test(updateStatus?.lastError ?? '');
+  const hasAbortedUpdate =
+    updateState === 'available' &&
+    updateStatus?.hostReady === true &&
+    (updateStatus?.lastError?.startsWith('The update stopped before switching versions.') ?? false);
+  const hasReleaseCheckFailure = updateStatus?.lastError === 'GitHub release discovery request failed.';
   const updateBannerKey = React.useMemo(() => {
     if (!updateStatus) {
       return null;
@@ -354,6 +369,17 @@ function AppShell() {
   }
 
   const updateBannerTitle = (() => {
+    if (updateState === 'verificationfailed') {
+      return 'Update requires attention';
+    }
+
+    if (hasPreflightFailure) {
+      return hasDiskSpaceFailure ? 'Update needs more space' : 'Update requires attention';
+    }
+    if (hasAbortedUpdate) {
+      return 'Update stopped';
+    }
+
     if (hasUpdateStatusFailure) {
       switch (updateStatus?.message) {
         case 'update-apply-failed':
@@ -367,10 +393,6 @@ function AppShell() {
         default:
           return 'Manager update status';
       }
-    }
-
-    if (hasPreflightFailure) {
-      return 'Update preflight checks failed';
     }
 
     if (hasUpdateError && (updateState === 'applying' || updateState === 'available')) {
@@ -402,6 +424,9 @@ function AppShell() {
       case 'unsupported':
         return 'Release found but cannot be applied automatically';
       case 'current':
+        if (updateCheckFeedback === 'error' && hasUpdateError) {
+          return 'Update check needs attention';
+        }
         return hasPreviousRelease
           ? `Update applied: ${updateStatus?.currentRelease?.version ?? updateStatus?.managerVersion}`
           : 'Manager update status';
@@ -415,12 +440,18 @@ function AppShell() {
       return '';
     }
 
-    if (hasUpdateStatusFailure) {
-      return updateStatus.lastError ?? updateStatus.message;
+    if (hasPreflightFailure) {
+      return hasDiskSpaceFailure
+        ? 'Your current version is still running. Free up space on the computer running Kautuka, then try the update again.'
+        : 'Your current version is still running. Email hello@devkrity.com for help and include the update details below.';
     }
 
-    if (hasPreflightFailure) {
-      return `${updateStatus.lastError} Fix the reported preflight issue and retry the update.`;
+    if (hasReleaseCheckFailure) {
+      return 'Kautuka couldn’t check for updates. If in-app updates are paused, you can turn them on in the network settings.';
+    }
+
+    if (hasUpdateStatusFailure) {
+      return updateStatus.lastError ?? updateStatus.message;
     }
 
     if (hasUpdateError && updateState === 'available') {
@@ -478,11 +509,11 @@ function AppShell() {
   const sidebarUpdateTitle =
     updateStatus && isAdmin && !shouldShowUpdateBanner
       ? updateState === 'current' && !hasPreviousRelease && updateEligibilityState !== 'blocked'
-        ? updateCheckFeedback
+        ? updateCheckFeedback === 'current' ? 'You’re up to date' : undefined
         : updateBannerTitle
       : undefined;
   const sidebarUpdateDescription =
-    sidebarUpdateTitle === updateCheckFeedback
+    sidebarUpdateTitle === 'You’re up to date'
       ? `Checked just now. Version ${currentVersion} is current. Kautuka services restart when an update is applied.`
       : updateBannerDescription;
 
@@ -526,10 +557,33 @@ function AppShell() {
                     <AlertTitle>{updateBannerTitle}</AlertTitle>
                     <AlertDescription>
                       <p>{updateBannerDescription}</p>
+                      {(hasPreflightFailure || hasReleaseCheckFailure) && updateStatus.lastError && (
+                        <details className="mt-2">
+                          <summary className="cursor-pointer">Update details</summary>
+                          <p className="mt-1 break-words">{updateStatus.lastError}</p>
+                        </details>
+                      )}
                     </AlertDescription>
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
+                  {hasReleaseCheckFailure ? (
+                    <Button asChild variant="outline" size="sm">
+                      <Link to="/settings?tab=advanced&section=network-access">
+                        Review update permissions
+                      </Link>
+                    </Button>
+                  ) : null}
+                  {(hasDiskSpaceFailure || hasAbortedUpdate) && updateStatus.availableRelease ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => void runUpdateAction('apply')}
+                      disabled={updateActionPending !== null}
+                    >
+                      Try update again
+                    </Button>
+                  ) : null}
                   {canDismissBanner ? (
                     <Button
                       type="button"

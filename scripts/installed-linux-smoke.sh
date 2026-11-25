@@ -11,6 +11,9 @@ service_user="${KAUTUKA_SMOKE_SERVICE_USER:-kautuka}"
 setup_username="${KAUTUKA_SMOKE_USERNAME:-smoke-admin}"
 setup_password="${KAUTUKA_SMOKE_PASSWORD:-}"
 setup_token="${KAUTUKA_SMOKE_SETUP_TOKEN:-}"
+unset KAUTUKA_SMOKE_PASSWORD KAUTUKA_SMOKE_SETUP_TOKEN
+appliance_version=""
+setup_token_file=/var/lib/kautuka/setup-token
 
 usage() {
   cat <<'EOF'
@@ -18,6 +21,8 @@ Usage: scripts/installed-linux-smoke.sh [options]
 
 Options:
   --base-url <url>     WebHost origin. Default: http://127.0.0.1:20229
+  --appliance-version VERSION
+                       Require this signed container appliance release and its localhost WebHost.
   --skip-systemd       Skip systemctl and drop-in checks (HTTP-only).
   --timeout-seconds N  HTTP wait budget. Default: 180
   --service-user NAME  Appliance user. Default: kautuka
@@ -40,6 +45,14 @@ while [[ $# -gt 0 ]]; do
     --skip-systemd)
       skip_systemd=1
       shift
+      ;;
+    --appliance-version)
+      if [[ -z "${2:-}" || "$2" == -* ]]; then
+        echo "error: --appliance-version requires a version" >&2
+        exit 1
+      fi
+      appliance_version="$2"
+      shift 2
       ;;
     --timeout-seconds)
       timeout_seconds="$2"
@@ -79,6 +92,13 @@ require_cmd() {
 require_cmd curl
 require_cmd python3
 
+if [[ -n "$appliance_version" && "$skip_systemd" == "1" ]]; then
+  fail "--appliance-version requires the local Manager and Podman checks"
+fi
+
+response_dir="$(mktemp -d)"
+trap 'rm -f -- "$response_dir/setup.json" "$response_dir/login.json"; rmdir -- "$response_dir"' EXIT
+
 json_get() {
   python3 -c 'import json,sys; value=json.load(sys.stdin)
 for key in sys.argv[1].split("."):
@@ -96,6 +116,17 @@ assert_json() {
   local actual
   actual="$(printf '%s' "$body" | json_get "$path")"
   [[ "$actual" == "$expected" ]] || fail "$path expected ${expected@Q}, got ${actual@Q} in: $body"
+}
+
+post_auth() {
+  local operation="$1"
+  shift
+  printf '%s\0' "$setup_username" "$setup_password" "$@" \
+    | python3 -c 'import json, sys
+values = sys.stdin.read().split("\0")[:-1]
+print(json.dumps(dict(zip(("username", "password", "setupToken"), values))))' \
+    | curl --silent --show-error --output "$response_dir/$operation.json" --write-out '%{http_code}' --max-time 10 \
+        -H 'Content-Type: application/json' --data-binary @- "${base_url}/api/auth/$operation"
 }
 
 wait_http() {
@@ -118,11 +149,13 @@ if [[ "$skip_systemd" != "1" ]]; then
   require_cmd systemctl
   require_cmd getent
 
-  state="$(systemctl is-system-running || true)"
-  [[ "$state" == "running" ]] || fail "systemctl is-system-running reported ${state@Q}, expected running"
+  if [[ -z "$appliance_version" ]]; then
+    state="$(systemctl is-system-running || true)"
+    [[ "$state" == "running" ]] || fail "systemctl is-system-running reported ${state@Q}, expected running"
 
-  failed_system="$(systemctl --failed --no-legend --plain || true)"
-  [[ -z "$failed_system" ]] || fail "system-scope failed units: ${failed_system}"
+    failed_system="$(systemctl --failed --no-legend --plain || true)"
+    [[ -z "$failed_system" ]] || fail "system-scope failed units: ${failed_system}"
+  fi
 
   service_uid="$(getent passwd "$service_user" | cut -d: -f3)"
   [[ -n "$service_uid" ]] || fail "service user ${service_user} was not found"
@@ -146,13 +179,29 @@ if [[ "$skip_systemd" != "1" ]]; then
     [[ "$state" == "active" ]] || fail "${unit} ActiveState=${state@Q}, expected active (activating auto-restart is a crash loop)"
   }
 
-  assert_unit_active system kautuka-gateway.service
-  assert_unit_active system kautuka-channelhost.service
-  assert_unit_active system kautuka-credentialshost.service
   assert_unit_active user kautuka-manager.service
-  assert_unit_active user kautuka-webhost.service
-  assert_unit_active user kautuka-updateservice.service
-  echo "systemd checks passed (user@${service_uid} drop-in present; core units active)."
+  if [[ -n "$appliance_version" ]]; then
+    require_cmd podman
+    assert_unit_active system kautuka-appliance-update.path
+    runuser -u "$service_user" -- /opt/kautuka/manager/current/kautuka-manager \
+      --check-appliance-ready --candidate-version "$appliance_version" \
+      || fail "Manager did not confirm readiness for appliance release $appliance_version"
+    publication="$(runuser -u "$service_user" -- podman port kautuka-appliance-webhost 20229/tcp)" \
+      || fail "cannot read the appliance WebHost port"
+    [[ "$publication" =~ ^127\.0\.0\.1:([0-9]+)$ ]] || fail "unexpected appliance WebHost publication: $publication"
+    web_port="${BASH_REMATCH[1]}"
+    [[ "$base_url" == "http://127.0.0.1:$web_port" || "$base_url" == "http://localhost:$web_port" ]] \
+      || fail "browser origin does not match this appliance's published port $web_port"
+    setup_token_file=/var/lib/kautuka/gateway/setup-token
+    echo "systemd checks passed (Manager ready for $appliance_version and the activation watcher is active)."
+  else
+    assert_unit_active system kautuka-gateway.service
+    assert_unit_active system kautuka-channelhost.service
+    assert_unit_active system kautuka-credentialshost.service
+    assert_unit_active user kautuka-webhost.service
+    assert_unit_active user kautuka-updateservice.service
+    echo "systemd checks passed (user@${service_uid} drop-in present; core units active)."
+  fi
 fi
 
 wait_http "$base_url/"
@@ -166,16 +215,13 @@ setup_status="$(curl --silent --show-error --fail --max-time 10 "${base_url}/api
 needs_setup="$(printf '%s' "$setup_status" | json_get needsSetup)"
 
 if [[ "$needs_setup" == "true" ]]; then
-  if [[ -z "$setup_token" && -r /var/lib/kautuka/setup-token ]]; then
-    setup_token="$(cat /var/lib/kautuka/setup-token)"
+  if [[ -z "$setup_token" && -r "$setup_token_file" ]]; then
+    setup_token="$(cat "$setup_token_file")"
   fi
   [[ -n "$setup_token" ]] || fail "first-admin setup requires the one-time token; set KAUTUKA_SMOKE_SETUP_TOKEN or run this smoke test as root on the appliance"
 
-  setup_code="$(curl --silent --show-error --output /tmp/kautuka-smoke-setup.json --write-out '%{http_code}' --max-time 10 \
-    -H 'Content-Type: application/json' \
-    -d "$(python3 -c 'import json,sys; print(json.dumps({"username":sys.argv[1],"password":sys.argv[2],"setupToken":sys.argv[3]}))' "$setup_username" "$setup_password" "$setup_token")" \
-    "${base_url}/api/auth/setup")"
-  [[ "$setup_code" == "200" ]] || fail "POST /api/auth/setup returned ${setup_code}: $(cat /tmp/kautuka-smoke-setup.json)"
+  setup_code="$(post_auth setup "$setup_token")"
+  [[ "$setup_code" == "200" ]] || fail "POST /api/auth/setup returned ${setup_code}"
   echo "created first admin ${setup_username}"
 elif [[ "$needs_setup" == "false" ]]; then
   echo "setup already completed; logging in as ${setup_username}"
@@ -184,19 +230,14 @@ else
 fi
 unset setup_token
 
-login_body="$(python3 -c 'import json,sys; print(json.dumps({"username":sys.argv[1],"password":sys.argv[2]}))' "$setup_username" "$setup_password")"
-login_code="$(curl --silent --show-error --output /tmp/kautuka-smoke-login.json --write-out '%{http_code}' --max-time 10 \
-  -H 'Content-Type: application/json' \
-  -d "$login_body" \
-  "${base_url}/api/auth/login")"
-[[ "$login_code" == "200" ]] || fail "POST /api/auth/login returned ${login_code}: $(cat /tmp/kautuka-smoke-login.json)"
+login_code="$(post_auth login)"
+[[ "$login_code" == "200" ]] || fail "POST /api/auth/login returned ${login_code}"
 
-access_token="$(json_get accessToken < /tmp/kautuka-smoke-login.json)"
+access_token="$(json_get accessToken < "$response_dir/login.json")"
 [[ -n "$access_token" ]] || fail "login response missing accessToken"
 
-readiness="$(curl --silent --show-error --fail --max-time 15 \
-  -H "Authorization: Bearer ${access_token}" \
-  "${base_url}/api/runtime/execution-readiness")"
+readiness="$(printf 'Authorization: Bearer %s\n' "$access_token" \
+  | curl --silent --show-error --fail --max-time 15 -H @- "${base_url}/api/runtime/execution-readiness")"
 assert_json "$readiness" "ready" "true"
 assert_json "$readiness" "code" "READY"
 
@@ -213,5 +254,4 @@ for name in ("manager", "credentials_host"):
 print("execution-readiness: READY (manager, credentials_host)")
 PY
 
-rm -f /tmp/kautuka-smoke-setup.json /tmp/kautuka-smoke-login.json
 echo "installed-linux-smoke passed against ${base_url}"

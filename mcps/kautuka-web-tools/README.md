@@ -117,6 +117,7 @@ That script validates the package and writes the bundle to the requested path. G
 - Token estimates are advisory metadata only.
 - Expansion happens after ranking and is bounded by `topK` plus an expansion budget; compact mode intentionally uses a smaller effective expansion budget than full mode.
 - Oversized pages return a bounded partial result with `paging` metadata and `nextOptions` instead of hard-failing by default.
+- Web Tools processes at most 8 MiB of the final decoded response body. When `fetch.responseBodyTruncated` is true, `fetch.responseBytes` reports the bytes processed, and paging can only access content from that prefix. The lower `fetch.responseBytesLimitExceeded` threshold remains an advisory size signal.
 
 ## MCP-Native Guidance
 

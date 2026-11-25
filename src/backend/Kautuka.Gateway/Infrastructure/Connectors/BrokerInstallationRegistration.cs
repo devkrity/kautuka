@@ -16,7 +16,8 @@ internal sealed class BrokerInstallationSuspendedException : HttpRequestExceptio
         && values.Any(value => value == "installation_suspended");
 }
 
-internal sealed class BrokerInstallationRegistration(BrokerInstallationIdentityProvider identities, HttpClient client) : IDisposable
+internal sealed class BrokerInstallationRegistration(
+    BrokerInstallationIdentityProvider identities, HttpClient client) : IDisposable
 {
     private readonly SemaphoreSlim gate = new(1, 1);
     private string? registeredOrigin;

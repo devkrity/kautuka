@@ -12,87 +12,31 @@ internal static partial class Program
     {
         ProgramLogMessages.ExpressInstallStarting(log);
 
-        var port = PickPort(log);
-        var url = $"http://127.0.0.1:{port}";
-        using var ready = new ManualResetEventSlim(false);
-        using var cts = new CancellationTokenSource();
-
-        var serverThread = new Thread(() => RunServer(
-            url,
-            ready,
-            log,
-            new WindowsApplianceLaunchOptions
-            {
-                InstallDefaults = request,
-                UninstallDefaults = new WindowsApplianceUninstallRequest
-                {
-                    DistroName = request.DistroName,
-                    InstallDir = request.InstallDir,
-                    KautukaRoot = request.KautukaRoot,
-                },
-            },
-            cts.Token))
-        {
-            IsBackground = true,
-            Name = "installer-server",
-        };
-        serverThread.Start();
-
-        if (!ready.Wait(TimeSpan.FromSeconds(10)))
-        {
-            ProgramLogMessages.ServerStartTimeout(log);
-            Environment.Exit(1);
-        }
-
-        using var http = new HttpClient { BaseAddress = new Uri(url) };
-
         try
         {
-            var route = new Uri("/api/appliance/run-install?mode=express", UriKind.Relative);
-            using var requestMessage = new HttpRequestMessage(HttpMethod.Post, route)
+            var outcome = WindowsApplianceInstaller.InstallAsync(request, line =>
             {
-                Content = new StringContent(
-                    JsonSerializer.Serialize(request, InstallerJsonContext.Default.WindowsApplianceInstallRequest),
-                    Encoding.UTF8),
-            };
-            requestMessage.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
-            InstallerEndpoints.AddActionToken(requestMessage);
-
-            using var response = http.Send(requestMessage);
-            response.EnsureSuccessStatusCode();
-
-            using var stream = response.Content.ReadAsStreamAsync().GetAwaiter().GetResult();
-            using var reader = new StreamReader(stream);
-            while (!reader.EndOfStream)
+                ProgramLogMessages.StreamInstallLine(log, line);
+                return Task.CompletedTask;
+            }, express: true, CancellationToken.None).GetAwaiter().GetResult();
+            if (outcome == WindowsApplianceInstaller.InstallOutcome.RestartRequired)
             {
-                var line = reader.ReadLine();
-                if (!string.IsNullOrWhiteSpace(line))
-                    ProgramLogMessages.StreamInstallLine(log, line);
+                ProgramLogMessages.StreamInstallLine(log, "Restart Windows to resume the appliance installation.");
+                Environment.ExitCode = 3010; // ERROR_SUCCESS_REBOOT_REQUIRED.
+                return;
             }
         }
-        catch (HttpRequestException ex)
+#pragma warning disable CA1031 // The executable must report failure for any unsuccessful installation.
+        catch (Exception ex)
+#pragma warning restore CA1031
         {
             ProgramLogMessages.ExpressInstallFailed(log, ex);
-            cts.Cancel();
-            Environment.Exit(1);
-        }
-        catch (IOException ex)
-        {
-            ProgramLogMessages.ExpressInstallFailed(log, ex);
-            cts.Cancel();
-            Environment.Exit(1);
-        }
-        catch (InvalidOperationException ex)
-        {
-            ProgramLogMessages.ExpressInstallFailed(log, ex);
-            cts.Cancel();
-            Environment.Exit(1);
+            Environment.ExitCode = 1;
+            return;
         }
 
-        cts.Cancel();
         ProgramLogMessages.ExpressInstallComplete(log);
     }
-
     /// <summary>
     /// Exit code doubles as the health signal Task Scheduler records in <c>LastTaskResult</c>:
     /// 0 healthy, 1 could not supervise, 2 a host setting is breaking the appliance.

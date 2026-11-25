@@ -320,18 +320,62 @@ public static class Program
             throw new InvalidOperationException($"Package request did not recover after removing the explicit system deny: {PodmanFailureFormatter.FormatDetails(recoveredFetch)}");
         }
 
+        string packageUrl = npmRegistry + "is-number/-/is-number-7.0.0.tgz";
+        const string downloadedPackage = "/tmp/kautuka-package-cache-proof.tgz";
+        async Task<string> DownloadPackageHashAsync()
+        {
+            PodmanCommandResult result = await podman.RunAsync(
+                ["exec", builderName, "curl", "--fail", "--silent", "--show-error", "--max-time", "10",
+                 "--output", downloadedPackage, "--write-out", "%{http_code}", packageUrl], 15, CancellationToken.None).ConfigureAwait(false);
+            if (result.ExitCode != 0 || result.StdOut.Trim() != "200")
+                throw new InvalidOperationException($"Package archive fetch failed: {PodmanFailureFormatter.FormatDetails(result)}");
+            PodmanCommandResult archive = await podman.RunAsync(
+                ["exec", builderName, "tar", "-tzf", downloadedPackage], 10, CancellationToken.None).ConfigureAwait(false);
+            if (archive.ExitCode != 0 || !archive.StdOut.Split('\n', StringSplitOptions.TrimEntries).Contains("package/package.json", StringComparer.Ordinal))
+                throw new InvalidOperationException("The package response was not a valid npm archive.");
+            PodmanCommandResult hash = await podman.RunAsync(
+                ["exec", builderName, "sha256sum", downloadedPackage], 10, CancellationToken.None).ConfigureAwait(false);
+            if (hash.ExitCode != 0 || string.IsNullOrWhiteSpace(hash.StdOut))
+                throw new InvalidOperationException("Could not hash the downloaded package archive.");
+            return hash.StdOut.Trim();
+        }
+
+        string upstreamPackageHash = await DownloadPackageHashAsync().ConfigureAwait(false);
+        const string wheelName = "six-1.17.0-py2.py3-none-any.whl";
+        Task<PodmanCommandResult> DownloadWheelAsync(string version, string destination) =>
+            podman.RunAsync(
+                ["exec", "--env", "PIP_CONFIG_FILE=/dev/null", builderName, "python3", "-m", "pip",
+                 "--isolated", "download", "--no-cache-dir", "--no-deps", "--only-binary=:all:",
+                 "--disable-pip-version-check", "--retries", "0", "--timeout", "10",
+                 "--index-url", $"http://{serviceHost}:20101/pypi/simple/", "--trusted-host", serviceHost,
+                 "--dest", destination, $"six=={version}"], 30, CancellationToken.None);
+        const string onlineWheelDirectory = "/tmp/pypi-online";
+        const string cachedWheelDirectory = "/tmp/pypi-cached";
+        const string uncachedWheelDirectory = "/tmp/pypi-miss";
+        PodmanCommandResult onlineWheel = await DownloadWheelAsync("1.17.0", onlineWheelDirectory).ConfigureAwait(false);
+        if (onlineWheel.ExitCode != 0)
+            throw new InvalidOperationException($"Online wheel download through the package proxy failed: {PodmanFailureFormatter.FormatDetails(onlineWheel)}");
+
         var upstreamRequest = new[]
         {
             "exec", builderName, "npm", "view", "is-odd", "version", "--registry", npmRegistry,
             "--cache", "/tmp/nac-upstream-deny-cache"
         };
-        (_, NetworkAccessRuleView upstreamDeny) = controller.PolicyStore.SetRule(
-            admin,
-            new RuleWriteSpec("system", null, null, null, "registry.npmjs.org", "host", 443, Allowed: false),
-            controller.PolicyStore.Revision);
         PodmanCommandResult deniedUpstreamFetch;
+        PodmanCommandResult deniedWheel;
+        string cachedPackageHash;
+        var upstreamDenies = new List<NetworkAccessRuleView>();
         try
         {
+            foreach (string host in new[] { "registry.npmjs.org", "pypi.org", "files.pythonhosted.org" })
+            {
+                (_, NetworkAccessRuleView rule) = controller.PolicyStore.SetRule(
+                    admin,
+                    new RuleWriteSpec("system", null, null, null, host, "host", 443, Allowed: false),
+                    controller.PolicyStore.Revision);
+                upstreamDenies.Add(rule);
+            }
+
             // The policy applies when Envoy authorizes a new TCP connection. Restart the
             // proxy so the request cannot reuse a connection opened before this deny.
             PodmanCommandResult restart = await podman.RunAsync(["restart", proxyName], 30, CancellationToken.None).ConfigureAwait(false);
@@ -350,10 +394,25 @@ public static class Program
                 PodmanCommandResult proxyLogs = await podman.RunAsync(["logs", "--tail", "30", proxyName], 10, CancellationToken.None).ConfigureAwait(false);
                 throw new InvalidOperationException($"An explicit Manager system deny did not block the package proxy's upstream connection through Envoy. Recent proxy decisions: {decisions}; proxy logs: {proxyLogs.StdOut} {proxyLogs.StdErr}");
             }
+            // curl has no client cache. A fresh HTTP request must return the same
+            // archive from the proxy's persistent cache while upstream is denied.
+            cachedPackageHash = await DownloadPackageHashAsync().ConfigureAwait(false);
+            PodmanCommandResult cachedWheel = await DownloadWheelAsync("1.17.0", cachedWheelDirectory).ConfigureAwait(false);
+            if (cachedWheel.ExitCode != 0)
+                throw new InvalidOperationException($"Cached wheel download with PyPI denied failed: {PodmanFailureFormatter.FormatDetails(cachedWheel)}");
+            PodmanCommandResult comparison = await podman.RunAsync(
+                ["exec", builderName, "python3", "-c",
+                 "import filecmp, sys; sys.exit(not filecmp.cmp(sys.argv[1], sys.argv[2], shallow=False))",
+                 $"{onlineWheelDirectory}/{wheelName}", $"{cachedWheelDirectory}/{wheelName}"],
+                10, CancellationToken.None).ConfigureAwait(false);
+            if (comparison.ExitCode != 0)
+                throw new InvalidOperationException($"Cached wheel comparison failed: {PodmanFailureFormatter.FormatDetails(comparison)}");
+            deniedWheel = await DownloadWheelAsync("1.16.0", uncachedWheelDirectory).ConfigureAwait(false);
         }
         finally
         {
-            controller.PolicyStore.DeleteRule(admin, upstreamDeny.Rule.Id, controller.PolicyStore.Revision);
+            foreach (NetworkAccessRuleView rule in upstreamDenies)
+                controller.PolicyStore.DeleteRule(admin, rule.Rule.Id, controller.PolicyStore.Revision);
         }
 
         PodmanCommandResult recoveredUpstreamFetch = await podman.RunAsync(upstreamRequest, 45, CancellationToken.None).ConfigureAwait(false);
@@ -361,6 +420,9 @@ public static class Program
         {
             throw new InvalidOperationException($"Proxy upstream did not recover after removing the explicit system deny: {PodmanFailureFormatter.FormatDetails(recoveredUpstreamFetch)}");
         }
+        PodmanCommandResult recoveredWheel = await DownloadWheelAsync("1.16.0", uncachedWheelDirectory).ConfigureAwait(false);
+        if (recoveredWheel.ExitCode != 0)
+            throw new InvalidOperationException($"PyPI did not recover after removing the explicit system deny: {PodmanFailureFormatter.FormatDetails(recoveredWheel)}");
 
         return [
         AcceptanceHarness.Record(
@@ -380,13 +442,31 @@ public static class Program
             $"blocked={deniedUpstreamFetch.ExitCode != 0}",
             "blocked=True",
             $"blocked={recoveredUpstreamFetch.ExitCode != 0}",
-            "blocked=False", comparisonField: "blocked")];
+            "blocked=False", comparisonField: "blocked"),
+        AcceptanceHarness.Record(
+            "PROD_PACKAGE_PROXY_PERSISTENT_ARCHIVE_CACHE",
+            $"available={string.Equals(upstreamPackageHash, cachedPackageHash, StringComparison.Ordinal)}",
+            "available=True",
+            $"available={deniedUpstreamFetch.ExitCode == 0}",
+            "available=False", comparisonField: "available"),
+        AcceptanceHarness.Record(
+            "PROD_PACKAGE_PROXY_PYPI_WHEEL_CACHE",
+            $"available={onlineWheel.ExitCode == 0}",
+            "available=True",
+            $"available={deniedWheel.ExitCode == 0}",
+            "available=False", comparisonField: "available")];
     }
     private const string UserBrakeDisabledHookObservation =
         "existingStopped=False:otherUserRunning=True:newLaunchRejected=True:releaseLaunchRunning=True:responseContainsUser=True";
     public static async Task<int> Main(string[] args)
     {
         ArgumentNullException.ThrowIfNull(args);
+        if (args is ["--gateway-connect-fixture", string fixtureDirectory])
+        {
+            await GatewayConnectFixture.RunAsync(fixtureDirectory).ConfigureAwait(false);
+            return 0;
+        }
+
         Console.WriteLine("Kautuka NAC v7 Acceptance Suite");
         Console.WriteLine("Enforcing Ground Rule G9: observed values and computed negative-control flips only.");
 
@@ -1605,7 +1685,7 @@ public static class Program
             registry,
             auditRing,
             isContainerAuthorizationGateOpen: () => Volatile.Read(ref packetPathOnlyGateOverride) == 1 || topology.IsStartupGateOpen,
-            isPackageProxyReady: () => topology.IsPackageProxyReady);
+            packageProxyAdmission: topology.GetPackageProxyAdmission);
         string sockPath = Path.Combine(socketDir, "envoy.sock");
         string lockPath = Path.Combine(socketDir, "networkaccess.lock");
         var authHost = EnvoyAuthorizationHost.Create(
@@ -1959,13 +2039,11 @@ public static class Program
             }
 
             var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
-            string dnsProbeHostName = $"dns-proof-{Guid.NewGuid():N}.{lanHostAddress}.nip.io";
-            NetworkAccessRule dnsProbeRule = policyStore.SetRule(
-                admin,
-                new RuleWriteSpec("agent", "u1", "a1", null, dnsProbeHostName, "host", 8443, Allowed: true, AllowLan: true),
-                expectedRevision: policyStore.Revision).Rule.Rule
-                ?? throw new InvalidOperationException("The unique DNS probe policy rule was not created.");
-
+            string dnsProbeHostName = string.Empty;
+            string conntrackDnsClearSummary = string.Empty;
+            string dnsProbeCountersBefore = string.Empty;
+            string dnsProbeCountersAfter = string.Empty;
+            long dnsProbeDelta = 0;
             string[] dnsProbeUpstreamAddresses = corefile
                 .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Where(static line => line.StartsWith("forward . ", StringComparison.Ordinal))
@@ -1979,40 +2057,68 @@ public static class Program
                 throw new InvalidOperationException("The production CoreDNS forwarder had no IPv4 upstream addresses for the unique DNS probe.");
             }
 
-            var conntrackDnsClearResults = new List<string>(dnsProbeUpstreamAddresses.Length);
-            foreach (string upstreamAddress in dnsProbeUpstreamAddresses)
+            // A reused resolver connection may become established between conntrack
+            // deletion and the counter snapshot. Retry only that observed case, with
+            // a new hostname and its own temporary approval, never a failed route.
+            for (int dnsAttempt = 1; dnsAttempt <= 2; dnsAttempt++)
             {
-                var (conntrackClearRc, conntrackClearOut, conntrackClearErr) = await ExecAsync(
-                    "podman",
-                    ["unshare", "nsenter", "-t", egressPid.ToString(CultureInfo.InvariantCulture), "-n", "conntrack", "-D", "-p", "udp", "--dst", upstreamAddress, "--dport", "53"])
-                    .ConfigureAwait(false);
-                if (!TryParseConntrackDeleteResult(conntrackClearRc, conntrackClearOut, conntrackClearErr, out long removedFlowCount))
+                dnsProbeHostName = $"dns-proof-{Guid.NewGuid():N}.{lanHostAddress}.nip.io";
+                NetworkAccessRule dnsProbeRule = policyStore.SetRule(
+                    admin,
+                    new RuleWriteSpec("agent", "u1", "a1", null, dnsProbeHostName, "host", 8443, Allowed: true, AllowLan: true),
+                    expectedRevision: policyStore.Revision).Rule.Rule
+                    ?? throw new InvalidOperationException("The unique DNS probe policy rule was not created.");
+                try
                 {
-                    throw new InvalidOperationException($"Could not clear DNS conntrack state for configured upstream {upstreamAddress} (rc={conntrackClearRc}; out={conntrackClearOut}; err={conntrackClearErr}).");
+                    var conntrackDnsClearResults = new List<string>(dnsProbeUpstreamAddresses.Length * 2);
+                    foreach (string upstreamAddress in dnsProbeUpstreamAddresses)
+                    {
+                        foreach (string protocol in new[] { "udp", "tcp" })
+                        {
+                            var (conntrackClearRc, conntrackClearOut, conntrackClearErr) = await ExecAsync(
+                                "podman",
+                                ["unshare", "nsenter", "-t", egressPid.ToString(CultureInfo.InvariantCulture), "-n", "conntrack", "-D", "-p", protocol, "--dst", upstreamAddress, "--dport", "53"])
+                                .ConfigureAwait(false);
+                            if (!TryParseConntrackDeleteResult(conntrackClearRc, conntrackClearOut, conntrackClearErr, out long removedFlowCount))
+                            {
+                                throw new InvalidOperationException($"Could not clear {protocol} DNS conntrack state for configured upstream {upstreamAddress} (rc={conntrackClearRc}; out={conntrackClearOut}; err={conntrackClearErr}).");
+                            }
+
+                            // Zero is valid: it means no established conntrack flow existed
+                            // for this protocol and upstream. A counted lookup is still required.
+                            conntrackDnsClearResults.Add($"{upstreamAddress}/{protocol}:removed={removedFlowCount}");
+                        }
+                    }
+
+                    conntrackDnsClearSummary = string.Join(",", conntrackDnsClearResults);
+                    dnsProbeCountersBefore = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+                    long dnsProbePacketsBefore = ExtractNftCommentCounterPackets(dnsProbeCountersBefore, "dns_upstream");
+                    var (dnsProbeRc, dnsProbeBody, dnsProbeErr) = await ExecAsync(
+                        "podman",
+                        ["exec", wlName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://" + dnsProbeHostName + ":8443/"])
+                        .ConfigureAwait(false);
+                    dnsProbeCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+                    long dnsProbePacketsAfter = ExtractNftCommentCounterPackets(dnsProbeCountersAfter, "dns_upstream");
+                    dnsProbeDelta = dnsProbePacketsAfter - dnsProbePacketsBefore;
+                    bool dnsProbeBodyReceived = dnsProbeRc == 0 && string.Equals(dnsProbeBody, "NAC LAN fixture ok", StringComparison.Ordinal);
+                    Console.WriteLine($"[PROD_STAGE] unique approved DNS attempt={dnsAttempt}; host={dnsProbeHostName}; conntrack={conntrackDnsClearSummary}; rc={dnsProbeRc}; body={dnsProbeBody}; err={dnsProbeErr}; dnsDelta={dnsProbeDelta}");
+                    if (!dnsProbeBodyReceived || dnsProbeDelta < 0 || (dnsProbeDelta == 0 && dnsAttempt == 2))
+                    {
+                        throw new InvalidOperationException($"The unique approved DNS probe did not exercise a counted upstream lookup (attempt={dnsAttempt}; host={dnsProbeHostName}; upstreams={string.Join(",", dnsProbeUpstreamAddresses)}; conntrack={conntrackDnsClearSummary}; rc={dnsProbeRc}; body={dnsProbeBody}; err={dnsProbeErr}; dnsDelta={dnsProbeDelta}; countersBefore:\n{dnsProbeCountersBefore}\ncountersAfter:\n{dnsProbeCountersAfter}).");
+                    }
+                    if (dnsProbeDelta > 0)
+                    {
+                        Console.WriteLine($"[PROD_STAGE] unique approved DNS lookup reached LAN fixture; host={dnsProbeHostName}; delta={dnsProbeDelta}; conntrack={conntrackDnsClearSummary}");
+                        break;
+                    }
+                    Console.WriteLine("[PROD_STAGE] approved DNS lookup returned the expected body without a counted upstream packet; retrying once with a fresh hostname.");
                 }
-
-                // Zero is valid: it means no established conntrack flow existed for this
-                // resolver. The unique-name lookup below must still hit the nft rule.
-                conntrackDnsClearResults.Add($"{upstreamAddress}:removed={removedFlowCount}");
+                finally
+                {
+                    long revision = policyStore.DeleteRule(admin, dnsProbeRule.Id, expectedRevision: policyStore.Revision);
+                    Console.WriteLine($"[PROD_STAGE] removed temporary DNS probe rule; attempt={dnsAttempt}; host={dnsProbeHostName}; revision={revision}");
+                }
             }
-
-            string conntrackDnsClearSummary = string.Join(",", conntrackDnsClearResults);
-            string dnsProbeCountersBefore = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
-            long dnsProbePacketsBefore = ExtractNftCommentCounterPackets(dnsProbeCountersBefore, "dns_upstream");
-            var (dnsProbeRc, dnsProbeBody, dnsProbeErr) = await ExecAsync(
-                "podman",
-                ["exec", wlName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://" + dnsProbeHostName + ":8443/"])
-                .ConfigureAwait(false);
-            string dnsProbeCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
-            long dnsProbePacketsAfter = ExtractNftCommentCounterPackets(dnsProbeCountersAfter, "dns_upstream");
-            long dnsProbeDelta = dnsProbePacketsAfter - dnsProbePacketsBefore;
-            bool dnsProbeBodyReceived = dnsProbeRc == 0 && dnsProbeBody.Contains("NAC LAN fixture ok", StringComparison.Ordinal);
-            if (!dnsProbeBodyReceived || dnsProbeDelta <= 0)
-            {
-                throw new InvalidOperationException($"The unique approved DNS probe did not exercise a counted upstream lookup (host={dnsProbeHostName}; upstreams={string.Join(",", dnsProbeUpstreamAddresses)}; conntrack={conntrackDnsClearSummary}; rc={dnsProbeRc}; body={dnsProbeBody}; err={dnsProbeErr}; dnsDelta={dnsProbeDelta}; countersBefore:\n{dnsProbeCountersBefore}\ncountersAfter:\n{dnsProbeCountersAfter}).");
-            }
-            Console.WriteLine($"[PROD_STAGE] unique approved DNS lookup reached LAN fixture; host={dnsProbeHostName}; delta={dnsProbeDelta}; conntrack={conntrackDnsClearSummary}");
-            _ = policyStore.DeleteRule(admin, dnsProbeRule.Id, expectedRevision: policyStore.Revision);
 
             AcceptanceObservation parserAcceptance;
             var connectorService = new WorkspaceContainerConnectorExecutionService(
@@ -2125,9 +2231,10 @@ public static class Program
             long lanApprovedBefore = ExtractNftCommentCounterPackets(lanCountersBefore, "lan_approved");
             long lanMasqueradeBefore = ExtractNftCommentCounterPackets(lanCountersBefore, "lan_source_masquerade");
             int lanFixtureHitsBeforeNoGrant = File.Exists(lanAccessLogPath) ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length : 0;
+            string lanRetryUrl = $"https://{lanHostName}:8443/explicit-retry";
             var (lanDeniedRc, _, _) = await ExecAsync(
                 "podman",
-                ["exec", lanWorkloadName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://" + lanHostName + ":8443/"]).ConfigureAwait(false);
+                ["exec", lanWorkloadName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "3", lanRetryUrl]).ConfigureAwait(false);
             string noGrantEgressCounters = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
             long noGrantPrivateRejectDelta = ExtractNftCommentCounterPackets(noGrantEgressCounters, "private_reject") - lanPrivateRejectBeforeNoGrant;
             long noGrantMasqueradeDelta = ExtractNftCommentCounterPackets(noGrantEgressCounters, "lan_source_masquerade") - lanMasqueradeBefore;
@@ -2144,6 +2251,8 @@ public static class Program
             bool lanCardCreated = lanDeniedRc != 0 && lanCard is not null;
             NetworkAccessRule? lanRule = null;
             bool lanBodyReceived = false;
+            bool lanApprovalSentNoTraffic = false;
+            bool lanRetryReachedDestinationOnce = false;
             int lanAllowedRc = 1;
             int lanFixtureHitsAfterApproval = 0;
             long lanApprovedDelta = 0;
@@ -2158,12 +2267,17 @@ public static class Program
                     allowLan: true,
                     expectedRevision: policyStore.Revision);
                 lanRule = lanDecision.Rule;
+                await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
+                lanApprovalSentNoTraffic = (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length
+                    == lanFixtureHitsAfterNoGrant;
                 var (allowedRc, lanAllowedOut, lanAllowedErr) = await ExecAsync(
                     "podman",
-                    ["exec", lanWorkloadName, "curl", "--verbose", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://" + lanHostName + ":8443/"]).ConfigureAwait(false);
+                    ["exec", lanWorkloadName, "curl", "--verbose", "--insecure", "--silent", "--show-error", "--max-time", "8", lanRetryUrl]).ConfigureAwait(false);
                 lanAllowedRc = allowedRc;
                 lanBodyReceived = lanAllowedRc == 0 && lanAllowedOut.Contains("NAC LAN fixture ok", StringComparison.Ordinal);
                 lanFixtureHitsAfterApproval = (File.Exists(lanAccessLogPath) ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length : 0) - lanFixtureHitsBeforeNoGrant;
+                lanRetryReachedDestinationOnce = (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false))
+                    .Count(line => line.StartsWith("GET /explicit-retry from ", StringComparison.Ordinal)) == 1;
                 string lanCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
                 lanApprovedDelta = ExtractNftCommentCounterPackets(lanCountersAfter, "lan_approved") - lanApprovedBefore;
                 lanMasqueradeDelta = ExtractNftCommentCounterPackets(lanCountersAfter, "lan_source_masquerade") - lanMasqueradeBefore;
@@ -2180,12 +2294,12 @@ public static class Program
                     await Console.Error.WriteLineAsync($"LAN-grant retry failed: {lanAllowedErr}").ConfigureAwait(false);
                 }
             }
-            string lanObservation = $"blocked={lanAllowedRc != 0}:beforeApprovalBlocked={lanDeniedRc != 0}:cardCreated={lanCardCreated}:allowLanRule={lanRule?.AllowLan == true}:lanApprovedPacketDeltaGt0={lanApprovedDelta > 0}:lanMasqueradePacketDeltaGt0={lanMasqueradeDelta > 0}:body={lanBodyReceived}";
+            string lanObservation = $"blocked={lanAllowedRc != 0}:beforeApprovalBlocked={lanDeniedRc != 0}:deniedBeforeClientTimeout={lanDeniedRc is not (0 or 28)}:cardCreated={lanCardCreated}:allowLanRule={lanRule?.AllowLan == true}:approvalSentNoTraffic={lanApprovalSentNoTraffic}:retryReachedDestinationOnce={lanRetryReachedDestinationOnce}:lanApprovedPacketDeltaGt0={lanApprovedDelta > 0}:lanMasqueradePacketDeltaGt0={lanMasqueradeDelta > 0}:body={lanBodyReceived}";
             string lanNcObservation = $"blocked={lanDeniedRc != 0}:beforeApprovalBlocked={lanDeniedRc != 0}:cardCreated={lanCardCreated}";
             AcceptanceObservation lanAcceptance = AcceptanceHarness.Record(
                 "PROD_LAN_GRANT",
                 lanObservation,
-                "blocked=False:beforeApprovalBlocked=True:cardCreated=True:allowLanRule=True:lanApprovedPacketDeltaGt0=True:lanMasqueradePacketDeltaGt0=True:body=True",
+                "blocked=False:beforeApprovalBlocked=True:deniedBeforeClientTimeout=True:cardCreated=True:allowLanRule=True:approvalSentNoTraffic=True:retryReachedDestinationOnce=True:lanApprovedPacketDeltaGt0=True:lanMasqueradePacketDeltaGt0=True:body=True",
                 lanNcObservation,
                 "blocked=True:beforeApprovalBlocked=True:cardCreated=True", comparisonField: "blocked");
             AcceptanceObservation noGrantLanAcceptance = AcceptanceHarness.Record(

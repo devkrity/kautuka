@@ -148,6 +148,37 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => probe);
     }
 
+    [Theory]
+    [InlineData(true, WorkspaceMcpConnectorUnavailabilityReason.InitializeFailed, "Network protection paused")]
+    [InlineData(false, WorkspaceMcpConnectorUnavailabilityReason.StartupTimeout, "probe timed out")]
+    public async Task ProbeDistinguishesAdmissionClosureFromItsRequestDeadline(
+        bool closeAdmission, WorkspaceMcpConnectorUnavailabilityReason reason, string message)
+    {
+        using var request = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        using var admission = new CancellableProbeAdmission();
+        string policyPath = Path.Combine(Path.GetTempPath(), $"probe-admission-{Guid.NewGuid():N}.json");
+        using var policy = new NetworkAccessPolicyStore(policyPath);
+        var runner = new PodmanCommandRunner(async (args, token) =>
+        {
+            Assert.Equal("image", args[0]);
+            if (closeAdmission) admission.CloseLaunchAdmission();
+            else await request.CancelAsync();
+            token.ThrowIfCancellationRequested();
+            throw new InvalidOperationException("Fixture expected image inspection to be cancelled.");
+        });
+        await using var service = new WorkspaceContainerConnectorExecutionService(new WorkspaceDesiredStateStore(), runner,
+            new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance), new PodmanContainerTool(runner),
+            NullLogger<WorkspaceContainerConnectorExecutionService>.Instance, workloadLaunchGate: new WorkloadLaunchGate(admission, policy));
+        var connector = new WorkspaceMcpContainerConnectorDefinition("test", "localhost/test:latest", "server", [], true, false, null, null, [], 30, 600);
+
+        var result = await service.ProbeConnectorAsync(connector, 30, request.Token, userId: "fixture-user");
+
+        Assert.False(result.Ok);
+        Assert.Equal(reason, result.UnavailabilityReason);
+        Assert.Contains(message, result.FailureMessage, StringComparison.Ordinal);
+        Assert.True(admission.LeaseReleased);
+    }
+
     [Fact]
     public async Task ImageCompatibilityLookupResolvesMaterializedTagToImmutableImageId_WithNegativeControl()
     {
@@ -335,8 +366,16 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         }
     }
 
-    [Fact]
-    public async Task PublicProbeMaterializesInspectsRunsAndVerifiesUsingImmutableImageId()
+    [Theory]
+    [InlineData("none", false, true)]
+    [InlineData("unrelated", true, true)]
+    [InlineData("unrelated", false, false)]
+    [InlineData("same-connector", true, false)]
+    [InlineData("settings", true, false)]
+    [InlineData("multiple", true, false)]
+    [InlineData("different-publisher", true, false)]
+    public async Task PublicProbeMaterializesInspectsRunsAndVerifiesUsingImmutableImageId(
+        string concurrentPublication, bool saveDiscovery, bool expectSuccess)
     {
         if (!OperatingSystem.IsLinux())
         {
@@ -358,11 +397,34 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             var registry = new WorkloadRegistry();
             var calls = new List<string[]>();
             var pidIps = new Dictionary<string, string>(StringComparer.Ordinal);
+            var desired = new WorkspaceDesiredStateStore();
+            var connector = new WorkspaceMcpContainerConnectorDefinition(
+                "binary-mcpb-probe", "localhost/fedora-minimal:44", "python3", ["-m", "bundle_server"],
+                true, false, bundlePath, "binary", [], 30, 600);
+            ManagerRuntimeSettings Settings(int timeout) => new(
+                new ManagerWorkspaceDefinition { BaseRoot = stateDirectory },
+                new ManagerSandboxRuntimeDefinition { DefaultTimeout = timeout },
+                new WorkspaceTelemetryDefinition());
+            _ = desired.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap, Settings(30), [], [], []);
+
             bool runStarted = false;
             int nextPid = 4240;
             var runner = new PodmanCommandRunner((args, _) =>
             {
                 calls.Add([.. args]);
+                if (args[0] == "tag" && concurrentPublication != "none")
+                {
+                    string publishedId = concurrentPublication == "same-connector" ? connector.ConnectorId : "other-connector";
+                    desired.ApplyDesiredState(
+                        concurrentPublication == "multiple" ? 3 : 2,
+                        WorkspaceDesiredStateSyncReason.Bootstrap,
+                        Settings(concurrentPublication == "settings" ? 60 : 30),
+                        [],
+                        [connector with { ConnectorId = publishedId }],
+                        [],
+                        concurrentPublication == "different-publisher" ? "replacement-gateway" : "gateway");
+                }
+
                 if (args[0] == "image" && args.Count > 1 && args[1] == "exists")
                 {
                     return Task.FromResult(new PodmanCommandResult(1, string.Empty, "image not known", ProcessTerminationReason.NonZeroExit));
@@ -423,10 +485,6 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             string server = "import json,sys\nfor line in sys.stdin:\n r=json.loads(line)\n m=r.get('method')\n i=r.get('id')\n if m=='initialize': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':'2025-03-26','capabilities':{'tools':{}},'serverInfo':{'name':'materialized-test','version':'1'}}}),flush=True)\n elif m=='tools/list': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'tools':[]}}),flush=True)\n";
             var store = new ImageCompatibilityStore(Path.Combine(stateDirectory, "image-compat.json"));
             ImageCompatProfile profile = store.SetProfile(new NetworkAccessActor("admin", IsAdmin: true), imageId, [ImageCompatibilityStore.RootUser]);
-            var desired = new WorkspaceDesiredStateStore();
-            var connector = new WorkspaceMcpContainerConnectorDefinition(
-                "binary-mcpb-probe", "localhost/fedora-minimal:44", "python3", ["-m", "bundle_server"],
-                true, false, bundlePath, "binary", [], 30, 600);
             await using var service = new WorkspaceContainerConnectorExecutionService(
                 desired,
                 runner,
@@ -446,12 +504,24 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 connector,
                 30,
                 TestContext.Current.CancellationToken,
-                "probe-user");
+                "probe-user",
+                saveDiscovery);
+
+            if (!expectSuccess)
+            {
+                Assert.False(ok);
+                Assert.Contains("Connector desired state changed during preparation.", failureMessage, StringComparison.Ordinal);
+                Assert.DoesNotContain(calls, args => args[0] == "run");
+                Assert.Empty(registry.GetAll());
+                return;
+            }
 
             Assert.True(ok, failureMessage);
             Assert.False(policyStore.TryEvaluateTemporaryProbeDecision(containerId, "probe-user", "binary-mcpb-probe", "host", "probe.example", 443, out _, out _));
             Assert.Empty(tools);
-            Assert.Contains(calls, args => args[0] == "build");
+            string[] build = Assert.Single(calls, args => args[0] == "build");
+            Assert.Contains("--pull=never", build);
+            Assert.Contains("--network=none", build);
             Assert.Contains(calls, args => args[0] == "tag");
             Assert.Contains(calls, args => args.Length > 2 && args[0] == "image" && args[1] == "inspect"
                 && args[^1].StartsWith("localhost/kautuka-mcpb-binary:", StringComparison.Ordinal));
@@ -1260,7 +1330,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
     }
 
     [Fact]
-    public void UvRuntimeContainerfileInstallsManagedPythonInsideImmutableBundleArtifact()
+    public void UvRuntimeContainerfileUsesToolsFromTheSignedBase()
     {
         string containerfile = McpbImageMaterializer.BuildContainerfile(
             "quay.io/fedora/fedora-minimal:44",
@@ -1271,33 +1341,33 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         Assert.Contains("USER root", containerfile, StringComparison.Ordinal);
         Assert.Contains("RUN chown -R node:node /opt/kautuka/mcpb", containerfile, StringComparison.Ordinal);
         Assert.Contains("USER node", containerfile, StringComparison.Ordinal);
-        Assert.Contains("ENV UV_PYTHON_INSTALL_DIR=/opt/kautuka/mcpb/.python", containerfile, StringComparison.Ordinal);
+        Assert.Contains("ENV UV_PYTHON_DOWNLOADS=never", containerfile, StringComparison.Ordinal);
         Assert.Contains("ENV UV_PROJECT_ENVIRONMENT=/opt/kautuka/mcpb/.venv", containerfile, StringComparison.Ordinal);
-        Assert.DoesNotContain("UV_PYTHON_PREFERENCE", containerfile, StringComparison.Ordinal);
+        Assert.DoesNotContain("microdnf", containerfile, StringComparison.Ordinal);
         Assert.DoesNotContain("uv sync", containerfile, StringComparison.Ordinal);
         Assert.DoesNotContain("pip install", containerfile, StringComparison.Ordinal);
-        Assert.Contains("uv==0.11.19", installScript, StringComparison.Ordinal);
-        Assert.Contains("--index-url \"$PIP_INDEX_URL\"", installScript, StringComparison.Ordinal);
-        Assert.Contains("$pip_trusted", installScript, StringComparison.Ordinal);
+        Assert.Contains("export UV_PYTHON_DOWNLOADS=never", installScript, StringComparison.Ordinal);
+        Assert.DoesNotContain("uv==0.11.19", installScript, StringComparison.Ordinal);
         Assert.Contains("uv sync --no-dev --index-url \"$UV_INDEX_URL\"", installScript, StringComparison.Ordinal);
         Assert.DoesNotContain("UV_PYTHON_PREFERENCE", installScript, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void NodeRuntimeContainerfileVerifiesNodeTarballChecksum()
+    public void NodeRuntimeContainerfileUsesNodeFromTheSignedBase()
     {
         string containerfile = McpbImageMaterializer.BuildContainerfile(
             "quay.io/fedora/fedora-minimal:44",
             "node",
             hasBundle: true);
 
-        Assert.Contains("sha256sum -c -", containerfile, StringComparison.Ordinal);
-        Assert.Contains("0ce210831380ab75a5fec0d3fb6b5af0958898016b2cae51cc2fa11057d2f77e", containerfile, StringComparison.Ordinal);
+        Assert.Contains("RUN chown -R node:node /opt/kautuka/mcpb", containerfile, StringComparison.Ordinal);
+        Assert.DoesNotContain("microdnf", containerfile, StringComparison.Ordinal);
+        Assert.DoesNotContain("curl", containerfile, StringComparison.Ordinal);
         Assert.DoesNotContain("npm install", containerfile, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void UvSandboxArtifactContainerfileCopiesManagedPythonWithVirtualEnvironment()
+    public void UvSandboxArtifactContainerfileCopiesTheVirtualEnvironmentUsingBasePython()
     {
         const string installRoot = "/home/node/.kautuka/connectors/by-digest/test";
         string systemContainerfile = McpbImageMaterializer.BuildSandboxSystemContainerfile(
@@ -1309,12 +1379,12 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             installRoot);
         string installScript = McpbImageMaterializer.BuildLanguagePackageInstallScript("uv", forSandboxArtifact: true);
 
-        Assert.Contains($"ENV UV_PYTHON_INSTALL_DIR={installRoot}/.python", systemContainerfile, StringComparison.Ordinal);
+        Assert.Contains("ENV UV_PYTHON_DOWNLOADS=never", systemContainerfile, StringComparison.Ordinal);
         Assert.Contains($"ENV UV_PROJECT_ENVIRONMENT={installRoot}/.venv", systemContainerfile, StringComparison.Ordinal);
         Assert.DoesNotContain("UV_PYTHON_PREFERENCE", systemContainerfile, StringComparison.Ordinal);
         Assert.DoesNotContain("uv sync", systemContainerfile, StringComparison.Ordinal);
         Assert.Contains("uv sync --no-dev --no-editable --index-url \"$UV_INDEX_URL\"", installScript, StringComparison.Ordinal);
-        Assert.Contains("$pip_trusted", installScript, StringComparison.Ordinal);
+        Assert.Contains("uv venv .venv; uv pip install", installScript, StringComparison.Ordinal);
         Assert.Contains($"COPY --from=builder {installRoot}/ /artifact/", scratchContainerfile, StringComparison.Ordinal);
     }
 
@@ -1399,6 +1469,58 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         Assert.Equal("/bin/sh", arguments[^3]);
         Assert.Equal("-lc", arguments[^2]);
         Assert.Equal("uv sync --no-dev", arguments[^1]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PackageBuilderCleanupRemovesOnlyItsOwnRegistration(bool replaceRegistration)
+    {
+        DirectoryInfo temp = Directory.CreateTempSubdirectory("nac-package-build-");
+        try
+        {
+            var registry = new WorkloadRegistry();
+            RegistryEntry? replacement = null;
+            string? deregisteredContainerId = null;
+            registry.ContainerDeregistered += (_, args) => deregisteredContainerId = args.ContainerId;
+            string promotedId = new('a', 64);
+            var podman = new PodmanCommandRunner((args, _) =>
+            {
+                if (args[0] == "run")
+                {
+                    RegistryEntry builder = Assert.Single(registry.GetAll());
+                    Assert.True(registry.UpdateContainerId(builder.Ip, builder.ContainerId, promotedId));
+                    if (replaceRegistration)
+                    {
+                        replacement = builder with { ContainerId = new string('b', 64), RegisteredUtc = builder.RegisteredUtc.AddSeconds(1) };
+                        registry.Register(replacement);
+                        deregisteredContainerId = null;
+                    }
+                }
+
+                return Task.FromResult(new PodmanCommandResult(0, "", ""));
+            });
+            var materializer = new McpbImageMaterializer(podman, NullLogger<McpbImageMaterializer>.Instance,
+                addressAllocator: new WorkloadAddressAllocator(Path.Combine(temp.FullName, "ip.json")), workloadRegistry: registry);
+            var connector = new WorkspaceMcpContainerConnectorDefinition("user::builder", "localhost/test:base", "server", [], true, false, null, "uv",
+                [new("PIP_INDEX_URL", "http://kautuka-pkgs-proxy:20101/pypi/simple/"), new("UV_INDEX_URL", "http://kautuka-pkgs-proxy:20101/pypi/simple/")], 30, 600);
+            MethodInfo commit = typeof(McpbImageMaterializer).GetMethod("CommitLanguagePackagesAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+            await (Task)commit.Invoke(materializer,
+                ["localhost/test:base", "localhost/test:installed", connector, "uv", false, false, TestContext.Current.CancellationToken])!;
+
+            if (replaceRegistration)
+            {
+                Assert.Equal(replacement, Assert.Single(registry.GetAll()));
+                Assert.Null(deregisteredContainerId);
+            }
+            else
+            {
+                Assert.Empty(registry.GetAll());
+                Assert.Equal(promotedId, deregisteredContainerId);
+            }
+        }
+        finally { temp.Delete(recursive: true); }
     }
 
     [Fact]
@@ -1722,7 +1844,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             Assert.DoesNotContain(commands, static command => command[0] == "rm");
             Assert.Equal(1, registry.Count);
 
-            await service.ReconcileDesiredConnectorsAsync([connector], CancellationToken.None);
+            await service.ReconcileDesiredConnectorsAsync([connector], null, CancellationToken.None);
             Assert.Equal(runCount, commands.Count(static command => command[0] == "run"));
             Assert.DoesNotContain(commands, static command => command[0] == "rm");
 
@@ -1858,12 +1980,17 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         ])!).ConfigureAwait(false);
 
         Assert.Equal(1, commands.Count(static args => args[0] == "run"));
-        int inspectCountBeforeReconcile = commands.Count(args => args[0] == "inspect" && args.Length > 1 && args[1] == containerName);
+        int commandsBeforeReconcile = commands.Count;
+        _ = await service.ReconcileDesiredConnectorsAsync(
+            [connector], null, CancellationToken.None, new HashSet<string>());
+        Assert.Equal(commandsBeforeReconcile, commands.Count);
 
-        _ = await service.ReconcileDesiredConnectorsAsync([connector], CancellationToken.None);
+        _ = await service.ReconcileDesiredConnectorsAsync(
+            [connector], null, CancellationToken.None, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { containerName });
 
-        int inspectCountAfterReconcile = commands.Count(args => args[0] == "inspect" && args.Length > 1 && args[1] == containerName);
-        Assert.True(inspectCountAfterReconcile > inspectCountBeforeReconcile, "Reconciliation must inspect this user and agent's actual container name.");
+        string[][] inspected = [.. commands.Skip(commandsBeforeReconcile).Where(static args => args[0] == "inspect")];
+        Assert.Contains(inspected, args => args[1] == containerName);
+        Assert.All(inspected, args => Assert.Contains(args[1], new[] { containerName, containerId }));
         Assert.Equal(1, commands.Count(static args => args[0] == "run"));
         Assert.DoesNotContain(commands, static args => args[0] == "rm");
         Assert.Equal(1, registry.Count);
@@ -2654,5 +2781,21 @@ Egress: "normal", Attribution: "user", CompatProfile: null, DateTimeOffset.UtcNo
     private sealed class TestWorkloadStartupState(bool isStartupGateOpen) : IWorkloadStartupState
     {
         public bool IsStartupGateOpen { get; } = isStartupGateOpen;
+    }
+
+    private sealed class CancellableProbeAdmission : IWorkloadStartupState, IWorkloadLaunchAdmission, IWorkloadLaunchLease, IDisposable
+    {
+        private readonly CancellationTokenSource cancellation = new();
+        public bool IsStartupGateOpen => !cancellation.IsCancellationRequested;
+        public bool LeaseReleased { get; private set; }
+        public CancellationToken CancellationToken => cancellation.Token;
+        public void CloseLaunchAdmission() => cancellation.Cancel();
+        public ValueTask<IWorkloadLaunchLease> AcquireLaunchLeaseAsync(CancellationToken cancellationToken) => ValueTask.FromResult<IWorkloadLaunchLease>(this);
+        public ValueTask DisposeAsync()
+        {
+            LeaseReleased = true;
+            return ValueTask.CompletedTask;
+        }
+        public void Dispose() => cancellation.Dispose();
     }
 }

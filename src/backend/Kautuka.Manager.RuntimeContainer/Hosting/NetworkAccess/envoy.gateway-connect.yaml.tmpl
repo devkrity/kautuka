@@ -1,0 +1,123 @@
+    - name: gateway_connect
+      address:
+        socket_address:
+          address: {{GATEWAY_CONNECT_IP}}
+          port_value: {{GATEWAY_CONNECT_PORT}}
+      filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              require_client_certificate: true
+              common_tls_context:
+                tls_params:
+                  tls_minimum_protocol_version: TLSv1_2
+                alpn_protocols: ["http/1.1"]
+                tls_certificates:
+                  - certificate_chain:
+                      filename: /etc/kautuka-connect/server.crt
+                    private_key:
+                      filename: /etc/kautuka-connect/server.key
+                validation_context:
+                  trusted_ca:
+                    filename: /etc/kautuka-connect/gateway-ca.crt
+                  match_typed_subject_alt_names:
+                    - san_type: URI
+                      matcher:
+                        exact: spiffe://kautuka.internal/gateway
+          filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: gateway_connect
+                codec_type: HTTP1
+                stream_idle_timeout: {{GATEWAY_STREAM_IDLE_DEADLINE}}
+                use_remote_address: true
+                access_log:
+                  - name: envoy.access_loggers.stderr
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StderrAccessLog
+                      log_format:
+                        text_format_source:
+                          inline_string: "[gateway-connect] dst=%REQ(:AUTHORITY)% status=%RESPONSE_CODE% detail=%RESPONSE_CODE_DETAILS% upstream=%UPSTREAM_HOST%\n"
+                upgrade_configs:
+                  - upgrade_type: CONNECT
+                route_config:
+                  name: gateway_connect
+                  virtual_hosts:
+                    - name: gateway_connect
+                      domains: ["*"]
+                      typed_per_filter_config:
+                        envoy.filters.http.ext_authz:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                          check_settings:
+                            context_extensions:
+                              kautuka.authorization: gateway-connect
+                      routes:
+                        - match:
+                            connect_matcher: {}
+                            dynamic_metadata:
+                              - filter: envoy.filters.http.ext_authz
+                                path:
+                                  - key: egress_class
+                                value:
+                                  string_match:
+                                    exact: public
+                          route:
+                            cluster: dfp_public_egress
+                            timeout: 0s
+                            upgrade_configs:
+                              - upgrade_type: CONNECT
+                                connect_config: {}
+                        - match:
+                            connect_matcher: {}
+                            dynamic_metadata:
+                              - filter: envoy.filters.http.ext_authz
+                                path:
+                                  - key: egress_class
+                                value:
+                                  string_match:
+                                    exact: lan
+                          route:
+                            cluster: dfp_lan_egress
+                            timeout: 0s
+                            upgrade_configs:
+                              - upgrade_type: CONNECT
+                                connect_config: {}
+                        # This route supplies the initial match before authorization.
+                        - match:
+                            connect_matcher: {}
+                          direct_response:
+                            status: 403
+                        - match:
+                            prefix: "/"
+                          direct_response:
+                            status: 403
+                http_filters:
+                  - name: envoy.filters.http.ext_authz
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+                      transport_api_version: V3
+                      grpc_service:
+                        envoy_grpc:
+                          cluster_name: manager-authorization
+                          authority: kautuka-decision.internal
+                        timeout: 2s
+                      failure_mode_allow: false
+                      validate_mutations: true
+                      enable_dynamic_metadata_ingestion: true
+                      # Authorization removes x-kautuka-user and publishes the metadata
+                      # that selects the new route.
+                      clear_route_cache: true
+                      clear_route_cache_headers: ["x-kautuka-user"]
+                      allowed_headers:
+                        patterns:
+                          - exact: x-kautuka-user
+                          - exact: x-kautuka-agent
+                          - exact: x-kautuka-connector
+                          - exact: x-kautuka-purpose
+                          - exact: x-kautuka-correlation
+                          - exact: x-kautuka-public-only
+{{GATEWAY_CONNECT_DFP_FILTERS}}                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router

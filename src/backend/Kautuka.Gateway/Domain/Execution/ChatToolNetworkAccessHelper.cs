@@ -28,7 +28,7 @@ internal static class ChatToolNetworkAccessHelper
         string? destination = nacEx?.Destination;
         int? port = nacEx?.Port;
         string? requestId = nacEx?.RequestId;
-        string? approvalUrl = nacEx is not null ? "/network-access" : null;
+        string? approvalUrl = nacEx?.Kind == NetworkAccessDenialKind.Unavailable ? null : nacEx?.ApprovalUrl;
 
         var toolFinishedPayload = new JsonObject
         {

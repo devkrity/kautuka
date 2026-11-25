@@ -7,33 +7,21 @@ namespace Kautuka.Gateway.Domain.Providers;
 
 internal sealed class ProviderValidationService : IProviderValidationService
 {
-    private readonly IGatewayCatalogStore catalog;
     private readonly KautukaAiClientFactory aiClientFactory;
-    private readonly IProviderTypeCatalog providerTypeCatalog;
     private readonly ILogger<ProviderValidationService> logger;
 
-    public ProviderValidationService(
-        IGatewayCatalogStore catalog,
-        KautukaAiClientFactory aiClientFactory,
-        IProviderTypeCatalog providerTypeCatalog,
-        ILogger<ProviderValidationService> logger)
+    public ProviderValidationService(KautukaAiClientFactory aiClientFactory, ILogger<ProviderValidationService> logger)
     {
-        this.catalog = catalog;
         this.aiClientFactory = aiClientFactory;
-        this.providerTypeCatalog = providerTypeCatalog;
         this.logger = logger;
     }
 
-    public async Task<GatewayProviderTestResult> TestProviderAsync(JsonElement body, CancellationToken cancellationToken = default)
+    public async Task<GatewayProviderTestResult> TestProviderAsync(ProviderTestDefinition definition, CancellationToken cancellationToken = default)
     {
-        if (!TryResolveProviderRequest(body, out string providerId, out string providerType, out JsonObject settings, out string errorMessage))
-        {
-            return new GatewayProviderTestResult(false, errorMessage);
-        }
-
+        var (providerId, providerType, settings, useStoredCredential) = definition;
         try
         {
-            return await ValidateProviderConnectivityAsync(providerId, providerType, settings, cancellationToken).ConfigureAwait(false);
+            return await ValidateProviderConnectivityAsync(providerId, providerType, settings, useStoredCredential, cancellationToken).ConfigureAwait(false);
         }
         catch (HttpRequestException ex)
         {
@@ -57,14 +45,11 @@ internal sealed class ProviderValidationService : IProviderValidationService
         }
     }
 
-    private bool TryResolveProviderRequest(
-        JsonElement body,
-        out string providerId,
-        out string providerType,
-        out JsonObject settings,
-        out string errorMessage)
+    internal static bool TryPrepare(JsonElement body, IGatewayCatalogStore catalog, IProviderTypeCatalog providerTypeCatalog,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ProviderTestDefinition? definition, out string errorMessage)
     {
-        providerId = body.GetStringProperty("provider_id", string.Empty).Trim();
+        definition = null;
+        string providerId = body.GetStringProperty("provider_id", string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(providerId))
         {
             providerId = body.GetStringProperty("id", string.Empty).Trim();
@@ -76,8 +61,8 @@ internal sealed class ProviderValidationService : IProviderValidationService
             existingProvider = resolved;
         }
 
-        providerType = ProviderTypeCatalogSettings.NormalizeType(body.GetStringProperty("type", existingProvider?.Type ?? string.Empty));
-        settings = existingProvider is null
+        string providerType = ProviderTypeCatalogSettings.NormalizeType(body.GetStringProperty("type", existingProvider?.Type ?? string.Empty));
+        JsonObject settings = existingProvider is null
             ? new JsonObject()
             : JsonObject.Create(JsonSerializer.SerializeToElement(existingProvider.Settings, KautukaJsonContext.Default.JsonObject)) ?? new JsonObject();
 
@@ -89,9 +74,18 @@ internal sealed class ProviderValidationService : IProviderValidationService
             }
         }
 
-        if (existingProvider is not null)
+        bool useStoredCredential = existingProvider is not null
+            && ProviderTypeCatalogSettings.HasSameCredentialDestination(existingProvider, providerType, settings, providerTypeCatalog);
+        if (useStoredCredential)
         {
-            settings = GatewayState.PreserveSecretSetting(settings, existingProvider.Settings, "api_key");
+            settings = GatewayState.PreserveSecretSetting(settings, existingProvider!.Settings, "api_key");
+        }
+        else if (existingProvider is not null)
+        {
+            // The merged settings started from the saved provider. Retain only an explicitly supplied key.
+            settings.Remove("api_key");
+            if (settingsElement.ValueKind == JsonValueKind.Object && settingsElement.TryGetProperty("api_key", out JsonElement supplied))
+                settings["api_key"] = JsonNode.Parse(supplied.GetRawText());
         }
         else
         {
@@ -111,6 +105,8 @@ internal sealed class ProviderValidationService : IProviderValidationService
             return false;
         }
 
+        settings["base_url"] = ProviderTypeCatalogSettings.GetEffectiveBaseUrl(settings, providerType, providerTypeCatalog);
+        definition = new(providerId, providerType, settings, useStoredCredential);
         errorMessage = string.Empty;
         return true;
     }
@@ -119,12 +115,13 @@ internal sealed class ProviderValidationService : IProviderValidationService
         string providerId,
         string providerType,
         JsonObject settings,
+        bool useStoredCredential,
         CancellationToken ct)
     {
         try
         {
             IReadOnlyList<DiscoveredModelDefinition> discoveredModels = await aiClientFactory
-                .DiscoverModelsAsync(providerId, providerType, settings, throwOnFailure: true, ct)
+                .DiscoverModelsAsync(providerId, providerType, settings, throwOnFailure: true, useStoredCredential, ct)
                 .ConfigureAwait(false);
 
             return discoveredModels.Count > 0
@@ -161,6 +158,9 @@ internal sealed class ProviderValidationService : IProviderValidationService
 
 internal static partial class ProviderValidationServiceLog
 {
+    [LoggerMessage(EventId = 3, Level = LogLevel.Warning, Message = "Could not release the temporary provider test allowance for {Host}:{Port}. Manager expires the allowance automatically.")]
+    public static partial void TestGrantCleanupFailed(ILogger logger, Exception exception, string host, int port);
+
     [LoggerMessage(EventId = 1, Level = LogLevel.Error, Message = "Provider test failed for {ProviderId} ({ProviderType})")]
     public static partial void ProviderTestFailed(ILogger logger, Exception exception, string providerId, string providerType);
 

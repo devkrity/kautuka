@@ -3,6 +3,8 @@ using System.Text;
 
 using Kautuka.Gateway.Domain.Connectors;
 using Kautuka.Gateway.Domain.Sandbox;
+using Kautuka.Gateway.Domain.Skills;
+using Kautuka.Gateway.Infrastructure.Connectors;
 using Kautuka.Manager.Protos;
 
 using Microsoft.Data.Sqlite;
@@ -12,8 +14,10 @@ namespace Kautuka.Gateway.Infrastructure.Sandbox;
 internal sealed class WorkspaceRuntimeContextResolver(
     IPlatformConfigurationProvider configurationProvider,
     IConfiguration configuration,
-    KautukaDatabase database)
+    KautukaDatabase database,
+    ConnectorUserEnablement? connectorEnablement = null)
 {
+    private static readonly EffectiveSkillManifestResolver skillResolver = new();
     private const string managerProxyModeKey = "ManagerProxy:Mode";
     private const string managerProxyNpmRegistryUrlKey = "ManagerProxy:NpmRegistryUrl";
     private const string managerProxyUvIndexUrlKey = "ManagerProxy:UvIndexUrl";
@@ -44,13 +48,49 @@ internal sealed class WorkspaceRuntimeContextResolver(
         return ResolveAgentWorkspace(platformConfiguration, agentId, userId);
     }
 
+    public WorkspaceRuntimeContext ResolveSkillWorkspace(string agentId, string? userId, string skillId, string executionContext)
+    {
+        PlatformConfiguration config = configurationProvider.GetCurrent();
+        AgentDefinition? agent = config.Agents.FirstOrDefault(item => item.Id == agentId);
+        if (agent is null || !agent.Enabled || !agent.Sandbox.Enabled
+            || !GatewayOwnershipAccess.CallerCanUse(userId, agent.Scope, agent.OwnerUserId)
+            || !skillResolver.Resolve(config, agent, userId)
+                .Any(skill => string.Equals(skill.SkillId, skillId, StringComparison.OrdinalIgnoreCase) && skill.Context == executionContext))
+        {
+            throw new InvalidOperationException("The skill or its execution context is no longer available. Start a new run.");
+        }
+
+        WorkspaceRuntimeContext workspace = ResolveAgentWorkspace(config, agentId, userId);
+        return ResolveSkillWorkspace(workspace, skillId, executionContext, ResolveBaseRoot(config.Kautuka.Workspace));
+    }
+
+    private static WorkspaceRuntimeContext ResolveSkillWorkspace(
+        WorkspaceRuntimeContext agent, string skillId, string executionContext, string root)
+    {
+        if (executionContext == SkillExecutionContext.AgentSandbox) return agent;
+        if (string.IsNullOrWhiteSpace(agent.UserId))
+            throw new InvalidOperationException("An isolated skill requires a user identity.");
+
+        string scope = executionContext switch
+        {
+            SkillExecutionContext.Isolated => "skill",
+            SkillExecutionContext.WithAgentFiles => "skill-with-agent-files",
+            _ => throw new InvalidOperationException("Invalid skill execution context."),
+        };
+        string identity = string.Join('\n', agent.ScopeId, agent.UserId, skillId);
+        string scopeId = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(identity)));
+        string hostPath = executionContext == SkillExecutionContext.WithAgentFiles
+            ? agent.HostWorkspacePath
+            : Path.Combine(root, "skills", scopeId);
+        return agent with { ScopeType = scope, ScopeId = scopeId, HostWorkspacePath = hostPath, RuntimeHostWorkspacePath = hostPath };
+    }
+
     public WorkspaceDesiredStatePayload ResolveDesiredState()
     {
         PlatformConfiguration platformConfiguration = configurationProvider.GetCurrent();
         ManagerRuntimeSettingsPayload runtimeSettings = ResolveRuntimeSettings(platformConfiguration);
         string[] activeUserIds = LoadActiveUserIds(database);
-        WorkspaceRuntimeContext[] workspaces = [.. platformConfiguration.Agents
-            .SelectMany(agent => ResolveDesiredAgentWorkspaces(platformConfiguration, agent.Id, activeUserIds))];
+        WorkspaceRuntimeContext[] workspaces = [.. ResolveDesiredWorkspaces(platformConfiguration, runtimeSettings.WorkspaceBaseRoot, activeUserIds)];
         Dictionary<string, WorkspaceRuntimeContext> workspaceByAgentId = platformConfiguration.Agents
             .ToDictionary(
                 static agent => agent.Id,
@@ -58,15 +98,17 @@ internal sealed class WorkspaceRuntimeContextResolver(
                 StringComparer.Ordinal);
 
         WorkspaceMcpContainerConnectorPayload[] containerConnectors = [.. platformConfiguration.McpServers
-            .Where(server => server.Transport == McpTransport.Container && (server.Enabled || server.IsInternalSystemConnector))
-            .SelectMany(server => ResolveConnectorScopeUserIds(server, activeUserIds).Select(userId =>
+            .Where(server => server.Transport == McpTransport.Container)
+            .SelectMany(server => ResolveConnectorScopeUserIds(server, activeUserIds)
+                .Where(userId => server.IsInternalSystemConnector || IsConnectorEnabled(server, userId))
+                .Select(userId =>
                 new WorkspaceMcpContainerConnectorPayload(
                     WorkspaceMcpConnectorIdentity.BuildScopedConnectorId(userId, server.Id),
                     server.Id,
                     ReleasedSandboxImage.Select(ReleasedSandboxImage.Current, server.ContainerImage, server.ServerType),
                     server.ContainerCommand ?? string.Empty,
                     server.ContainerArgs,
-                    server.Enabled,
+                    IsConnectorEnabled(server, userId),
                     server.IsInternalSystemConnector,
                     server.BundlePath,
                     server.ServerType,
@@ -81,7 +123,28 @@ internal sealed class WorkspaceRuntimeContextResolver(
         return new WorkspaceDesiredStatePayload(runtimeSettings, workspaces, containerConnectors, sandboxConnectorBindings);
     }
 
-    private static WorkspaceSandboxConnectorBindingsPayload ResolveSandboxConnectorBindings(
+    private IEnumerable<WorkspaceRuntimeContext> ResolveDesiredWorkspaces(
+        PlatformConfiguration config, string root, IReadOnlyList<string> activeUserIds)
+    {
+        foreach (AgentDefinition agent in config.Agents)
+        {
+            foreach (WorkspaceRuntimeContext workspace in ResolveDesiredAgentWorkspaces(config, agent.Id, activeUserIds))
+            {
+                yield return workspace;
+                if (!agent.Enabled || !agent.Sandbox.Enabled || string.IsNullOrWhiteSpace(workspace.UserId)) continue;
+                foreach (EffectiveSkillManifestEntry skill in skillResolver.Resolve(config, agent, workspace.UserId))
+                {
+                    if (skill.Context != SkillExecutionContext.AgentSandbox)
+                        yield return ResolveSkillWorkspace(workspace, skill.SkillId, skill.Context, root);
+                }
+            }
+        }
+    }
+
+    private bool IsConnectorEnabled(McpServerDefinition server, string? userId)
+        => connectorEnablement?.IsEnabled(userId, server.Id, server.Enabled) ?? server.Enabled;
+
+    private WorkspaceSandboxConnectorBindingsPayload ResolveSandboxConnectorBindings(
         PlatformConfiguration configuration,
         AgentDefinition agent,
         WorkspaceRuntimeContext workspace,
@@ -109,6 +172,7 @@ internal sealed class WorkspaceRuntimeContextResolver(
                 }
 
                 return ResolveConnectorScopeUserIds(server, activeUserIds)
+                    .Where(userId => IsConnectorEnabled(server, userId))
                     .Select(userId => WorkspaceMcpConnectorIdentity.BuildScopedConnectorId(userId, server.Id));
             })
             .Distinct(StringComparer.Ordinal)

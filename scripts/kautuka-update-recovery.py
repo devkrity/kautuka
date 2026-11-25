@@ -24,11 +24,15 @@ from typing import NoReturn
 from pathlib import Path
 
 FORMAT = 2
-DATABASES = (
+HOST_SERVICE_LAYOUT = "host-service"
+APPLIANCE_LAYOUT = "appliance"
+GATEWAY_DATABASES = (
     "kautuka.db",
     "kautuka-usage.db",
     "channel-outbox.db",
     "channel-conversations.db",
+)
+PEER_DATABASES = (
     "credentialsHost/vault/kautuka.credentials.db",
     "channelHost/channelhost.db",
 )
@@ -239,10 +243,17 @@ def capture_directory_metadata(root: Path, entries: list[dict]) -> list[dict]:
     return result
 
 
-def fixed_inventory() -> list[tuple[str, str]]:
-    paths: list[tuple[str, str]] = [(name, "database") for name in DATABASES]
-    paths.extend((name, "key") for name in ROOT_KEYS)
+def gateway_path(layout: str, path: str) -> str:
+    return f"gateway/{path}" if layout == APPLIANCE_LAYOUT else path
+
+
+def fixed_inventory(layout: str = HOST_SERVICE_LAYOUT) -> list[tuple[str, str]]:
+    paths = [(gateway_path(layout, name), "database") for name in GATEWAY_DATABASES]
+    paths.extend((name, "database") for name in PEER_DATABASES)
+    paths.extend((gateway_path(layout, name), "key") for name in ROOT_KEYS)
     for directory, names in SERVICE_KEYS.items():
+        if directory == "gateway":
+            directory = gateway_path(layout, directory)
         for name in names:
             paths.append(((Path(directory) / name).as_posix(), "key"))
             if name.endswith((".pfx", ".cer")):
@@ -261,8 +272,8 @@ def fixed_inventory() -> list[tuple[str, str]]:
     return list(dict.fromkeys(paths))
 
 
-def inventory(data_root: Path) -> list[tuple[str, str]]:
-    paths = fixed_inventory()
+def inventory(data_root: Path, layout: str = HOST_SERVICE_LAYOUT) -> list[tuple[str, str]]:
+    paths = fixed_inventory(layout)
     for directory in CHANNEL_SECURITY_FILES:
         root = data_root / directory
         if not root.exists() and not root.is_symlink():
@@ -275,12 +286,20 @@ def inventory(data_root: Path) -> list[tuple[str, str]]:
                 fail(f"unsupported channel security material entry: {entry}")
             if entry.name not in expected_names:
                 fail(f"unsupported channel security material file: {entry}")
-    agent_root = data_root / "agents"
+    agent_root = data_root / gateway_path(layout, "agents")
     if agent_root.exists() or agent_root.is_symlink():
         if agent_root.is_symlink() or not agent_root.is_dir():
             fail(f"unsupported agents state root: {agent_root}")
         for directory in sorted(agent_root.iterdir()):
-            if directory.is_symlink() or not directory.is_dir() or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", directory.name):
+            if directory.is_symlink() or not directory.is_dir():
+                fail(f"unsupported agent state directory: {directory}")
+            # Gateway keeps this directory after a completed helper deletion.
+            # A populated staging directory may still contain a helper's only copy.
+            if directory.name == ".deleting":
+                if next(directory.iterdir(), None) is not None:
+                    fail(f"unfinished agent deletion in application state: {directory}")
+                continue
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", directory.name):
                 fail(f"unsupported agent state directory: {directory}")
             db = directory / "agent.db"
             if db.exists() or db.is_symlink():
@@ -317,6 +336,7 @@ def inventory(data_root: Path) -> list[tuple[str, str]]:
 
 def capture(args: argparse.Namespace) -> None:
     root = Path(args.data_root).resolve(strict=True)
+    layout = getattr(args, "layout", HOST_SERVICE_LAYOUT)
     candidate = Path(args.destination)
     if candidate.exists():
         fail(f"candidate destination already exists: {candidate}")
@@ -325,7 +345,7 @@ def capture(args: argparse.Namespace) -> None:
         payload = candidate / "state"
         payload.mkdir(mode=0o700)
         entries = []
-        for rel, kind in inventory(root):
+        for rel, kind in inventory(root, layout):
             src = root / rel
             if not src.exists():
                 entries.append({"path": rel, "kind": kind, "present": False})
@@ -359,6 +379,7 @@ def capture(args: argparse.Namespace) -> None:
         validate_channel_rotation(payload)
         manifest = {
             "format": FORMAT,
+            "layout": layout,
             "capturedAtUtc": datetime.now(timezone.utc).isoformat(),
             "operationId": args.operation,
             "sourceRelease": args.source,
@@ -393,14 +414,58 @@ def read_manifest(snapshot: Path, operation: str | None = None,
     if path.is_symlink() or not path.is_file():
         fail(f"snapshot manifest missing or invalid: {path}")
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    if manifest.get("format") != FORMAT:
+    if not isinstance(manifest, dict) or manifest.get("format") != FORMAT:
         fail("unsupported snapshot format")
+    if manifest.get("layout", HOST_SERVICE_LAYOUT) not in (HOST_SERVICE_LAYOUT, APPLIANCE_LAYOUT):
+        fail("unsupported snapshot layout")
     for field, expected in (("operationId", operation), ("sourceRelease", source), ("targetRelease", target)):
         if expected is not None and manifest.get(field) != expected:
             fail(f"snapshot {field} does not match the active operation")
     if not isinstance(manifest.get("entries"), list):
         fail("snapshot inventory is invalid")
     return manifest
+
+
+def prune_appliance_snapshots(args: argparse.Namespace) -> None:
+    root = Path(args.backups)
+    owner = os.geteuid()
+    operation = args.operation
+    if not re.fullmatch(r"[0-9a-f]{32}", operation):
+        fail("invalid retained appliance operation")
+    root_stat = root.lstat()
+    if not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_uid != owner or root_stat.st_mode & 0o022:
+        fail("untrusted appliance backup directory")
+    retained = root / operation
+    pointer = root / "last-known-good"
+    if not pointer.is_symlink() or pointer.resolve(strict=True) != retained.resolve(strict=True):
+        fail("retained appliance backup does not match the current operation")
+    verify(args, snapshot=retained)
+
+    for directory in list(root.iterdir()):
+        if re.fullmatch(r"\.pruning-[0-9a-f]{32}", directory.name):
+            record = directory.lstat()
+            if (directory.name == f".pruning-{operation}" or not stat.S_ISDIR(record.st_mode)
+                    or record.st_uid != owner or record.st_mode & 0o022):
+                fail(f"untrusted appliance snapshot deletion marker: {directory}")
+            shutil.rmtree(directory)
+            continue
+        if directory == retained or not re.fullmatch(r"[0-9a-f]{32}", directory.name):
+            continue
+        record = directory.lstat()
+        if not stat.S_ISDIR(record.st_mode) or record.st_uid != owner or record.st_mode & 0o022:
+            continue
+        try:
+            manifest = read_manifest(directory, directory.name)
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if manifest.get("layout") == APPLIANCE_LAYOUT:
+            deleting = directory.with_name(f".pruning-{directory.name}")
+            if deleting.exists() or deleting.is_symlink():
+                fail(f"appliance snapshot deletion marker already exists: {deleting}")
+            directory.rename(deleting)
+            fsync_dir(root)
+            shutil.rmtree(deleting)
+    fsync_dir(root)
 
 
 def verify(args: argparse.Namespace, snapshot: Path | None = None) -> None:
@@ -413,6 +478,10 @@ def verify(args: argparse.Namespace, snapshot: Path | None = None) -> None:
             fail("snapshot manifest does not match its durable journal binding")
     manifest = read_manifest(path, getattr(args, "operation", None),
                              getattr(args, "source", None), getattr(args, "target", None))
+    layout = manifest.get("layout", HOST_SERVICE_LAYOUT)
+    expected_layout = getattr(args, "layout", HOST_SERVICE_LAYOUT)
+    if layout != expected_layout:
+        fail("snapshot layout does not match the active operation")
     expected_root = Path(args.data_root).resolve(strict=True)
     if Path(manifest.get("dataRoot", "")).resolve() != expected_root:
         fail("snapshot data root does not match the supported configured data root")
@@ -423,8 +492,9 @@ def verify(args: argparse.Namespace, snapshot: Path | None = None) -> None:
     if not isinstance(directories, list):
         fail("snapshot directory metadata inventory is missing")
     directory_entries: dict[str, dict] = {}
-    allowed_directories = {"agents"}
-    for file_rel, _kind in fixed_inventory():
+    agents = gateway_path(layout, "agents")
+    allowed_directories = {agents}
+    for file_rel, _kind in fixed_inventory(layout):
         parts = Path(file_rel).parts
         allowed_directories.update(Path(*parts[:depth]).as_posix() for depth in range(1, len(parts)))
     for item in directories:
@@ -435,7 +505,7 @@ def verify(args: argparse.Namespace, snapshot: Path | None = None) -> None:
                 or rel.startswith("/") or ".." in Path(rel).parts):
             fail("snapshot contains an invalid or duplicate directory metadata path")
         if rel != "." and rel not in allowed_directories \
-                and not re.fullmatch(r"agents/[A-Za-z0-9][A-Za-z0-9._-]{0,127}", rel):
+                and not re.fullmatch(rf"{re.escape(agents)}/[A-Za-z0-9][A-Za-z0-9._-]{{0,127}}", rel):
             fail(f"snapshot directory metadata is outside the supported inventory: {rel}")
         for field in ("mode", "uid", "gid"):
             if type(item.get(field)) is not int or item[field] < 0:
@@ -444,8 +514,8 @@ def verify(args: argparse.Namespace, snapshot: Path | None = None) -> None:
     if "." not in directory_entries:
         fail("snapshot directory metadata omits the application data root")
     seen: dict[str, dict] = {}
-    fixed = dict(fixed_inventory())
-    dynamic_agent = re.compile(r"agents/([A-Za-z0-9][A-Za-z0-9._-]{0,127})/agent\.db\Z")
+    fixed = dict(fixed_inventory(layout))
+    dynamic_agent = re.compile(rf"{re.escape(agents)}/([A-Za-z0-9][A-Za-z0-9._-]{{0,127}})/agent\.db\Z")
     dynamic_key = re.compile(r"credentialsHost/vault/vault-keys/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\.key\Z")
     for item in manifest["entries"]:
         if not isinstance(item, dict):
@@ -499,6 +569,7 @@ def restore(args: argparse.Namespace) -> None:
     root = Path(args.data_root).resolve(strict=True)
     snapshot = Path(args.snapshot)
     manifest = read_manifest(snapshot, args.operation, args.source, args.target)
+    layout = manifest.get("layout", HOST_SERVICE_LAYOUT)
     if Path(manifest["dataRoot"]) != root:
         fail("snapshot data root does not match the configured application data root")
     verify(args, snapshot)
@@ -507,7 +578,7 @@ def restore(args: argparse.Namespace) -> None:
     if os.name == "nt":
         # Windows is used for pure unit tests; the Linux root helper is the
         # production caller and uses the dirfd-pinned implementation.
-        current = inventory(root)
+        current = inventory(root, layout)
         for rel, kind in current:
             if rel not in saved or not saved[rel].get("present"):
                 path = root / rel
@@ -549,8 +620,8 @@ def restore(args: argparse.Namespace) -> None:
     lock = DestinationTreeLock(root, lock_journal, args.operation)
     restore_succeeded = False
     try:
-        supported_directories = {"agents", "credentialsHost/vault/vault-keys"}
-        for rel, _kind in fixed_inventory():
+        supported_directories = {gateway_path(layout, "agents"), "credentialsHost/vault/vault-keys"}
+        for rel, _kind in fixed_inventory(layout):
             parent = Path(rel).parent
             while parent != Path("."):
                 supported_directories.add(parent.as_posix())
@@ -565,7 +636,7 @@ def restore(args: argparse.Namespace) -> None:
         lock.acquire([item["path"] for item in manifest["directories"]], directory_paths=True)
         for directory in manifest["directories"]:
             lock.set_final_metadata(directory["path"], directory["uid"], directory["gid"], directory["mode"])
-        current = inventory(root)
+        current = inventory(root, layout)
         current_to_lock = []
         for rel, _kind in current:
             path = root / rel
@@ -877,6 +948,8 @@ def parser() -> argparse.ArgumentParser:
     for name in ("capture", "verify", "restore"):
         cmd = subs.add_parser(name)
         cmd.add_argument("--data-root", required=True)
+        cmd.add_argument("--layout", choices=(HOST_SERVICE_LAYOUT, APPLIANCE_LAYOUT),
+                         default=HOST_SERVICE_LAYOUT)
         if name == "capture":
             cmd.add_argument("--destination", required=True)
             cmd.add_argument("--operation", required=True)
@@ -890,13 +963,22 @@ def parser() -> argparse.ArgumentParser:
             cmd.add_argument("--manifest-sha256")
             if name == "restore":
                 cmd.add_argument("--lock-journal")
+    prune = subs.add_parser("prune-appliance")
+    prune.add_argument("--backups", required=True)
+    prune.add_argument("--operation", required=True)
+    prune.add_argument("--manifest-sha256", required=True)
+    prune.add_argument("--data-root", required=True)
+    prune.add_argument("--source", required=True)
+    prune.add_argument("--target", required=True)
+    prune.set_defaults(layout=APPLIANCE_LAYOUT)
     return p
 
 
 def main() -> int:
     args = parser().parse_args()
     try:
-        {"capture": capture, "verify": verify, "restore": restore}[args.command](args)
+        {"capture": capture, "verify": verify, "restore": restore,
+         "prune-appliance": prune_appliance_snapshots}[args.command](args)
         print(f"{args.command} verified")
         return 0
     except (OSError, sqlite3.Error, ValueError, RuntimeError, json.JSONDecodeError) as ex:

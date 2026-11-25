@@ -878,6 +878,7 @@
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
+        let completed = false;
 
         while (true) {
           const { value, done } = await reader.read();
@@ -889,27 +890,42 @@
             const line = chunk.split("\n").find((e) => e.startsWith("data: "));
             if (!line) continue;
             const payload = JSON.parse(line.slice(6));
-            if (payload === "__DONE__") continue;
+            if (payload === "__DONE__") {
+              completed = true;
+              continue;
+            }
+            if (payload === "__RESTART__") {
+              setRunning(false, "Restart required", "Restart Windows to resume the appliance installation.");
+              setBanner("Restart Windows to resume the appliance installation.");
+              await refreshStatus();
+              return;
+            }
             appendLog(payload);
             if (String(payload).startsWith("ERROR: "))
               throw new Error(String(payload).slice(7));
           }
         }
 
+        if (!completed)
+          throw new Error("The installer stopped before reporting success. Reopen the installer to resume.");
+
+        await finishInstall(await readSetupStatus());
+      }
+
+      async function readSetupStatus() {
         const setupTokenResponse = await fetch("/api/appliance/setup-token", {
           method: "POST",
-          headers: actionHeaders({ "Content-Type": "application/json" }),
-          body: JSON.stringify({ distroName: request.distroName || "kautuka" }),
+          headers: actionHeaders(),
           cache: "no-store",
         });
         const setupTokenState = await setupTokenResponse.json().catch(() => ({}));
-        if (!setupTokenResponse.ok) {
-          const recoveryDistro = request.distroName || "kautuka";
-          throw new Error(
-            `Kautuka installed, but the installer could not read the first-run token. In PowerShell run: wsl.exe -d ${recoveryDistro} -u root -- cat /var/lib/kautuka/setup-token`,
-          );
+        if (!setupTokenResponse.ok || typeof setupTokenState.needsSetup !== "boolean") {
+          throw new Error("Could not read administrator setup status. Reopen the installer and select Open Kautuka to retry.");
         }
+        return setupTokenState;
+      }
 
+      async function finishInstall(setupTokenState) {
         if (setupTokenState.needsSetup === true) {
           if (typeof setupTokenState.token !== "string" || !/^[A-F0-9]{64}$/.test(setupTokenState.token)) {
             throw new Error("Kautuka installed, but its first-run setup token was missing or invalid.");
@@ -1032,8 +1048,14 @@
               const error = await response.json().catch(() => ({}));
               throw new Error(error.detail || "Could not start Kautuka.");
             }
-            window.open("http://localhost:20229", "_blank", "noopener");
+            const setup = await readSetupStatus();
+            if (setup.needsSetup) {
+              await finishInstall(setup);
+            } else {
+              window.open("http://localhost:20229", "_blank", "noopener");
+            }
           } catch (err) {
+            setRunning(false, "Setup incomplete", "Idle.");
             setBanner(err.message || String(err), "error");
           } finally {
             button.disabled = false;

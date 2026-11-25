@@ -40,4 +40,7 @@ public interface IManagerRuntimeAdapter
     Task EnsureNetworkAsync(string networkName, CancellationToken cancellationToken);
 }
 
-public sealed record ManagedContainerReconcileResult(bool Succeeded, int RemovedCount, string? FailureClass);
+public sealed record ManagedContainerReconcileResult(bool Succeeded, int RemovedCount, string? FailureClass)
+{
+    public IReadOnlySet<string>? RetainedConnectorNames { get; init; }
+}

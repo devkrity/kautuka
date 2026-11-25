@@ -226,7 +226,41 @@ describe('AgentForm skills controls', () => {
 
     expect(onPatch).toHaveBeenCalled();
     expect(current.skillAttachments).toEqual([
-      { skillId: 'repo-inspector', mode: 'require_approval' },
+      { skillId: 'repo-inspector', mode: 'require_approval', context: 'OwnContext' },
+    ]);
+  });
+
+  it('offers all three execution contexts for an attached skill', async () => {
+    let current: AgentSettingsEntry = {
+      ...createAgent(),
+      skillAttachments: [{ skillId: 'repo-inspector', mode: 'require_approval', context: 'AgentContext' }],
+    };
+    renderWithQueryClient(
+      <AgentForm
+        agent={current}
+        agents={[]}
+        models={models}
+        personaDefinitions={personaDefinitions}
+        mcpServers={[]}
+        skills={skills}
+        isToolPanelOpen={() => false}
+        getConnectorMode={() => 'off'}
+        getToolMode={() => 'on'}
+        getAgentToolMode={() => 'off'}
+        onPatch={(updater) => { current = updater(current); }}
+        onModeChange={() => undefined}
+        onTogglePanel={() => undefined}
+        onToolModeChange={() => undefined}
+        onAgentToolModeChange={() => undefined}
+      />
+    );
+
+    await userEvent.click(screen.getByRole('tab', { name: 'Skills' }));
+    expect(screen.getByRole('button', { name: /^Isolated$/ })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Within Agent Sandbox' })).toBeEnabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Isolated with access to Agent Files' }));
+    expect(current.skillAttachments).toEqual([
+      { skillId: 'repo-inspector', mode: 'require_approval', context: 'OwnContextWithAgentFiles' },
     ]);
   });
 

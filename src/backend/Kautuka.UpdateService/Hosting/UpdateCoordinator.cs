@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 
+using Kautuka.Hosting;
 using Kautuka.Telemetry.Security;
 using Kautuka.UpdateService.Abstractions;
 using Kautuka.UpdateService.Models;
@@ -21,6 +22,7 @@ internal sealed class UpdateCoordinator(
     IOptions<UpdateOptions> options,
     ILogger<UpdateCoordinator> logger) : IUpdateCoordinator
 {
+    private const string snapshotPruneFailure = "Kautuka is running the new release. The update could not confirm that superseded backup snapshots were removed.";
     private readonly IUpdateStateStore stateStore = stateStore;
     private readonly IUpdateRuntimePolicyStore runtimePolicyStore = runtimePolicyStore;
     private readonly IReleaseDiscoveryClient discoveryClient = discoveryClient;
@@ -101,6 +103,9 @@ internal sealed class UpdateCoordinator(
 
     public async ValueTask<UpdateStatusSnapshot> ApplyPreparedReleaseAsync(CancellationToken cancellationToken = default)
     {
+        bool appliance = options.ApplianceReleaseId is not null;
+        if (appliance && !options.Enabled)
+            throw new InvalidOperationException("Appliance updates are disabled.");
         await discoveryGate.WaitAsync(cancellationToken).ConfigureAwait(false);
 
         try
@@ -122,6 +127,9 @@ internal sealed class UpdateCoordinator(
                 await stateStore.SaveAsync(unavailable, cancellationToken).ConfigureAwait(false);
                 return CreateSnapshot(unavailable, hostContext);
             }
+
+            if (appliance && hostContext.ApplianceBootConfirmed != true)
+                return CreateSnapshot(state with { LastError = "Wait for Manager to report a healthy appliance release before updating." }, hostContext);
 
             if (hostContext.ActiveExecCount > 0)
             {
@@ -174,6 +182,23 @@ internal sealed class UpdateCoordinator(
                 return CreateSnapshot(failedState, hostContext);
             }
 
+            if (appliance)
+            {
+                UpdateServiceContext observed = await hostIntegration.GetHostContextAsync(cancellationToken).ConfigureAwait(false);
+                if (!CanRetryFailedActivation(hostContext, observed) || observed.ActiveExecCount != 0)
+                {
+                    UpdateStateRecord waiting = state with
+                    {
+                        LastError = "Wait for the appliance to be healthy and active executions to finish, then retry the update.",
+                    };
+                    await stateStore.SaveAsync(waiting, cancellationToken).ConfigureAwait(false);
+                    return CreateSnapshot(waiting, observed);
+                }
+            }
+
+            if (appliance)
+                preparedArtifacts = preparedArtifacts with { ActivationRequestId = Guid.NewGuid().ToString("N") };
+
             UpdateStateRecord nextState = state with
             {
                 AvailableRelease = state.AvailableRelease is not null
@@ -196,6 +221,9 @@ internal sealed class UpdateCoordinator(
             {
                 await hostIntegration.ActivatePreparedUpdateAsync(preparedArtifacts, CancellationToken.None).ConfigureAwait(false);
                 helperCompleted = true;
+                if (appliance)
+                    return CreateSnapshot(nextState, hostContext);
+
                 UpdateServiceContext freshHost = await hostIntegration.GetHostContextAsync(CancellationToken.None).ConfigureAwait(false);
                 if (TryFinalizeAppliedRelease(nextState, freshHost, out UpdateStateRecord? finalizedState))
                 {
@@ -276,13 +304,13 @@ internal sealed class UpdateCoordinator(
             RecoveryRequired: false,
             HostStatusObserved: true,
             IsReady: true,
-            RuntimeUnitsActive: true,
-            CurrentPointersConsistent: true,
-            UpdateServiceRunningCurrent: true,
+            RuntimeConverged: true,
         } && string.Equals(observed.ManagerReleaseId, original.ManagerReleaseId, StringComparison.OrdinalIgnoreCase);
 
     public async ValueTask<UpdateStatusSnapshot> RevertToLastKnownGoodAsync(CancellationToken cancellationToken = default)
     {
+        if (options.ApplianceReleaseId is not null)
+            throw new InvalidOperationException("Appliance release recovery is handled by the host recovery helper.");
         await discoveryGate.WaitAsync(cancellationToken).ConfigureAwait(false);
 
         try
@@ -398,7 +426,7 @@ internal sealed class UpdateCoordinator(
         {
             UpdateStateRecord notConfiguredState = state with
             {
-                LastError = "Update service is not fully configured.",
+                LastError = state.LastError == snapshotPruneFailure ? state.LastError : "Update service is not fully configured.",
                 AvailableRelease = null,
                 EligibilityState = UpdateEligibilityState.None,
                 EligibilityReason = UpdateEligibilityReason.None,
@@ -431,7 +459,7 @@ internal sealed class UpdateCoordinator(
             logger.LogWarning(ex, "Manager update discovery request failed.");
             UpdateStateRecord failedState = state with
             {
-                LastError = ex.Message,
+                LastError = state.LastError == snapshotPruneFailure ? state.LastError : ex.Message,
                 AvailableRelease = null,
                 EligibilityState = UpdateEligibilityState.None,
                 EligibilityReason = UpdateEligibilityReason.None,
@@ -456,15 +484,15 @@ internal sealed class UpdateCoordinator(
         // the error, which keeps it visible without presenting an apply that is certain to
         // fail. Only reached when the release is otherwise eligible, so an already-current
         // appliance still reports AlreadyCurrent rather than a URL complaint.
-        string? untrustedSourceUrl = null;
+        string? sourceRejection = null;
         if (eligibilityState is UpdateEligibilityState.Available
             && availableRelease is not null
-            && ReleaseTrustPolicy.TryFindUnapprovedSourceUrl(availableRelease, options, out untrustedSourceUrl))
+            && ReleaseTrustPolicy.TryFindUnapprovedSourceUrl(availableRelease, options, out sourceRejection))
         {
             logger.LogWarning(
                 "Discovered release {ReleaseId} cannot be applied: {Rejection}",
                 availableRelease.ReleaseId,
-                untrustedSourceUrl);
+                sourceRejection);
 
             availableRelease = null;
             eligibilityState = UpdateEligibilityState.Blocked;
@@ -488,7 +516,8 @@ internal sealed class UpdateCoordinator(
             AvailableRelease = result.NotModified && !policyChanged ? availableRelease : availableRelease,
             StagedRelease = stagedRelease,
             PreparedArtifacts = preparedArtifacts,
-            LastError = result.FailureReason ?? untrustedSourceUrl
+            LastError = (availableRelease is null && state.LastError == snapshotPruneFailure ? state.LastError : null)
+                ?? result.FailureReason ?? sourceRejection
                 ?? (state.State == UpdateWorkflowState.Applying || IsActivationFailure(state.LastError) ? state.LastError : null),
             EligibilityState = eligibilityState,
             EligibilityReason = eligibilityReason,
@@ -502,7 +531,10 @@ internal sealed class UpdateCoordinator(
     private static bool IsActivationFailure(string? error)
         => error?.StartsWith("The update apply for release ", StringComparison.Ordinal) == true
             || error?.StartsWith("The update failed. Kautuka restored the previous version", StringComparison.Ordinal) == true
-            || error?.StartsWith("Update activation did not complete;", StringComparison.Ordinal) == true;
+            || error?.StartsWith("The update stopped before switching versions.", StringComparison.Ordinal) == true
+            || error?.StartsWith("Update activation did not complete;", StringComparison.Ordinal) == true
+            || error?.StartsWith("Update preflight checks failed:", StringComparison.Ordinal) == true
+            || error == snapshotPruneFailure;
 
     private static bool IsDiscoveryConfigured(UpdateOptions options)
     {
@@ -522,9 +554,12 @@ internal sealed class UpdateCoordinator(
             UpdateStateRecord recovery = persistedState with
             {
                 State = UpdateWorkflowState.Applying,
-                LastError = "An interrupted update needs administrator recovery. The appliance will not switch releases until the recovery marker is resolved.",
+                LastError = hostContext.ApplianceBootConfirmed.HasValue
+                    ? null
+                    : "An interrupted update needs administrator recovery. The appliance will not switch releases until the recovery marker is resolved.",
             };
-            await stateStore.SaveAsync(recovery, cancellationToken).ConfigureAwait(false);
+            if (!hostContext.ApplianceBootConfirmed.HasValue)
+                await stateStore.SaveAsync(recovery, cancellationToken).ConfigureAwait(false);
             return (recovery, hostContext);
         }
 
@@ -556,14 +591,15 @@ internal sealed class UpdateCoordinator(
 
         if (TryFinalizeAppliedRelease(state, hostContext, out UpdateStateRecord? finalizedState))
         {
+            RemoveCommittedApplianceDownload(state, hostContext);
             await stateStore.SaveAsync(finalizedState, cancellationToken).ConfigureAwait(false);
             await operationStore.AppendAsync(new UpdateOperationRecord(
                 OperationType: state.PendingOperation ?? "apply",
                 CompletedAtUtc: DateTimeOffset.UtcNow,
                 FromVersion: persistedState.CurrentRelease?.Version ?? persistedState.LastKnownGoodRelease?.Version,
                 ToVersion: state.StagedRelease!.Version,
-                Succeeded: true,
-                ErrorMessage: null), CancellationToken.None).ConfigureAwait(false);
+                Succeeded: finalizedState.LastError is null,
+                ErrorMessage: finalizedState.LastError), CancellationToken.None).ConfigureAwait(false);
             return (finalizedState, hostContext);
         }
 
@@ -607,8 +643,7 @@ internal sealed class UpdateCoordinator(
         if (state.State == UpdateWorkflowState.Applying && state.StagedRelease is not null
             && state.StateChangedAtUtc is not null
             && DateTimeOffset.UtcNow - state.StateChangedAtUtc > GetApplyingRecoveryThreshold()
-            && (!hostContext.HostStatusObserved || !hostContext.IsReady || !hostContext.RuntimeUnitsActive
-                || !hostContext.CurrentPointersConsistent || !hostContext.UpdateServiceRunningCurrent
+            && (!hostContext.HostStatusObserved || !hostContext.IsReady || !hostContext.RuntimeConverged
                 || (state.CurrentRelease is not null
                     && !string.Equals(state.CurrentRelease.Version, hostContext.ManagerVersion, StringComparison.OrdinalIgnoreCase)
                     && !string.Equals(state.StagedRelease.Version, hostContext.ManagerVersion, StringComparison.OrdinalIgnoreCase)))
@@ -792,27 +827,81 @@ internal sealed class UpdateCoordinator(
             || !string.Equals(state.StagedRelease.Version, hostContext.ManagerVersion, StringComparison.OrdinalIgnoreCase)
             || !hostContext.HostStatusObserved || !hostContext.IsReady
             || hostContext.RecoveryRequired
-            || !hostContext.CurrentPointersConsistent
-            || !hostContext.RuntimeUnitsActive
-            || !hostContext.UpdateServiceRunningCurrent)
+            || !hostContext.RuntimeConverged)
         {
             finalizedState = state;
             return false;
         }
 
+        string? pruneStatus = hostContext is { ApplianceBootConfirmed: true, RecoveryPhase: "committed" }
+            && string.Equals(hostContext.RecoveryTargetRelease, state.StagedRelease.ReleaseId, StringComparison.OrdinalIgnoreCase)
+                ? hostContext.ApplianceSnapshotPruneStatus : null;
+        if (pruneStatus == "pending")
+        {
+            finalizedState = state;
+            return false;
+        }
+
+        bool pruneFailed = !string.IsNullOrEmpty(pruneStatus) && pruneStatus != "succeeded";
         finalizedState = state with
         {
-            State = UpdateWorkflowState.Current,
+            State = pruneFailed ? UpdateWorkflowState.VerificationFailed : UpdateWorkflowState.Current,
             StateChangedAtUtc = DateTimeOffset.UtcNow,
             CurrentRelease = state.StagedRelease,
             AvailableRelease = null,
             StagedRelease = null,
             PreparedArtifacts = null,
             PendingOperation = null,
-            LastError = null,
+            LastError = pruneFailed ? snapshotPruneFailure : null,
         };
 
         return true;
+    }
+
+    private void RemoveCommittedApplianceDownload(UpdateStateRecord state, UpdateServiceContext host)
+    {
+        if (options.ApplianceReleaseId is null
+            || state.PendingOperation != "apply"
+            || state.StagedRelease is not { } target
+            || state.CurrentRelease is not { } source
+            || state.PreparedArtifacts is not { ActivationRequestId.Length: 32 } prepared
+            || state.StateChangedAtUtc is not { } requestedAt
+            || host is not { ApplianceBootConfirmed: true, RecoveryPhase: "committed", ApplianceSnapshotPruneStatus: "succeeded" }
+            || host.ApplianceRecoveryUpdatedUnixMilliseconds < requestedAt.ToUnixTimeMilliseconds())
+            return;
+
+        string tag = target.ReleaseId;
+        if (tag != prepared.TargetReleaseId || tag != host.ManagerReleaseId || tag != host.RecoveryTargetRelease
+            || source.ReleaseId != host.RecoverySourceRelease
+            || !ReleaseChannelPolicy.TryParseTag(tag, target.Channel, target.Channel == "preview", out var version)
+            || tag != $"v{version.ToVersionString()}")
+            return;
+
+        // The committed host uses its installed role archives for offline repair.
+        // Only this exact UpdateService-owned transfer file is disposable.
+        try
+        {
+            var runtime = new DirectoryInfo(options.StateRootPath);
+            var updates = new DirectoryInfo(Path.Combine(runtime.FullName, "updates"));
+            var staging = new DirectoryInfo(Path.Combine(updates.FullName, "staging"));
+            var release = new DirectoryInfo(Path.Combine(staging.FullName, tag));
+            string packageName = options.PlatformAssetName;
+            if (string.IsNullOrWhiteSpace(packageName) || Path.GetFileName(packageName) != packageName)
+                return;
+
+            var package = new FileInfo(Path.Combine(release.FullName, packageName));
+            if (package.DirectoryName != release.FullName || package.FullName != prepared.PlatformPackagePath
+                || runtime.LinkTarget is not null
+                || updates.LinkTarget is not null || staging.LinkTarget is not null || release.LinkTarget is not null
+                || package.LinkTarget is not null)
+                return;
+
+            package.Delete();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(ex, "Could not remove the completed download for appliance release {ReleaseId}.", tag);
+        }
     }
 
     private bool TryRecoverStuckApplyingState(
@@ -832,15 +921,44 @@ internal sealed class UpdateCoordinator(
             return false;
         }
 
-        // A completed durable recovery journal is stronger evidence than a
+        // The optional root-owned preflight receipt applies only to this exact
+        // request and a healthy unchanged source. Recovery fencing remains authoritative.
+        if (state.PendingOperation == "apply" && !hostContext.RecoveryRequired
+            && hostContext.HostStatusObserved && hostContext.IsReady && hostContext.RuntimeConverged
+            && state.CurrentRelease is not null
+            && string.Equals(state.CurrentRelease.Version, hostContext.ManagerVersion, StringComparison.Ordinal)
+            && string.Equals(state.PreparedArtifacts?.ActivationRequestId, hostContext.PreflightRequestId, StringComparison.Ordinal)
+            && !string.IsNullOrEmpty(hostContext.PreflightRequestId)
+            && string.Equals(state.CurrentRelease.Version, hostContext.PreflightSourceVersion, StringComparison.Ordinal)
+            && string.Equals(state.StagedRelease.Version, hostContext.PreflightTargetVersion, StringComparison.Ordinal)
+            && hostContext.PreflightCode == "insufficient_space")
+        {
+            recoveredState = state with
+            {
+                State = UpdateWorkflowState.Available,
+                StateChangedAtUtc = DateTimeOffset.UtcNow,
+                AvailableRelease = state.AvailableRelease ?? state.StagedRelease,
+                StagedRelease = null,
+                PreparedArtifacts = null,
+                PendingOperation = null,
+                LastError = "There is insufficient free space for the update. Free space on the disks that store Kautuka’s updates and container images, then retry.",
+            };
+            return true;
+        }
+
+        // A terminal durable recovery journal is stronger evidence than a
         // timeout. Match both ends of this operation before clearing Applying;
         // an unrelated older journal must never finalize a newer operation.
-        bool completedRecovery = !hostContext.RecoveryRequired
-            && string.Equals(hostContext.RecoveryPhase, "completed", StringComparison.Ordinal)
+        bool matchesRecoveryJournal = !hostContext.RecoveryRequired
             && string.Equals(hostContext.RecoverySourceRelease, hostContext.ManagerReleaseId, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(hostContext.RecoveryTargetRelease, state.StagedRelease.ReleaseId, StringComparison.OrdinalIgnoreCase);
+            && string.Equals(hostContext.RecoveryTargetRelease, state.StagedRelease.ReleaseId, StringComparison.OrdinalIgnoreCase)
+            && (!hostContext.ApplianceBootConfirmed.HasValue || (state.StateChangedAtUtc is { } requestedAt
+                && hostContext.ApplianceRecoveryUpdatedUnixMilliseconds >= requestedAt.ToUnixTimeMilliseconds()));
+        bool completedRecovery = matchesRecoveryJournal && hostContext.RecoveryPhase == "completed";
+        bool abortedApply = matchesRecoveryJournal && hostContext.ApplianceBootConfirmed == true
+            && state.PendingOperation == "apply" && hostContext.RecoveryPhase == "aborted";
         DateTimeOffset? applyingSinceUtc = state.StateChangedAtUtc;
-        if (!completedRecovery && applyingSinceUtc is not null
+        if (!completedRecovery && !abortedApply && applyingSinceUtc is not null
             && DateTimeOffset.UtcNow - applyingSinceUtc <= GetApplyingRecoveryThreshold())
         {
             recoveredState = state;
@@ -851,8 +969,7 @@ internal sealed class UpdateCoordinator(
         // is coherently back on the current release, not after a partial switch.
         if (state.CurrentRelease is null
             || !string.Equals(state.CurrentRelease.Version, hostContext.ManagerVersion, StringComparison.OrdinalIgnoreCase)
-            || !hostContext.HostStatusObserved || !hostContext.IsReady || !hostContext.RuntimeUnitsActive
-            || !hostContext.CurrentPointersConsistent || !hostContext.UpdateServiceRunningCurrent)
+            || !hostContext.HostStatusObserved || !hostContext.IsReady || !hostContext.RuntimeConverged)
         {
             recoveredState = state;
             return false;
@@ -860,9 +977,11 @@ internal sealed class UpdateCoordinator(
 
         bool rollback = string.Equals(state.PendingOperation, "rollback", StringComparison.Ordinal);
         string operation = rollback ? "rollback" : "update apply";
-        string message = completedRecovery && !rollback
-            ? "The update failed. Kautuka restored the previous version and its databases. You can retry or install a newer release."
-            : $"The {operation} for release {state.StagedRelease.Version} did not complete. The current release is still active, so the operation was reset and can be retried.";
+        string message = abortedApply
+            ? "The update stopped before switching versions. Your current version is still running. Try the update again."
+            : completedRecovery && !rollback
+                ? "The update failed. Kautuka restored the previous version and its databases. You can retry or install a newer release."
+                : $"The {operation} for release {state.StagedRelease.Version} did not complete. The current release is still active, so the operation was reset and can be retried.";
 
         logger.LogWarning(
             "Recovering stuck {Operation} state for target release {ReleaseId} while manager version remains {ManagerVersion}.",
@@ -894,8 +1013,7 @@ internal sealed class UpdateCoordinator(
         if (state.State != UpdateWorkflowState.Applying || state.StagedRelease is not null
             || state.CurrentRelease is null
             || !string.Equals(observedRelease.Version, hostContext.ManagerVersion, StringComparison.OrdinalIgnoreCase)
-            || !hostContext.HostStatusObserved || !hostContext.IsReady || !hostContext.RuntimeUnitsActive
-            || !hostContext.CurrentPointersConsistent || !hostContext.UpdateServiceRunningCurrent)
+            || !hostContext.HostStatusObserved || !hostContext.IsReady || !hostContext.RuntimeConverged)
         {
             recoveredState = state;
             return false;
@@ -928,6 +1046,10 @@ internal sealed class UpdateCoordinator(
         if (currentState.State == UpdateWorkflowState.Applying)
         {
             return UpdateWorkflowState.Applying;
+        }
+        if (availableRelease is null && currentState.LastError == snapshotPruneFailure)
+        {
+            return UpdateWorkflowState.VerificationFailed;
         }
 
         if (result.FailureReason is not null)
@@ -1264,7 +1386,7 @@ internal sealed class UpdateCoordinator(
             artifactName: artifact.Name);
     }
 
-    private async Task<PlatformReleaseDescriptor> DownloadPlatformReleaseDescriptorAsync(
+    internal async Task<PlatformReleaseDescriptor> DownloadPlatformReleaseDescriptorAsync(
         string descriptorUrl,
         string? signatureUrl,
         string stageRoot,
@@ -1272,10 +1394,15 @@ internal sealed class UpdateCoordinator(
     {
         byte[] manifestBytes = await DownloadBytesAsync(descriptorUrl, cancellationToken).ConfigureAwait(false);
         bool requireVerification = ReleaseTrustPolicy.RequiresVerification(options);
+        ApplianceDeploymentDescriptor? appliance = ApplianceDeploymentManifest.Parse(manifestBytes);
+        if (options.ApplianceReleaseId is not null && appliance is null)
+        {
+            throw new InvalidOperationException("The selected release has no appliance deployment descriptor.");
+        }
 
         if (string.IsNullOrWhiteSpace(signatureUrl))
         {
-            if (requireVerification)
+            if (requireVerification || appliance is not null)
             {
                 throw new InvalidOperationException(
                     "Platform release signature URL was missing. Fail-closed verification requires a detached ECDSA signature.");
@@ -1283,17 +1410,20 @@ internal sealed class UpdateCoordinator(
         }
         else
         {
-            if (string.IsNullOrWhiteSpace(options.ManifestPublicKeyPath))
+            if (!options.HasManifestPublicKey)
             {
                 throw new InvalidOperationException("Platform release signature was published, but no trusted manifest public key path was configured.");
             }
 
-            string publicKeyPem = await File.ReadAllTextAsync(options.ManifestPublicKeyPath, cancellationToken).ConfigureAwait(false);
+            string publicKeyPem = await options.ReadManifestPublicKeyAsync(cancellationToken).ConfigureAwait(false);
             string signatureContent = Encoding.UTF8.GetString(await DownloadBytesAsync(signatureUrl, cancellationToken).ConfigureAwait(false));
             if (!PlatformReleaseSignatureVerifier.TryVerify(manifestBytes, signatureContent, publicKeyPem, out string? verificationError))
             {
                 throw new InvalidOperationException(verificationError ?? "Platform release signature verification failed.");
             }
+
+            if (appliance is not null && options.ApplianceReleaseId is null)
+                throw new InvalidOperationException("Appliance deployment activation is not supported by this updater.");
 
             // The privileged helper independently verifies these bytes and a private
             // copy of the archive before it installs any files.

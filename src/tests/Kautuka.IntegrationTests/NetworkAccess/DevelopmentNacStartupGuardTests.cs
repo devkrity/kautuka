@@ -39,10 +39,13 @@ public sealed class DevelopmentNacStartupGuardTests
         var podman = new PodmanCommandRunner((_, _) => Task.FromResult(new PodmanCommandResult(
             0, string.Empty, string.Empty, ProcessTerminationReason.Completed)));
         var registry = new WorkloadRegistry();
+        using var policy = new NetworkAccessPolicyStore(Path.Combine(tempDirectory, "policy.json"));
+        var admin = new NetworkAccessActor("admin", IsAdmin: true);
+        policy.SetBrake(admin, "system", null, on: true);
         await using var manager = new EgressTopologyManager(
             podman,
             new WorkloadAddressAllocator(Path.Combine(tempDirectory, "cursor.json")),
-            new WorkloadPostStartVerifier(podman), registry, tempDirectory);
+            new WorkloadPostStartVerifier(podman), registry, tempDirectory, policyStore: policy);
         typeof(EgressTopologyManager).GetMethod("QueueStartupCanaryRetry", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
             .Invoke(manager, [registry]);
         var guard = new DevelopmentNacStartupGuard(
@@ -52,8 +55,23 @@ public sealed class DevelopmentNacStartupGuardTests
 
         Assert.False(manager.IsStartupGateOpen);
         Assert.True(manager.IsStartupRetryPending);
+        Assert.True(manager.IsRecoveryWaitingForNetworkResume);
+        Assert.Null(manager.NextRecoveryRetryUtc);
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await using IWorkloadLaunchLease lease = await manager.AcquireLaunchLeaseAsync(TestContext.Current.CancellationToken);
+        });
+
+        policy.SetBrake(admin, "system", null, on: false);
+        Assert.False(manager.IsRecoveryWaitingForNetworkResume);
+        DateTimeOffset waitUntil = DateTimeOffset.UtcNow.AddSeconds(2);
+        while (manager.NextRecoveryRetryUtc is null && DateTimeOffset.UtcNow < waitUntil)
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        DateTimeOffset retryAt = Assert.IsType<DateTimeOffset>(manager.NextRecoveryRetryUtc);
+        Assert.InRange(retryAt, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddSeconds(31));
         manager.CloseLaunchAdmission();
         Assert.False(manager.IsStartupRetryPending);
+        Assert.Null(manager.NextRecoveryRetryUtc);
         await manager.DisposeAsync();
         Directory.Delete(tempDirectory, recursive: true);
     }

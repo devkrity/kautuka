@@ -15,7 +15,7 @@ public sealed class ProviderTestTemporaryAccessTests
             var clock = new ManualClock();
             var controller = new NetworkAccessController.NetworkAccessController(store, new WorkloadRegistry(), timeProvider: clock);
             var admin = new NetworkAccessActor("admin", true);
-            string token = controller.BeginProviderTest(admin, "provider.example", 443, false);
+            string token = controller.PrepareProviderTest(admin, "provider.example", 443, false, confirmed: true).Token;
             var request = new OutboundCheckInput("admin", "gateway", null, "provider.example", 443, "provider-test", token);
 
             Assert.True(controller.EvaluateOutboundCheck(request).Allowed);
@@ -45,13 +45,17 @@ public sealed class ProviderTestTemporaryAccessTests
             using var store = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
             var controller = new NetworkAccessController.NetworkAccessController(store, new WorkloadRegistry());
             var admin = new NetworkAccessActor("admin", true);
-            string token = controller.BeginProviderTest(admin, "provider.example", 443, false);
+            string token = controller.PrepareProviderTest(admin, "provider.example", 443, false, confirmed: true).Token;
             OutboundCheckInput Test(string user, string host, string id) =>
                 new(user, "gateway", null, host, 443, "provider-test", id);
             Assert.True(controller.EvaluateOutboundCheck(Test("admin", "provider.example", token)).Allowed);
             Assert.False(controller.EvaluateOutboundCheck(Test("other", "provider.example", token)).Allowed);
             Assert.False(controller.EvaluateOutboundCheck(Test("admin", "other.example", token)).Allowed);
             Assert.False(controller.EvaluateOutboundCheck(Test("admin", "provider.example", "other")).Allowed);
+            OutboundCheckInput original = Test("admin", "provider.example", token);
+            Assert.False(controller.EvaluateOutboundCheck(original with { AgentId = "other-agent" }, recordPendingRequest: false).Allowed);
+            Assert.False(controller.EvaluateOutboundCheck(original with { AgentId = string.Empty }, recordPendingRequest: false).Allowed);
+            Assert.False(controller.EvaluateOutboundCheck(original with { ConnectorId = "some-connector" }, recordPendingRequest: false).Allowed);
             controller.EndProviderTest(admin, token);
             Assert.False(controller.EvaluateOutboundCheck(Test("admin", "provider.example", token)).Allowed);
             Assert.DoesNotContain(store.ListRules(admin).Rules, rule => rule.Rule.Destination == "provider.example");

@@ -22,7 +22,7 @@ const structuredJsonMinObservationsId = 'structured-json-min-observations';
 const providerPathFallbackModeLabel = 'Provider path fallback mode enabled';
 const providerPathFallbackModeId = 'provider-path-fallback-mode-enabled';
 
-export function AdvancedTab() {
+export function AdvancedTab({ initialSection = 'workspace' }: { initialSection?: 'workspace' | 'network-access' }) {
   const {
     loading,
     saving,
@@ -158,7 +158,7 @@ export function AdvancedTab() {
             </div>
           </div>
 
-          <Tabs defaultValue="workspace" className="mt-1">
+          <Tabs key={initialSection} defaultValue={initialSection} className="mt-1">
             <TabsList className="mb-4 flex h-auto w-full flex-wrap justify-start gap-1 rounded-xl border border-border/70 bg-muted/40 p-1">
               <TabsTrigger
                 className="rounded-lg border border-transparent px-3 py-2 text-sm data-[state=active]:border-border data-[state=active]:bg-card data-[state=active]:text-foreground"

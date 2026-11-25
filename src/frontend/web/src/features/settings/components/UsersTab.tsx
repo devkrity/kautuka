@@ -1,6 +1,7 @@
 import { PageState } from '@/components/layout/PageState';
 import { StatusPanels } from '@/components/layout/StatusPanels';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import React from 'react';
 import { useUsersTab } from '../hooks/useUsersTab';
 import { Banner } from './SettingsShared';
@@ -68,6 +69,38 @@ export function UsersTab() {
     });
   };
   const [inviteDialogOpen, setInviteDialogOpen] = React.useState(false);
+  const [issuedInvite, setIssuedInvite] = React.useState<{ code: string; email: string } | null>(null);
+  const [copyStatus, setCopyStatus] = React.useState<string>();
+
+  const setInviteDialog = (open: boolean) => {
+    if (!open) {
+      setIssuedInvite(null);
+      setCopyStatus(undefined);
+    }
+    setInviteDialogOpen(open);
+  };
+
+  const copyInvitation = async () => {
+    if (!issuedInvite) return;
+    const { hostname, origin } = window.location;
+    const localAddress = hostname === 'localhost' || hostname === '[::1]' || hostname.startsWith('127.');
+    const joinUrl = new URL('/login?join=1', origin);
+    const openKautuka = localAddress
+      ? 'On the computer running Kautuka, open this link to join your team:'
+      : 'Open this link to join your team:';
+    try {
+      await navigator.clipboard.writeText([
+        openKautuka,
+        joinUrl.href,
+        `Enter this one-time code: ${issuedInvite.code}`,
+        `Then sign in with Google or Microsoft using ${issuedInvite.email}.`,
+        'The invitation expires after seven days.',
+      ].join('\n'));
+      setCopyStatus('Invitation copied. Send it to the person you invited.');
+    } catch {
+      setCopyStatus('Couldn’t copy the invitation. Select the code and copy it manually.');
+    }
+  };
 
   const renderUserCard = (user: (typeof pagedUsers)[number], editing: boolean) => (
     <UserAccessCard
@@ -131,29 +164,53 @@ export function UsersTab() {
           type="button"
           onClick={() => {
             setResult(null);
-            setInviteDialogOpen(true);
+            setInviteDialog(true);
           }}
         >
           <Plus className="mr-2 h-4 w-4" /> Invite user
         </Button>
       </div>
 
-      <Dialog open={inviteDialogOpen} onOpenChange={setInviteDialogOpen}>
+      <Dialog open={inviteDialogOpen} onOpenChange={setInviteDialog}>
         <DialogContent className="max-h-[90vh] overflow-y-auto p-4 sm:max-w-2xl sm:p-6">
           <DialogTitle className="sr-only">Invite a user</DialogTitle>
           <DialogDescription className="sr-only">
             Create access for a new Kautuka user.
           </DialogDescription>
-          {result && <Banner success={result.success} message={result.message} />}
-          <UsersInviteCard
-            invite={invite}
-            onInviteChange={setInvite}
-            onInvite={() => {
-              void inviteUser().then((success) => {
-                if (success) setInviteDialogOpen(false);
-              });
-            }}
-          />
+          {issuedInvite ? (
+            <div className="space-y-3">
+              <label className="block text-sm">
+                <span className="mb-1 block">One-time invitation code</span>
+                <Input readOnly value={issuedInvite.code} onFocus={(event) => event.currentTarget.select()} />
+              </label>
+              <p className="text-sm text-muted-foreground">
+                Send this invitation to {issuedInvite.email}. In Kautuka, they select Sign up,
+                enter the code on Join your team, and sign in with Google or Microsoft using that email.
+                The code expires after seven days.
+              </p>
+              {copyStatus && <p role="status" className="text-sm">{copyStatus}</p>}
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button type="button" variant="outline" onClick={() => void copyInvitation()}>Copy invitation</Button>
+                <Button type="button" onClick={() => setInviteDialog(false)}>Done</Button>
+              </div>
+            </div>
+          ) : (
+            <>
+              {result && <Banner success={result.success} message={result.message} />}
+              <UsersInviteCard
+                invite={invite}
+                onInviteChange={setInvite}
+                onInvite={() => {
+                  void inviteUser().then((invitation) => {
+                    if (invitation?.code) {
+                      setIssuedInvite({ code: invitation.code, email: invitation.email });
+                      setInviteDialog(true);
+                    } else if (invitation) setInviteDialog(false);
+                  });
+                }}
+              />
+            </>
+          )}
         </DialogContent>
       </Dialog>
 

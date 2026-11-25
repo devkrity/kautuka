@@ -28,6 +28,21 @@ internal sealed class UpdateOptionsValidation : IValidateOptions<UpdateOptions>
             return ValidateOptionsResult.Fail("Update:CatalogRefreshInterval must be greater than zero.");
         }
 
+        if (options.PublicSuffixRefreshInterval < TimeSpan.FromDays(1))
+        {
+            return ValidateOptionsResult.Fail("Update:PublicSuffixRefreshInterval must be at least one day.");
+        }
+
+        if (options.PublicSuffixMaxRuleDropPercent is < 0 or >= 100)
+        {
+            return ValidateOptionsResult.Fail("Update:PublicSuffixMaxRuleDropPercent must be between 0 and 99.");
+        }
+
+        if (options.PublicSuffixMinimumRuleCount <= 0)
+        {
+            return ValidateOptionsResult.Fail("Update:PublicSuffixMinimumRuleCount must be greater than zero.");
+        }
+
         if (!string.IsNullOrWhiteSpace(options.ReleaseManifestUrl)
             && !Uri.TryCreate(options.ReleaseManifestUrl, UriKind.Absolute, out _))
         {
@@ -64,9 +79,7 @@ internal sealed class UpdateOptionsValidation : IValidateOptions<UpdateOptions>
 
         if (!options.AllowUnsignedLocalFeeds)
         {
-            if ((hasReleaseManifestUrl || hasRepositorySource)
-                && (string.IsNullOrWhiteSpace(options.ManifestPublicKeyPath)
-                    || !File.Exists(options.ManifestPublicKeyPath)))
+            if ((hasReleaseManifestUrl || hasRepositorySource) && !options.HasManifestPublicKey)
             {
                 return ValidateOptionsResult.Fail(
                     "Update:ManifestPublicKeyPath must point to an existing trusted public key when AllowUnsignedLocalFeeds is false.");

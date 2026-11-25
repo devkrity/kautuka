@@ -13,6 +13,7 @@ public static class WorkspaceContainerSpecFingerprint
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(connectorIds);
         var builder = new StringBuilder();
+        Append(builder, "workspace-owner-group");
         Append(builder, context.ScopeType);
         Append(builder, context.ScopeId);
         Append(builder, context.AgentId ?? string.Empty);

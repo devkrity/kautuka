@@ -59,14 +59,7 @@ public static class LocalCaMtlsBootstrap
         string caKeyPath = Path.Combine(dataRoot, caKeyFile);
         string caCertPath = Path.Combine(dataRoot, caCertFile);
         X509Certificate2 caCert = EnsureCa(caKeyPath, caCertPath, serviceName);
-        X509Certificate2 serverCert = IssueCert(caCert, $"{serviceName} Server", serverAuthOid,
-            san =>
-            {
-                san.AddDnsName(serviceName);
-                san.AddDnsName("localhost");
-                san.AddDnsName("host.containers.internal");
-                san.AddIpAddress(IPAddress.Loopback);
-            });
+        X509Certificate2 serverCert = IssueServerCertificate(caCert, serviceName);
 
         var seenFiles = new HashSet<string>(StringComparer.Ordinal);
         var seenSubjects = new HashSet<string>(StringComparer.Ordinal);
@@ -217,20 +210,60 @@ public static class LocalCaMtlsBootstrap
         {
             SetOwnerOnly(caKeyPath);
             SetOwnerOnly(caCertPath);
-            byte[] keyBytes = File.ReadAllBytes(caKeyPath);
-            byte[] certBytes = File.ReadAllBytes(caCertPath);
-
-            using var ecdsa = ECDsa.Create();
-            ecdsa.ImportECPrivateKey(keyBytes, out _);
-
-            using var cert = X509CertificateLoader.LoadCertificate(certBytes);
-            return cert.CopyWithPrivateKey(ecdsa);
+            return LoadCertificateAuthority(caKeyPath, caCertPath);
         }
 
         return GenerateCa(caKeyPath, caCertPath, serviceName);
     }
 
+    internal static X509Certificate2 LoadCertificateAuthority(string keyPath, string certificatePath)
+    {
+        byte[] keyBytes = File.ReadAllBytes(keyPath);
+        try
+        {
+            using var key = ECDsa.Create();
+            key.ImportECPrivateKey(keyBytes, out _);
+            using X509Certificate2 certificate = X509CertificateLoader.LoadCertificateFromFile(certificatePath);
+            return certificate.CopyWithPrivateKey(key);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(keyBytes);
+        }
+    }
+
+    internal static X509Certificate2 IssueServerCertificate(
+        X509Certificate2 ca, string serviceName, DateTimeOffset? issuanceTime = null)
+        => IssueCert(ca, $"{serviceName} Server", serverAuthOid, san =>
+        {
+            san.AddDnsName(serviceName);
+            san.AddDnsName("localhost");
+            san.AddDnsName("host.containers.internal");
+            san.AddIpAddress(IPAddress.Loopback);
+        }, issuanceTime: issuanceTime);
+
+    internal static X509Certificate2 IssueClientCertificate(
+        X509Certificate2 ca, string subject, Uri identity, DateTimeOffset issuanceTime)
+        => IssueCert(ca, subject, clientAuthOid, san => san.AddUri(identity), issuanceTime: issuanceTime);
+
     private static X509Certificate2 GenerateCa(string caKeyPath, string caCertPath, string serviceName)
+    {
+        X509Certificate2 caCert = CreateCertificateAuthority(serviceName);
+        try
+        {
+            using ECDsa key = caCert.GetECDsaPrivateKey() ?? throw new CryptographicException("Local CA private key is missing.");
+            WriteAtomic(caKeyPath, key.ExportECPrivateKey());
+            WriteAtomic(caCertPath, caCert.Export(X509ContentType.Cert));
+            return caCert;
+        }
+        catch
+        {
+            caCert.Dispose();
+            throw;
+        }
+    }
+
+    internal static X509Certificate2 CreateCertificateAuthority(string serviceName, DateTimeOffset? issuanceTime = null)
     {
         using var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
 
@@ -245,25 +278,17 @@ public static class LocalCaMtlsBootstrap
             X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, critical: true));
         req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, critical: false));
 
-        DateTimeOffset now = DateTimeOffset.UtcNow;
-        X509Certificate2 caCert = req.CreateSelfSigned(now.AddSeconds(-5), now.AddYears(10));
-
-        // Persist CA private key (PKCS8 EC private key DER)
-        byte[] keyBytes = ecdsa.ExportECPrivateKey();
-        WriteAtomic(caKeyPath, keyBytes);
-
-        // Persist CA public cert (DER)
-        byte[] certBytes = caCert.Export(X509ContentType.Cert);
-        WriteAtomic(caCertPath, certBytes);
-
-        return caCert;
+        DateTimeOffset now = issuanceTime ?? DateTimeOffset.UtcNow;
+        return req.CreateSelfSigned(now.AddSeconds(-5), now.AddYears(10));
     }
 
-    private static X509Certificate2 IssueCert(
+    internal static X509Certificate2 IssueCert(
         X509Certificate2 ca,
         string subjectCn,
         Oid ekuOid,
-        Action<SubjectAlternativeNameBuilder>? sanBuilder)
+        Action<SubjectAlternativeNameBuilder>? sanBuilder,
+        int validityDays = 30,
+        DateTimeOffset? issuanceTime = null)
     {
         using var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
 
@@ -288,11 +313,11 @@ public static class LocalCaMtlsBootstrap
             req.CertificateExtensions.Add(sanExt.Build());
         }
 
-        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DateTimeOffset now = issuanceTime ?? DateTimeOffset.UtcNow;
         byte[] serial = new byte[8];
         RandomNumberGenerator.Fill(serial);
 
-        X509Certificate2 signed = req.Create(ca, now.AddSeconds(-5), now.AddDays(30), serial);
+        X509Certificate2 signed = req.Create(ca, now.AddSeconds(-5), now.AddDays(validityDays), serial);
         var ephemeralCert = signed.CopyWithPrivateKey(ecdsa);
         signed.Dispose();
 
@@ -386,6 +411,9 @@ public static class LocalCaMtlsBootstrap
     /// Used as Kestrel's ClientCertificateValidation callback.
     /// </summary>
     public static bool ValidateClientCert(X509Certificate2 clientCert, X509Certificate2 caCert)
+        => ValidateClientCert(clientCert, caCert, DateTimeOffset.UtcNow);
+
+    private static bool ValidateClientCert(X509Certificate2 clientCert, X509Certificate2 caCert, DateTimeOffset verificationTime)
     {
         ArgumentNullException.ThrowIfNull(clientCert);
         ArgumentNullException.ThrowIfNull(caCert);
@@ -393,6 +421,7 @@ public static class LocalCaMtlsBootstrap
         chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
         chain.ChainPolicy.CustomTrustStore.Add(caCert);
         chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+        chain.ChainPolicy.VerificationTime = verificationTime.UtcDateTime;
         // AllowUnknownCertificateAuthority lets the chain build against this process-local
         // CA. Build still returns true for a certificate that does not chain to that CA, so
         // the CA certificate itself must appear in the chain.
@@ -417,36 +446,38 @@ public static class LocalCaMtlsBootstrap
         X509Certificate2 clientCert,
         X509Certificate2 caCert,
         string expectedCommonName,
-        Uri expectedWorkloadIdentityUri)
+        Uri expectedWorkloadIdentityUri,
+        DateTimeOffset? verificationTime = null)
     {
         ArgumentNullException.ThrowIfNull(clientCert);
         ArgumentNullException.ThrowIfNull(caCert);
         ArgumentNullException.ThrowIfNull(expectedWorkloadIdentityUri);
-        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DateTimeOffset now = verificationTime ?? DateTimeOffset.UtcNow;
         if (now < clientCert.NotBefore.ToUniversalTime() || now > clientCert.NotAfter.ToUniversalTime()) return false;
         if (!string.Equals(clientCert.GetNameInfo(X509NameType.SimpleName, false), expectedCommonName, StringComparison.Ordinal)) return false;
         if (!HasEnhancedKeyUsage(clientCert, clientAuthOid.Value!)) return false;
         if (!HasUriSubjectAlternativeName(clientCert, expectedWorkloadIdentityUri.AbsoluteUri)) return false;
-        return ValidateClientCert(clientCert, caCert);
+        return ValidateClientCert(clientCert, caCert, now);
     }
 
     public static bool ValidateExactServerCert(
         X509Certificate2 serverCert,
         X509Certificate2 caCert,
         string expectedCommonName,
-        string expectedDnsName)
+        string expectedDnsName,
+        DateTimeOffset? verificationTime = null)
     {
         ArgumentNullException.ThrowIfNull(serverCert);
         ArgumentNullException.ThrowIfNull(caCert);
         ArgumentException.ThrowIfNullOrWhiteSpace(expectedCommonName);
         ArgumentException.ThrowIfNullOrWhiteSpace(expectedDnsName);
-        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DateTimeOffset now = verificationTime ?? DateTimeOffset.UtcNow;
         return now >= serverCert.NotBefore.ToUniversalTime()
             && now <= serverCert.NotAfter.ToUniversalTime()
             && string.Equals(serverCert.GetNameInfo(X509NameType.SimpleName, false), expectedCommonName, StringComparison.Ordinal)
             && HasEnhancedKeyUsage(serverCert, serverAuthOid.Value!)
             && HasGeneralName(serverCert, 2, expectedDnsName)
-            && ValidateClientCert(serverCert, caCert);
+            && ValidateClientCert(serverCert, caCert, now);
     }
 
     private static bool HasEnhancedKeyUsage(X509Certificate2 certificate, string expectedOid) =>

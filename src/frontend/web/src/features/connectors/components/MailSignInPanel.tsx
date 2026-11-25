@@ -105,10 +105,15 @@ export function ConnectorSignInPanel({ connectorId }: { connectorId: string }) {
                 setConnecting(true);
                 void runBoundMailLogin(connectorId, controller.signal, () => checkNetwork('auth', controller.signal)).then(async () => {
                   if (controller.signal.aborted) return;
-                  setNote('Signed in.');
-                  await catalog.refetch();
-                  try { await checkNetwork('mail', controller.signal); }
-                  catch (error) { if (!controller.signal.aborted) setNote(`Signed in. ${error instanceof Error ? error.message : 'Network access could not be checked.'}`); }
+                  setNote('Signed in. Checking mailbox network access…');
+                  try {
+                    await checkNetwork('mail', controller.signal);
+                    if (!controller.signal.aborted) setNote(null);
+                  } catch (error) {
+                    if (!controller.signal.aborted) setNote(`Signed in. ${error instanceof Error ? error.message : 'Network access could not be checked.'}`);
+                  } finally {
+                    if (!controller.signal.aborted) await catalog.refetch();
+                  }
                 }).catch((error: unknown) => {
                   if (controller.signal.aborted) return;
                   const message = error instanceof Error ? error.message : 'Mail sign-in failed.';

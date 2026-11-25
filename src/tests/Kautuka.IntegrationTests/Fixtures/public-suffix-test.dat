@@ -1,0 +1,14 @@
+// Test fixture covering ICANN, wildcard, exception, and private suffix rules.
+// ===BEGIN ICANN DOMAINS===
+com
+de
+io
+ck
+*.ck
+!www.ck
+uk
+co.uk
+// ===END ICANN DOMAINS===
+// ===BEGIN PRIVATE DOMAINS===
+github.io
+// ===END PRIVATE DOMAINS===

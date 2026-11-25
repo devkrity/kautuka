@@ -6,6 +6,7 @@ using System.Text.Json;
 using Kautuka.Gateway.Domain.Connectors;
 using Kautuka.Gateway.Infrastructure.Connectors;
 using Kautuka.Gateway.Infrastructure.Credentials;
+using Kautuka.NetworkAccess.Client;
 using Kautuka.Protos;
 
 namespace Kautuka.IntegrationTests;
@@ -387,6 +388,46 @@ public sealed class BrokerInstallationIdentityTests
         handler.Status = HttpStatusCode.Redirect;
         await registration.InvalidateAsync(CancellationToken.None);
         await Assert.ThrowsAsync<HttpRequestException>(() => registration.RegisterAsync(new Uri("https://auth.kautuka.io/"), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task BrokerSignsFreshRequestsAfterExplicitRetry()
+    {
+        using var identities = new BrokerInstallationIdentityProvider(new MemoryStore());
+        using var handler = new HandoffHandler();
+        var checker = new RetryNetworkChecker();
+        using var transport = new NetworkAccessCheckHandler(checker, handler);
+        TimeSpan providerDeadline = TimeSpan.FromMilliseconds(800);
+        using var registration = new BrokerInstallationRegistration(identities,
+            new HttpClient(transport, disposeHandler: false) { Timeout = providerDeadline });
+        using var broker = new BrokerHandoffClient(identities, registration,
+            new HttpClient(transport, disposeHandler: false) { Timeout = providerDeadline });
+        var origin = new Uri("https://auth.kautuka.io/");
+        const string expected = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        var start = new BrokerHandoffStart("google", "login", expected, expected, expected, "http://localhost:20229");
+        CancellationToken token = TestContext.Current.CancellationToken;
+        using IDisposable scope = NetworkAccessContext.BeginScope("user-a", connectorId: "mail", purpose: "connector-oauth");
+        using var cancelled = CancellationTokenSource.CreateLinkedTokenSource(token);
+
+        await cancelled.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => broker.StartAsync(origin, start, cancelled.Token));
+        await Assert.ThrowsAsync<NetworkAccessDeniedException>(() => broker.StartAsync(origin, start, token));
+        Assert.Equal("mail", Assert.Single(checker.Targets).ConnectorId);
+        checker.Allowed = true;
+        Assert.Empty(handler.Paths);
+        long retryStart = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        Assert.Equal(expected, await broker.StartAsync(origin, start, token));
+        Assert.Equal(new[] { "/installation/register", "/installation/flow" }, handler.Paths);
+        Assert.All(checker.Targets, target =>
+        {
+            Assert.Equal("user-a", target.UserId);
+            Assert.Equal("auth.kautuka.io", target.Host);
+        });
+        foreach (string proof in handler.Proofs)
+        {
+            using JsonDocument claims = JsonDocument.Parse(Decode(proof.Split('.')[1]));
+            Assert.InRange(claims.RootElement.GetProperty("iat").GetInt64(), retryStart, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        }
     }
 
     [Fact]

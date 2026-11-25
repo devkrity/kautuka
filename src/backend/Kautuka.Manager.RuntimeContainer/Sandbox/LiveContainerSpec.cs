@@ -27,7 +27,7 @@ internal static class LiveContainerSpec
             networkName,
             context.HostWorkspacePath,
             context.ContainerWorkspacePath,
-            MountReadOnly: false,
+            MountReadOnly: context.HasReadOnlyWorkspace(),
             PidsLimit: 256,
             ["/tmp", "/home/node"],
             env,

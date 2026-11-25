@@ -222,6 +222,8 @@ internal sealed class GatewayAgentSkillAttachmentPayload
     public string SkillId { get; init; } = string.Empty;
 
     public string Mode { get; init; } = "disabled";
+
+    public string? Context { get; init; }
 }
 
 internal sealed class GatewayAgentSessionPayload
@@ -876,7 +878,8 @@ internal sealed record GatewayConnectorListItem(
     string? McpProtocolVersion = null,
     RemoteMcpCredential[]? Credentials = null,
     RemoteMcpHeader[]? HttpHeaders = null,
-    bool RequiresCredentialReentry = false);
+    bool RequiresCredentialReentry = false,
+    bool? DefaultEnabled = null);
 
 internal sealed record GatewayConnectorsResponse(GatewayConnectorListItem[] Connectors);
 
@@ -972,9 +975,11 @@ internal sealed record GatewayChatRunResponse(
     GatewayMetrics Metrics,
     GatewayRunState? Run = null);
 
+internal sealed record ProviderTestTarget(string Host, int Port);
 internal sealed record GatewayProviderTestResponse(
     bool Success,
-    string Message);
+    string Message,
+    ProviderTestTarget? ConfirmationTarget = null);
 
 internal sealed record CredentialCollectionResponse(
     string Scope,

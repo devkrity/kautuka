@@ -84,6 +84,7 @@ internal static partial class GatewaySettingsEndpointMappings
                     SkillAttachments = [.. agent.SkillAttachments.Select(static attachment => new GatewayAgentSkillAttachmentPayload
                     {
                         SkillId = attachment.SkillId,
+                        Context = attachment.Context,
                         Mode = attachment.Mode switch
                         {
                             SkillAttachmentMode.Disabled => "disabled",

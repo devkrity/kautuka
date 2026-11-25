@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 
 using Kautuka.Gateway.Domain.AgentFiles;
+using Kautuka.Gateway.Domain.Connectors;
 using Kautuka.Gateway.Domain.Stores;
 
 using Microsoft.Data.Sqlite;
@@ -23,7 +24,8 @@ internal sealed class WorkflowInstanceLauncher(
     IAgentFilePathAuthorizationService fileAuthorization,
     IGatewayCatalogStore catalog,
     IGatewayUserStore users,
-    ILogger<WorkflowInstanceLauncher> logger)
+    ILogger<WorkflowInstanceLauncher> logger,
+    IConnectorUserEnablement? enablement = null)
 {
     public WorkflowInstanceStartResult Start(
         GatewayWorkflowDefinition definition,
@@ -46,7 +48,7 @@ internal sealed class WorkflowInstanceLauncher(
             {
                 return new WorkflowInstanceStartResult(null, StatusCodes.Status400BadRequest, "The workflow owner is not available.");
             }
-            if (!WorkflowFirstStepConnectorPolicy.ValidateMailConnector(definition, catalog, out string? connectorError))
+            if (!WorkflowFirstStepConnectorPolicy.ValidateMailConnector(definition, catalog, out string? connectorError, ownerUserId, enablement))
             {
                 return new WorkflowInstanceStartResult(null, StatusCodes.Status400BadRequest, connectorError);
             }

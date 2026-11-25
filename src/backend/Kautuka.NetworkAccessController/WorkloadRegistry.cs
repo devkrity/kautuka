@@ -53,6 +53,7 @@ public interface IWorkloadRegistry
     void Register(RegistryEntry entry);
 
     bool Deregister(string ip, string? containerId = null);
+    bool DeregisterBuilder(string ip, DateTimeOffset registeredAt);
 
     bool UpdateContainerId(string ip, string previousContainerId, string actualContainerId) => false;
 
@@ -126,6 +127,12 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
     }
 
     public bool Deregister(string ip, string? containerId = null)
+        => DeregisterCore(ip, containerId, builderRegisteredAt: null);
+
+    public bool DeregisterBuilder(string ip, DateTimeOffset registeredAt)
+        => DeregisterCore(ip, containerId: null, builderRegisteredAt: registeredAt);
+
+    private bool DeregisterCore(string ip, string? containerId, DateTimeOffset? builderRegisteredAt)
     {
         if (!NetworkDestinationNormalizer.TryNormalizeIpv4(ip, out string normalizedIp, out _))
         {
@@ -143,6 +150,12 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
 
             if (!string.IsNullOrWhiteSpace(containerId)
                 && !string.Equals(existing.ContainerId, containerId, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            if (builderRegisteredAt.HasValue
+                && (existing.Kind != "builder" || existing.RegisteredUtc != builderRegisteredAt.Value))
             {
                 return false;
             }

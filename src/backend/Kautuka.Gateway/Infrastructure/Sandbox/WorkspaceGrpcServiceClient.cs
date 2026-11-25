@@ -12,10 +12,14 @@ namespace Kautuka.Gateway.Infrastructure.Sandbox;
 /// AOT-compatible gRPC client for the Kautuka.Manager service.
 /// Wraps the proto-first generated <see cref="ManagerService.ManagerServiceClient"/>.
 /// </summary>
-internal sealed class ManagerGrpcServiceClient(CallInvoker callInvoker, string managerGrpcAddress) : IManagerGrpcService
+internal sealed class ManagerGrpcServiceClient(CallInvoker callInvoker, string managerGrpcAddress,
+    int bundlePreparationSeconds = ManagerGrpcServiceClient.DefaultBundlePreparationSeconds) : IManagerGrpcService
 {
+    internal const int DefaultBundlePreparationSeconds = 180;
     internal static readonly TimeSpan DesiredStateMaterializationDeadline = TimeSpan.FromMinutes(31);
     private readonly ManagerService.ManagerServiceClient client = new(callInvoker);
+    private readonly int bundlePreparationBudget = bundlePreparationSeconds > 0
+        ? bundlePreparationSeconds : throw new ArgumentOutOfRangeException(nameof(bundlePreparationSeconds));
 
     public ManagerService.ManagerServiceClient Client => client;
 
@@ -62,13 +66,38 @@ internal sealed class ManagerGrpcServiceClient(CallInvoker callInvoker, string m
         => Call("PrimeWorkspace", () => client.PrimeWorkspaceAsync(request, headers: KautukaGrpcCorrelationMetadata.CreateClientHeaders(), deadline: DateTime.UtcNow.AddMinutes(5), cancellationToken: cancellationToken).ResponseAsync);
 
     public Task<WorkspaceMcpProbeResponse> ProbeMcpContainerAsync(WorkspaceMcpContainerProbeRequest request, CancellationToken cancellationToken = default)
-        => Call("ProbeMcpContainer", () => client.ProbeMcpContainerAsync(request, headers: KautukaGrpcCorrelationMetadata.CreateClientHeaders(), deadline: DateTime.UtcNow.AddSeconds(BoundedTimeout(request.TimeoutSeconds, 30, 600) + 15), cancellationToken: cancellationToken).ResponseAsync);
+        => Call("ProbeMcpContainer", () => client.ProbeMcpContainerAsync(
+            request,
+            BuildProbeCallOptions(request, DateTime.UtcNow, cancellationToken, bundlePreparationBudget)).ResponseAsync);
+
+    internal static CallOptions BuildProbeCallOptions(WorkspaceMcpContainerProbeRequest request, DateTime utcNow, CancellationToken cancellationToken,
+        int bundlePreparationSeconds = DefaultBundlePreparationSeconds)
+    {
+        int connectorTimeoutSeconds = BoundedTimeout(request.TimeoutSeconds, 30, 600);
+        int preparationSeconds = string.IsNullOrWhiteSpace(request.BundlePath) ? 15 : bundlePreparationSeconds;
+        return new CallOptions(
+            KautukaGrpcCorrelationMetadata.CreateClientHeaders(),
+            deadline: utcNow.AddSeconds(connectorTimeoutSeconds).AddSeconds(preparationSeconds),
+            cancellationToken: cancellationToken);
+    }
 
     public Task<WorkspaceMcpContainerListToolsResponse> ListMcpContainerToolsAsync(WorkspaceMcpContainerCallRequest request, CancellationToken cancellationToken = default)
         => Call("ListMcpContainerTools", () => client.ListMcpContainerToolsAsync(request, headers: KautukaGrpcCorrelationMetadata.CreateClientHeaders(), deadline: DateTime.UtcNow.AddSeconds(BoundedTimeout(request.TimeoutSeconds, 30, 600) + 15), cancellationToken: cancellationToken).ResponseAsync);
 
     public Task<WorkspaceMcpContainerCallResponse> CallMcpContainerToolAsync(WorkspaceMcpContainerCallRequest request, CancellationToken cancellationToken = default)
-        => Call("CallMcpContainerTool", () => client.CallMcpContainerToolAsync(request, headers: KautukaGrpcCorrelationMetadata.CreateClientHeaders(), deadline: DateTime.UtcNow.AddSeconds(BoundedTimeout(request.TimeoutSeconds, 30, 3600) + 15), cancellationToken: cancellationToken).ResponseAsync);
+        => Call("CallMcpContainerTool", () => client.CallMcpContainerToolAsync(request,
+            BuildToolCallOptions(request, DateTime.UtcNow, cancellationToken, bundlePreparationBudget)).ResponseAsync);
+
+    internal static CallOptions BuildToolCallOptions(WorkspaceMcpContainerCallRequest request, DateTime utcNow,
+        CancellationToken cancellationToken, int bundlePreparationSeconds = DefaultBundlePreparationSeconds)
+    {
+        int toolTimeoutSeconds = BoundedTimeout(request.TimeoutSeconds, 30, 3600);
+        int preparationSeconds = request.ExecutionContext == WorkspaceMcpExecutionContext.AgentSandbox
+            ? bundlePreparationSeconds : 15;
+        return new CallOptions(KautukaGrpcCorrelationMetadata.CreateClientHeaders(),
+            deadline: utcNow.AddSeconds(toolTimeoutSeconds).AddSeconds(preparationSeconds),
+            cancellationToken: cancellationToken);
+    }
 
     public Task<DesiredStateUpdateResponse> UpdateDesiredStateAsync(ManagerDesiredStateUpdateRequest request, CancellationToken cancellationToken = default)
         => Call("UpdateDesiredState", () => client.UpdateDesiredStateAsync(

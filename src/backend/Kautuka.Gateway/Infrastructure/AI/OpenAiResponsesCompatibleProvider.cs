@@ -14,7 +14,8 @@ internal sealed class OpenAiResponsesCompatibleProvider(
     IRunLimitResolver? runLimitResolver = null,
     string? defaultBaseUrl = null,
     HttpMessageHandler? transportHandler = null,
-    INetworkAccessChecker? checker = null) : IAiClientProvider
+    INetworkAccessChecker? checker = null,
+    Func<INetworkAccessChecker?, HttpMessageHandler>? transportFactory = null) : IAiClientProvider
 {
     public string ProviderType => "openai-responses";
 
@@ -32,8 +33,9 @@ internal sealed class OpenAiResponsesCompatibleProvider(
         }
 
 #pragma warning disable CA2000 // Owned by chat client
-        HttpMessageHandler effectiveHandler = transportHandler
-            ?? new NetworkAccessCheckHandler(checker ?? FailClosedNetworkAccessChecker.Instance, new SocketsHttpHandler { AllowAutoRedirect = false });
+        HttpMessageHandler effectiveHandler = transportHandler ?? (transportFactory is null
+            ? new NetworkAccessCheckHandler(checker ?? FailClosedNetworkAccessChecker.Instance, new SocketsHttpHandler { AllowAutoRedirect = false })
+            : transportFactory(checker) ?? throw new InvalidOperationException("Configured model transport returned no handler."));
 
 #pragma warning disable OPENAI001
         IChatClient inner = new OpenAIClient(
@@ -47,24 +49,32 @@ internal sealed class OpenAiResponsesCompatibleProvider(
 #pragma warning restore CA2000
     }
 
-    public Task<IReadOnlyList<DiscoveredModelDefinition>> DiscoverModelsAsync(
+    public async Task<IReadOnlyList<DiscoveredModelDefinition>> DiscoverModelsAsync(
         JsonObject settings,
         string? apiKey,
         bool throwOnFailure = false,
         CancellationToken cancellationToken = default)
     {
 #pragma warning disable CA2000 // Passed to DiscoverModelsAsync
-        HttpMessageHandler effectiveHandler = transportHandler
-            ?? new NetworkAccessCheckHandler(checker ?? FailClosedNetworkAccessChecker.Instance, new SocketsHttpHandler { AllowAutoRedirect = false });
+        HttpMessageHandler effectiveHandler = transportHandler ?? (transportFactory is null
+            ? new NetworkAccessCheckHandler(checker ?? FailClosedNetworkAccessChecker.Instance, new SocketsHttpHandler { AllowAutoRedirect = false })
+            : transportFactory(checker) ?? throw new InvalidOperationException("Configured model transport returned no handler."));
 
-        return OpenAiCompatibleEndpoint.DiscoverModelsAsync(
-            settings,
-            apiKey,
-            defaultBaseUrl,
-            runLimitResolver,
-            throwOnFailure,
-            cancellationToken,
-            effectiveHandler);
+        try
+        {
+            return await OpenAiCompatibleEndpoint.DiscoverModelsAsync(
+                settings,
+                apiKey,
+                defaultBaseUrl,
+                runLimitResolver,
+                throwOnFailure,
+                cancellationToken,
+                effectiveHandler).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (transportHandler is null) effectiveHandler.Dispose();
+        }
 #pragma warning restore CA2000
     }
 }

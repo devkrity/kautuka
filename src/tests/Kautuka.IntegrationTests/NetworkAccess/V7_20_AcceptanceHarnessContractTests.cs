@@ -22,13 +22,13 @@ public sealed class V7_20_AcceptanceHarnessContractTests
         Assert.Contains("NetworkAccessTopologyGateTests", productionProof, StringComparison.Ordinal);
         Assert.DoesNotContain("File.WriteAllTextAsync(corefilePath", productionProof, StringComparison.Ordinal);
 
-        int dnsProbeHost = productionProof.IndexOf("string dnsProbeHostName = $\"dns-proof-{Guid.NewGuid():N}.{lanHostAddress}.nip.io\"", StringComparison.Ordinal);
+        int dnsProbeHost = productionProof.IndexOf("dnsProbeHostName = $\"dns-proof-{Guid.NewGuid():N}.{lanHostAddress}.nip.io\"", StringComparison.Ordinal);
         int dnsProbeRule = productionProof.IndexOf("dnsProbeHostName, \"host\", 8443, Allowed: true, AllowLan: true", StringComparison.Ordinal);
         int upstreamConntrackClear = productionProof.IndexOf("foreach (string upstreamAddress in dnsProbeUpstreamAddresses)", StringComparison.Ordinal);
-        int liveCounterBefore = productionProof.IndexOf("string dnsProbeCountersBefore = await RunPodNftListEgressAsync", StringComparison.Ordinal);
+        int liveCounterBefore = productionProof.IndexOf("dnsProbeCountersBefore = await RunPodNftListEgressAsync", StringComparison.Ordinal);
         int uniqueApprovedLookup = productionProof.IndexOf("[\"exec\", wlName, \"curl\", \"--insecure\", \"--silent\", \"--show-error\", \"--max-time\", \"8\", \"https://\" + dnsProbeHostName", StringComparison.Ordinal);
-        int liveCounterAfter = productionProof.IndexOf("string dnsProbeCountersAfter = await RunPodNftListEgressAsync", StringComparison.Ordinal);
-        int dnsPositiveDelta = productionProof.IndexOf("long dnsProbeDelta = dnsProbePacketsAfter - dnsProbePacketsBefore", StringComparison.Ordinal);
+        int liveCounterAfter = productionProof.IndexOf("dnsProbeCountersAfter = await RunPodNftListEgressAsync", StringComparison.Ordinal);
+        int dnsPositiveDelta = productionProof.IndexOf("dnsProbeDelta = dnsProbePacketsAfter - dnsProbePacketsBefore", StringComparison.Ordinal);
         Assert.True(dnsProbeHost >= 0 && dnsProbeRule > dnsProbeHost && upstreamConntrackClear > dnsProbeRule,
             "A unique per-run host must have an approved LAN rule and its resolver conntrack flows must be cleared first.");
         Assert.True(liveCounterBefore > upstreamConntrackClear && uniqueApprovedLookup > liveCounterBefore
@@ -40,9 +40,16 @@ public sealed class V7_20_AcceptanceHarnessContractTests
         Assert.Contains("exitCode != 0 && removedFlowCount == 0", source, StringComparison.Ordinal);
         Assert.Contains("Operation failed: Permission denied", source, StringComparison.Ordinal);
         Assert.Contains("command not found", source, StringComparison.Ordinal);
-        Assert.Contains("if (!dnsProbeBodyReceived || dnsProbeDelta <= 0)", productionProof, StringComparison.Ordinal);
-        Assert.Contains("dnsProbeBodyReceived = dnsProbeRc == 0 && dnsProbeBody.Contains(\"NAC LAN fixture ok\"", productionProof, StringComparison.Ordinal);
-        Assert.Contains("policyStore.DeleteRule(admin, dnsProbeRule.Id", productionProof, StringComparison.Ordinal);
+        Assert.Contains("for (int dnsAttempt = 1; dnsAttempt <= 2; dnsAttempt++)", productionProof, StringComparison.Ordinal);
+        Assert.Contains("foreach (string protocol in new[] { \"udp\", \"tcp\" })", productionProof, StringComparison.Ordinal);
+        Assert.Contains("if (!dnsProbeBodyReceived || dnsProbeDelta < 0 || (dnsProbeDelta == 0 && dnsAttempt == 2))", productionProof, StringComparison.Ordinal);
+        Assert.Contains("dnsProbeBodyReceived = dnsProbeRc == 0 && string.Equals(dnsProbeBody, \"NAC LAN fixture ok\"", productionProof, StringComparison.Ordinal);
+        int dnsProbeFinally = productionProof.IndexOf("finally", dnsPositiveDelta, StringComparison.Ordinal);
+        int dnsProbeCleanup = productionProof.IndexOf("policyStore.DeleteRule(admin, dnsProbeRule.Id", dnsProbeFinally, StringComparison.Ordinal);
+        Assert.True(dnsProbeFinally > dnsPositiveDelta && dnsProbeCleanup > dnsProbeFinally,
+            "Every attempt must remove its temporary approval in a finally block.");
+        Assert.Contains("removed temporary DNS probe rule; attempt=", productionProof, StringComparison.Ordinal);
+        Assert.Contains("retrying once with a fresh hostname", productionProof, StringComparison.Ordinal);
         Assert.Contains("delta_gt0={dnsProbeDelta > 0}:body={hasExampleDomain}", productionProof, StringComparison.Ordinal);
         Assert.Contains("body={hasExampleDomain}", productionProof, StringComparison.Ordinal);
 

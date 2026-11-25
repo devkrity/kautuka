@@ -335,12 +335,15 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
 
   // ──────────────── UX2: Allow and Keep Blocked Decisions ────────────────
   describe('UX2: decisions and retry outcomes', () => {
-    it('Allow submits agent-scope decision, and Keep Blocked submits allow:false decision', async () => {
+    it.each([
+      ['user-ravi', 'Access approved. Try again.'],
+      ['another-user', 'Access approved. They can try again.'],
+    ])('shows the retry notice for requester %s and submits one decision', async (requester, notice) => {
       const user = userEvent.setup();
       const requestsData = createDefaultRequests([
         {
           id: 'req-1',
-          userId: 'user-ravi',
+          userId: requester,
           userDisplayName: 'Ravi',
           agentId: 'agent-1',
           agentDisplayName: 'Search Agent',
@@ -363,6 +366,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       const allowBtn = await screen.findByRole('button', { name: /^Allow (?:.+ to access this site|access)$/ });
       const keepBlockedBtn = screen.getByRole('button', { name: /Keep blocked/i });
 
+      post.mockResolvedValueOnce({ data: { revision: 2, rule: { allowed: true } } });
       // Click Allow
       await user.click(allowBtn);
       await waitFor(() =>
@@ -375,6 +379,8 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
           })
         )
       );
+      expect(await screen.findByText(notice)).toBeVisible();
+      expect(post).toHaveBeenCalledTimes(1);
 
       // Click Keep Blocked
       await user.click(keepBlockedBtn);
@@ -527,9 +533,20 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       });
     });
 
-    it('non-admin still cannot decide another user request marked as waiting for admin', async () => {
-      mockViewer.id = 'user-ravi';
-      mockViewer.displayName = 'Ravi';
+    it.each([
+      {
+        viewerId: 'user-alice',
+        viewerName: 'Alice',
+        notice: /Ask an administrator to approve this request or grant that permission/,
+      },
+      {
+        viewerId: 'user-ravi',
+        viewerName: 'Ravi',
+        notice: /Waiting for an administrator to approve/i,
+      },
+    ])('shows the next step for $viewerName without offering approval controls', async ({ viewerId, viewerName, notice }) => {
+      mockViewer.id = viewerId;
+      mockViewer.displayName = viewerName;
       mockViewer.role = 'user';
 
       const requestsData = createDefaultRequests([
@@ -558,7 +575,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       renderComponent(<NetworkAccessPage />);
 
       const card = await screen.findByTestId('request-card-req-owner-needs-admin');
-      expect(within(card).getByText(/Waiting for an administrator to approve/i)).toBeVisible();
+      expect(within(card).getByText(notice)).toBeVisible();
       expect(within(card).queryByRole('button', { name: /^Allow (?:.+ to access this site|access)$/ })).not.toBeInTheDocument();
       expect(within(card).queryByRole('button', { name: /Keep blocked/i })).not.toBeInTheDocument();
     });
@@ -594,12 +611,14 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
 
       renderComponent(<NetworkAccessPage />);
 
-      const allowBtn = await screen.findByRole('button', { name: /^Allow (?:.+ to access this site|access)$/ });
+      const allowBtn = await screen.findByRole('button', { name: 'Allow this site for everything I use' });
       await user.click(allowBtn);
 
       expect(
         await screen.findByText(/The policy changed while you were editing\. The latest policy has been loaded; review it and try again\./)
       ).toBeVisible();
+      expect(screen.queryByText(/can now reach/)).not.toBeInTheDocument();
+      expect(allowBtn).toBeEnabled();
     });
   });
 

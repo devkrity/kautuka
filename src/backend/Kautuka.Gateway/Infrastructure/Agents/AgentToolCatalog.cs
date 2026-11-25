@@ -202,7 +202,7 @@ internal sealed class AgentToolCatalog(
         foreach ((string connectorId, string endpoint) in endpoints)
         {
             McpServerDefinition? server = current.McpServers.FirstOrDefault(item => string.Equals(item.Id, connectorId, StringComparison.Ordinal));
-            if (server is null) continue;
+            if (server is null || server.Transport != McpTransport.Http) continue;
             bool personal = !string.Equals(server.HttpUrl?.AbsoluteUri, endpoint, StringComparison.Ordinal);
             bool includeSystem = !personal && !string.Equals(server.Scope, GatewayOwnershipScopes.User, StringComparison.OrdinalIgnoreCase);
             revisions.Add((connectorId, credentialRevisions.Get(connectorId, context.UserId ?? string.Empty, includeSystem)));

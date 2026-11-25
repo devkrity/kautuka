@@ -42,10 +42,6 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
     // Tracks every container spawned during reconcile so StopAsync can shut them all down.
     private readonly ConcurrentDictionary<string, byte> trackedContainers = new(StringComparer.OrdinalIgnoreCase);
 
-    // Tracks container connector lifecycle and JIT cooldown state: connector_id -> (container_name, last_startup_time)
-    private readonly ConcurrentDictionary<string, (string? ContainerName, DateTime LastStartupTime)> mcpContainerConnectors =
-        new(StringComparer.OrdinalIgnoreCase);
-
     private readonly WorkspaceReadinessGate readinessGate = readinessGate;
     private readonly ChannelReader<byte> idleTrigger = execTracker.IdleTrigger;
     private readonly ChannelReader<WorkspaceReconcileTriggerKind> desiredStateTrigger = desiredStateStore.Updates;
@@ -90,9 +86,11 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
     {
         using var triggerCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
 
-        TimeSpan normalDelay = readinessGate.IsReady ? driftAuditInterval : recoveryRetryInterval;
+        bool recovering = !readinessGate.IsReady
+            || desiredStateStore.Snapshot.LastFailureClass == "connector_reconcile_deferred";
+        TimeSpan normalDelay = recovering ? recoveryRetryInterval : driftAuditInterval;
         TimeSpan nextDelay = GetNextReconcileDelay(normalDelay);
-        if (!readinessGate.IsReady)
+        if (recovering)
         {
             LogRecoveryRetryScheduled(logger, (int)nextDelay.TotalSeconds);
         }
@@ -102,7 +100,7 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
         Task<WorkspaceReconcileTriggerKind> desiredStateTask = desiredStateTrigger.ReadAsync(triggerCts.Token).AsTask();
 
         Task completed = await Task.WhenAny(delayTask, idleTask, desiredStateTask).ConfigureAwait(false);
-        WorkspaceReconcileTriggerKind trigger = ResolveReconcileTrigger(completed, idleTask, desiredStateTask, readinessGate.IsReady);
+        WorkspaceReconcileTriggerKind trigger = ResolveReconcileTrigger(completed, idleTask, desiredStateTask, !recovering);
 
         await triggerCts.CancelAsync().ConfigureAwait(false);
         await ObserveCanceledWaitAsync(delayTask).ConfigureAwait(false);
@@ -311,7 +309,7 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
         Stopwatch sandboxStartupStopwatch = Stopwatch.StartNew();
         var sandboxFailures = new ConcurrentQueue<string>();
         await Parallel.ForEachAsync(
-            desiredWorkspaces,
+            desiredWorkspaces.Where(static workspace => !workspace.IsSkillScope()),
             new ParallelOptions
             {
                 MaxDegreeOfParallelism = sandboxMaxParallelism,
@@ -353,16 +351,24 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
             return;
         }
 
-        // Reconcile containerized MCP connectors (Phase 2c: JIT startup with cooldown)
-        await ReconcileContainerConnectorsAsync(snapshot.DesiredContainerConnectors, cancellationToken).ConfigureAwait(false);
-        IReadOnlyList<string> connectorNotes = await connectorExecutionService.ReconcileDesiredConnectorsAsync(
+        RecordConnectorMaterialization(snapshot.DesiredContainerConnectors, cancellationToken);
+        var connectorResult = await connectorExecutionService.ReconcileDesiredConnectorsAsync(
             snapshot.DesiredContainerConnectors,
-            cancellationToken).ConfigureAwait(false);
+            snapshot,
+            cancellationToken,
+            connectorOrphanResult.RetainedConnectorNames).ConfigureAwait(false);
         desiredStateStore.ReplaceDriftActions([
             .. sidecarSupervisor.TakeDriftNotes(),
             .. connectorExecutionService.TakeSandboxDriftNotes(),
-            .. connectorNotes,
+            .. connectorResult.Notes,
         ]);
+
+        if (!connectorResult.Complete)
+        {
+            MarkFailed(snapshot, "connector_reconcile_deferred");
+            SignalRuntimeReady();
+            return;
+        }
 
         if (!desiredStateStore.TryMarkReconciled(snapshot.AcceptedVersion, triggerKind, DateTimeOffset.UtcNow))
         {
@@ -393,6 +399,7 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
 
     private async Task TryReconcileAsync(WorkspaceReconcileTriggerKind triggerKind, CancellationToken cancellationToken)
     {
+        long startedAt = Stopwatch.GetTimestamp();
         try
         {
             await ReconcileAsync(triggerKind, cancellationToken).ConfigureAwait(false);
@@ -406,6 +413,10 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
             WorkspaceDesiredStateSnapshot snapshot = desiredStateStore.Snapshot;
             MarkFailed(snapshot, ClassifyFailure(ex));
             LogReconcileLoopFailed(logger, ex);
+        }
+        finally
+        {
+            logger.LogDebug("Workspace reconcile triggered by {Trigger} took {ElapsedMs:F1} ms.", triggerKind, Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);
         }
     }
 
@@ -432,41 +443,15 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
             new SandboxRuntimeDefinition(),
             new WorkspaceTelemetryDefinition());
 
-    private Task ReconcileContainerConnectorsAsync(
+    private void RecordConnectorMaterialization(
         IReadOnlyList<WorkspaceMcpContainerConnectorDefinition> desiredConnectors,
         CancellationToken cancellationToken)
     {
-        // Phase 2c: Track desired container connector state
-        // Full lifecycle management (startup, readiness checks, shutdown) deferred to Phase 3
-        // For now: update tracking and log desired state
-
-        var desiredConnectorIds = new HashSet<string>(desiredConnectors.Select(c => c.ConnectorId), StringComparer.OrdinalIgnoreCase);
-
-        // Remove connectors no longer in desired state
-        var staleConnectorIds = mcpContainerConnectors.Keys
-            .Where(id => !desiredConnectorIds.Contains(id))
-            .ToList();
-        foreach (var staleId in staleConnectorIds)
-        {
-            mcpContainerConnectors.TryRemove(staleId, out _);
-            _ = desiredStateStore.TryTransitionConnectorState(
-                staleId,
-                WorkspaceMcpContainerLifecycleState.Deleted,
-                "removed-from-desired-state");
-            LogMcpConnectorRemoved(logger, staleId);
-        }
-
-        // Register/update desired connectors
         foreach (var connector in desiredConnectors)
         {
             if (cancellationToken.IsCancellationRequested) break;
             if (connector.Enabled)
             {
-                mcpContainerConnectors.AddOrUpdate(
-                    connector.ConnectorId,
-                    (null, DateTime.MinValue),
-                    (_, existing) => existing);
-
                 WorkspaceMcpContainerRuntimeStatus? status = desiredStateStore.GetConnectorStatus(connector.ConnectorId);
                 if (status is null || status.State == WorkspaceMcpContainerLifecycleState.Imported)
                 {
@@ -479,8 +464,6 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
                 LogMcpConnectorDesired(logger, connector.ConnectorId, connector.Image, connector.JitCooldownSeconds);
             }
         }
-
-        return Task.CompletedTask;
     }
 
     private static string BuildWorkspaceKey(string scopeType, string scopeId)

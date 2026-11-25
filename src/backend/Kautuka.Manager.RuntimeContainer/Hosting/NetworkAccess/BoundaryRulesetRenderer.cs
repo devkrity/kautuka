@@ -1,7 +1,4 @@
-using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
-using System.Text.Json.Nodes;
 using System.Globalization;
 
 using Kautuka.NetworkAccessController;
@@ -15,6 +12,7 @@ namespace Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 public static class BoundaryRulesetRenderer
 {
     public const string BoundaryTableName = "kautuka_egress";
+    internal const int GatewayConnectPort = WorkloadRulesetRenderer.GatewayConnectPort;
 
     public static readonly IReadOnlyList<string> RequiredBoundaryComments =
     [
@@ -73,7 +71,9 @@ public static class BoundaryRulesetRenderer
     public static string RenderBoundaryNft(
         bool includeLanGrants = false,
         string? decisionEndpointIp = null,
-        IEnumerable<string>? upstreamDnsIps = null)
+        IEnumerable<string>? upstreamDnsIps = null,
+        bool includeGatewayConnect = false,
+        bool includeApplianceTelemetry = false)
     {
         string decisionEndpointRule = !string.IsNullOrWhiteSpace(decisionEndpointIp)
             ? $"    ip daddr {decisionEndpointIp.Trim()} tcp dport 50051 counter accept comment \"decision_endpoint\""
@@ -86,6 +86,10 @@ public static class BoundaryRulesetRenderer
             : string.Empty;
 
         string privateRejectRule = NetworkAddressClassifier.RenderNftPrivateRejectRule();
+        string gatewayConnectMatch = FormattableString.Invariant(
+            $"ip saddr {WorkloadRulesetRenderer.ApplianceGatewayIp} ip daddr {EgressTopologyManager.EgressPodIp} tcp dport {GatewayConnectPort}");
+        string telemetryMatch = FormattableString.Invariant(
+            $"ip saddr {{ {WorkloadRulesetRenderer.ApplianceGatewayIp}, {WorkloadRulesetRenderer.ApplianceWebHostIp}, {WorkloadRulesetRenderer.ApplianceCredentialsHostIp}, {WorkloadRulesetRenderer.ApplianceChannelHostIp}, {WorkloadRulesetRenderer.ApplianceUpdateServiceIp} }} ip daddr {EgressTopologyManager.EgressPodIp} tcp dport {WorkloadRulesetRenderer.TelemetryIngressPort}");
 
         var sb = new StringBuilder();
         sb.AppendLine("table ip kautuka_egress");
@@ -94,6 +98,10 @@ public static class BoundaryRulesetRenderer
         sb.AppendLine("  chain prerouting {");
         sb.AppendLine("    type nat hook prerouting priority dstnat; policy accept;");
         sb.AppendLine("    ip saddr 10.247.0.0/16 ip daddr 10.247.0.2 tcp dport 53 counter return");
+        if (includeGatewayConnect)
+            sb.Append("    ").Append(gatewayConnectMatch).AppendLine(" counter return comment \"gateway_connect_no_redirect\"");
+        if (includeApplianceTelemetry)
+            sb.Append("    ").Append(telemetryMatch).AppendLine(" counter return comment \"telemetry_no_redirect\"");
         sb.AppendLine("    ip saddr 10.247.0.0/16 meta l4proto tcp counter redirect to :15001");
         sb.AppendLine("  }");
         sb.AppendLine("  chain forward {");
@@ -106,6 +114,10 @@ public static class BoundaryRulesetRenderer
         sb.AppendLine("    ct state established,related accept");
         sb.AppendLine("    ip saddr 10.247.0.0/16 tcp dport 15001 accept");
         sb.AppendLine("    ip saddr 10.247.0.0/16 ip daddr 10.247.0.2 meta l4proto { tcp, udp } th dport 53 accept");
+        if (includeGatewayConnect)
+            sb.Append("    ").Append(gatewayConnectMatch).AppendLine(" counter accept comment \"gateway_connect_ingress\"");
+        if (includeApplianceTelemetry)
+            sb.Append("    ").Append(telemetryMatch).AppendLine(" counter accept comment \"telemetry_ingress\"");
         sb.AppendLine("    counter drop");
         sb.AppendLine("  }");
         sb.AppendLine("  chain output {");
@@ -126,6 +138,8 @@ public static class BoundaryRulesetRenderer
             sb.AppendLine(lanApprovedRule);
         }
         sb.AppendLine(CultureInfo.InvariantCulture, $"    ip daddr {WorkloadRulesetRenderer.PackageProxyIp} tcp dport {WorkloadRulesetRenderer.PackageProxyPort} counter accept comment \"package_proxy_cluster\"");
+        if (includeApplianceTelemetry)
+            sb.AppendLine(CultureInfo.InvariantCulture, $"    ip daddr {WorkloadRulesetRenderer.ObservabilityIp} tcp dport {WorkloadRulesetRenderer.ObservabilityPort} counter accept comment \"telemetry_cluster\"");
         sb.Append("    ").AppendLine(privateRejectRule);
         sb.AppendLine("    ip daddr 10.247.0.0/16 counter reject comment \"wl_net_reject\"");
         sb.AppendLine("    accept");
@@ -198,9 +212,12 @@ public static class BoundaryRulesetRenderer
     /// </summary>
     public static string RenderEnvoyConfig(
         string adminSocketPath = "/run/kautuka-admin/admin.sock",
-        bool isWindowsMtls = false)
+        bool isWindowsMtls = false,
+        bool includeGatewayConnect = false,
+        bool includeApplianceTelemetry = false)
     {
         string template = ResolveTemplate("envoy.static.yaml.tmpl");
+        string gatewayConnect = includeGatewayConnect ? RenderGatewayConnectListener() : string.Empty;
 
         string clusterSnippet = isWindowsMtls
             ? WindowsManagerAuthorizationClusterYaml
@@ -217,6 +234,12 @@ public static class BoundaryRulesetRenderer
         ];
 
         string rendered = template
+            .Replace("{{GATEWAY_CONNECT_LISTENER}}", gatewayConnect, StringComparison.Ordinal)
+            .Replace("{{AUTHORIZATION_DEADLINE}}", "35s", StringComparison.Ordinal)
+            .Replace("{{GATEWAY_STREAM_IDLE_DEADLINE}}", "300s", StringComparison.Ordinal)
+            .Replace("{{TELEMETRY_LISTENER}}", includeApplianceTelemetry ? RenderTelemetryListener() : string.Empty, StringComparison.Ordinal)
+            .Replace("{{TELEMETRY_SECRET}}", includeApplianceTelemetry ? TelemetrySecretYaml : string.Empty, StringComparison.Ordinal)
+            .Replace("{{TELEMETRY_CLUSTER}}", includeApplianceTelemetry ? RenderTelemetryCluster() : string.Empty, StringComparison.Ordinal)
             .Replace("{{ADMIN_SOCKET_PATH}}", adminSocketPath, StringComparison.Ordinal)
             .Replace("{{LAN_SOURCE_IP}}", EgressTopologyManager.OutsideLanSourceIp, StringComparison.Ordinal)
             .Replace("{{MANAGER_AUTHORIZATION_CLUSTER}}", clusterSnippet, StringComparison.Ordinal);
@@ -225,6 +248,104 @@ public static class BoundaryRulesetRenderer
         rendered = ReplaceIndentedPlaceholder(rendered, "{{RESOLVED_FILTER_LAN}}", lanCidrs);
 
         return rendered;
+    }
+
+    internal const string TelemetrySecretFileName = "otlp-ingestion";
+    private const string TelemetrySecretYaml = """
+      secrets:
+        - name: appliance_otlp_ingestion
+          generic_secret:
+            secret:
+              filename: /etc/kautuka-envoy/otlp-ingestion
+
+    """;
+
+    private static string RenderTelemetryListener()
+    {
+        return FormattableString.Invariant($"""
+        - name: appliance_telemetry
+          address:
+            socket_address:
+              address: {EgressTopologyManager.EgressPodIp}
+              port_value: {WorkloadRulesetRenderer.TelemetryIngressPort}
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: appliance_telemetry
+                    normalize_path: true
+                    path_with_escaped_slashes_action: REJECT_REQUEST
+                    route_config:
+                      name: telemetry_ingestion
+                      virtual_hosts:
+                        - name: observability
+                          domains: ["*"]
+                          routes:
+                            - match:
+                                safe_regex:
+                                  regex: '^/api/default/v1/(logs|metrics|traces)$'
+                                headers:
+                                  - name: ":method"
+                                    string_match:
+                                      exact: "POST"
+                              route:
+                                cluster: appliance_observability
+                            - match:
+                                prefix: "/"
+                              direct_response:
+                                status: 404
+                    http_filters:
+                      - name: envoy.filters.http.credential_injector
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.credential_injector.v3.CredentialInjector
+                          overwrite: true
+                          credential:
+                            name: envoy.http.injected_credentials.generic
+                            typed_config:
+                              "@type": type.googleapis.com/envoy.extensions.http.injected_credentials.generic.v3.Generic
+                              credential:
+                                name: appliance_otlp_ingestion
+                              header_value_prefix: "Basic "
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+    """);
+    }
+
+    private static string RenderTelemetryCluster() => FormattableString.Invariant($"""
+        - name: appliance_observability
+          type: STATIC
+          connect_timeout: 1s
+          load_assignment:
+            cluster_name: appliance_observability
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: {WorkloadRulesetRenderer.ObservabilityIp}
+                          port_value: {WorkloadRulesetRenderer.ObservabilityPort}
+
+    """);
+
+    private static string RenderGatewayConnectListener()
+    {
+        string filter = ResolveTemplate("envoy.gateway-connect-dfp.yaml.tmpl").TrimEnd('\r', '\n') + "\n";
+        string publicFilter = filter
+            .Replace("{{CLASS}}", "public", StringComparison.Ordinal)
+            .Replace("{{CACHE}}", "dfp_cache", StringComparison.Ordinal)
+            .Replace("{{FILTER}}", "{{RESOLVED_FILTER_PUBLIC}}", StringComparison.Ordinal);
+        string lanFilter = filter
+            .Replace("{{CLASS}}", "lan", StringComparison.Ordinal)
+            .Replace("{{CACHE}}", "dfp_cache_lan", StringComparison.Ordinal)
+            .Replace("{{FILTER}}", "{{RESOLVED_FILTER_LAN}}", StringComparison.Ordinal);
+        return ResolveTemplate("envoy.gateway-connect.yaml.tmpl")
+            .Replace("{{GATEWAY_CONNECT_IP}}", EgressTopologyManager.EgressPodIp, StringComparison.Ordinal)
+            .Replace("{{GATEWAY_CONNECT_PORT}}", GatewayConnectPort.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal)
+            .Replace("{{GATEWAY_CONNECT_DFP_FILTERS}}", publicFilter + lanFilter, StringComparison.Ordinal)
+            .TrimEnd('\r', '\n') + "\n";
     }
 
     public static string RenderEnvoyAddressRangesYaml(IEnumerable<string> cidrs, string indent)
@@ -319,158 +440,10 @@ public static class BoundaryRulesetRenderer
         throw new FileNotFoundException($"Embedded template resource '{resourceName}' not found in assembly '{assembly.FullName}'.");
     }
 
-    /// <summary>
-    /// Computes a canonical SHA-256 hash from <c>nft -j list table ...</c> JSON output.
-    /// Strips transient runtime state (<c>handle</c>, <c>metainfo</c>, and dynamic packet/byte counts),
-    /// verifies that all required comment tags and the workload IP (when specified) are present,
-    /// and hashes the canonicalized JSON tree.
-    /// </summary>
+    /// <summary>Computes the normalized hash used to verify a live nftables ruleset.</summary>
     public static string ComputeCanonicalNftJsonHash(
         string nftJsonOutput,
         IReadOnlyList<string>? requiredComments = null,
         string? requiredWorkloadIp = null)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(nftJsonOutput);
-        JsonNode root = JsonNode.Parse(nftJsonOutput)
-            ?? throw new InvalidOperationException("Failed to parse nft JSON output.");
-
-        var foundComments = new HashSet<string>(StringComparer.Ordinal);
-        bool foundWorkloadIp = false;
-
-        JsonArray nftablesArray;
-        if (root is JsonObject obj && obj["nftables"] is JsonArray arr)
-        {
-            nftablesArray = arr;
-        }
-        else if (root is JsonArray directArr)
-        {
-            nftablesArray = directArr;
-        }
-        else
-        {
-            throw new InvalidOperationException("Unexpected nft JSON root element.");
-        }
-
-        var canonicalArray = new JsonArray();
-        foreach (JsonNode? item in nftablesArray)
-        {
-            if (item is null)
-            {
-                continue;
-            }
-
-            // Omit metainfo object entirely (timestamp, version, etc.)
-            if (item is JsonObject itemObj && itemObj.ContainsKey("metainfo"))
-            {
-                continue;
-            }
-
-            JsonNode canonicalNode = CanonicalizeNode(item, foundComments, ref foundWorkloadIp, requiredWorkloadIp);
-            canonicalArray.Add(canonicalNode);
-        }
-
-        // Verify required comments:
-        if (requiredComments is not null)
-        {
-            foreach (string required in requiredComments)
-            {
-                if (!foundComments.Contains(required))
-                {
-                    throw new InvalidOperationException($"Canonical nft verification failed: missing required comment tag '{required}'.");
-                }
-            }
-        }
-
-        // Verify required workload IP:
-        if (!string.IsNullOrWhiteSpace(requiredWorkloadIp) && !foundWorkloadIp)
-        {
-            throw new InvalidOperationException($"Canonical nft verification failed: workload IP '{requiredWorkloadIp}' was not found in spoof_drop rule.");
-        }
-
-        var options = new JsonSerializerOptions { WriteIndented = false };
-        string canonicalJson = canonicalArray.ToJsonString(options);
-        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalJson)));
-    }
-
-    private static JsonNode CanonicalizeNode(
-        JsonNode node,
-        HashSet<string> foundComments,
-        ref bool foundWorkloadIp,
-        string? expectedIp)
-    {
-        if (node is JsonObject obj)
-        {
-            var canonicalObj = new JsonObject();
-            // Sort keys deterministically:
-            var sortedKeys = obj.Select(kv => kv.Key).OrderBy(k => k, StringComparer.Ordinal).ToList();
-
-            foreach (string key in sortedKeys)
-            {
-                // Strip dynamic/ephemeral handle:
-                if (string.Equals(key, "handle", StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                JsonNode? child = obj[key];
-                if (child is null)
-                {
-                    canonicalObj[key] = null;
-                    continue;
-                }
-
-                // Check comments:
-                if (string.Equals(key, "comment", StringComparison.Ordinal) && child is JsonValue commentVal)
-                {
-                    string? commentStr = commentVal.GetValue<string?>();
-                    if (!string.IsNullOrWhiteSpace(commentStr))
-                    {
-                        foundComments.Add(commentStr.Trim());
-                    }
-                }
-
-                // Canonicalize counter objects (zero packets and bytes):
-                if (string.Equals(key, "counter", StringComparison.Ordinal))
-                {
-                    var zeroCounter = new JsonObject
-                    {
-                        ["bytes"] = 0,
-                        ["packets"] = 0,
-                    };
-                    canonicalObj[key] = zeroCounter;
-                    continue;
-                }
-
-                // Detect IP match in expressions:
-                if (!string.IsNullOrWhiteSpace(expectedIp))
-                {
-                    string childText = child.ToJsonString();
-                    if (childText.Contains(expectedIp, StringComparison.Ordinal))
-                    {
-                        foundWorkloadIp = true;
-                    }
-                }
-
-                canonicalObj[key] = CanonicalizeNode(child, foundComments, ref foundWorkloadIp, expectedIp);
-            }
-
-            return canonicalObj;
-        }
-
-        if (node is JsonArray arr)
-        {
-            var canonicalArr = new JsonArray();
-            foreach (JsonNode? item in arr)
-            {
-                if (item is not null)
-                {
-                    canonicalArr.Add(CanonicalizeNode(item, foundComments, ref foundWorkloadIp, expectedIp));
-                }
-            }
-
-            return canonicalArr;
-        }
-
-        return node.DeepClone();
-    }
+        => NftRulesetCanonicalizer.ComputeHash(nftJsonOutput, requiredComments, requiredWorkloadIp);
 }

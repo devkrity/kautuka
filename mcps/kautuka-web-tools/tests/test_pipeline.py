@@ -1,10 +1,77 @@
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 
+import httpx
 import pytest
 
-from kautuka_web_tools.pipeline import FetchOptions, build_payload, build_selected_chunks, chunk_sections, normalize_markdown, normalize_options, parse_sections, rank_chunks
+from kautuka_web_tools import pipeline
+from kautuka_web_tools.pipeline import FetchError, FetchOptions, build_payload, build_selected_chunks, chunk_sections, fetch_url, normalize_markdown, normalize_options, parse_sections, rank_chunks
+
+
+@pytest.mark.asyncio
+async def test_fetch_reports_redirect_target_when_connection_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "www.example.com":
+            return httpx.Response(302, headers={"Location": "https://edition.example.com/"})
+        raise httpx.ReadError("")
+
+    monkeypatch.setattr(httpx, "AsyncClient", partial(httpx.AsyncClient, transport=httpx.MockTransport(respond)))
+
+    with pytest.raises(FetchError) as error:
+        await fetch_url("https://www.example.com/", FetchOptions())
+
+    assert "Request to edition.example.com failed after redirecting from www.example.com" in str(error.value)
+    assert "Check Network Access for a pending request for edition.example.com." in str(error.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("chunks", "expected_body", "truncated", "chunks_read"),
+    [
+        ([b"Article", b" text"], b"Article text", False, 2),
+        ([b"Article", b" text continues", b" on the next page."], b"Article text", True, 2),
+        ([b"Article text", b" continues"], b"Article text", True, 2),
+    ],
+)
+async def test_fetch_stops_after_the_response_body_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    chunks: list[bytes],
+    expected_body: bytes,
+    truncated: bool,
+    chunks_read: int,
+) -> None:
+    class ArticleStream(httpx.AsyncByteStream):
+        read = 0
+        closed = False
+
+        async def __aiter__(self):
+            for chunk in chunks:
+                self.read += 1
+                yield chunk
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    stream = ArticleStream()
+    transport = httpx.MockTransport(lambda _: httpx.Response(
+        200, headers={"Content-Type": "text/plain"}, stream=stream,
+    ))
+    monkeypatch.setattr(httpx, "AsyncClient", partial(httpx.AsyncClient, transport=transport))
+    monkeypatch.setattr(pipeline, "MAX_FETCH_BODY_BYTES", len(expected_body))
+
+    options = FetchOptions()
+    result = await fetch_url("https://example.com/article", options)
+
+    assert result.body == expected_body
+    assert result.response_bytes == len(expected_body)
+    assert result.response_body_truncated is truncated
+    assert stream.read == chunks_read
+    assert stream.closed
+    payload = build_payload(result.url, result, options)
+    assert payload["fetch"]["responseBodyTruncated"] is truncated
+    assert ("partial result" in pipeline.summarize_payload(payload)) is truncated
 
 
 def test_parse_sections_detects_heading_hierarchy() -> None:

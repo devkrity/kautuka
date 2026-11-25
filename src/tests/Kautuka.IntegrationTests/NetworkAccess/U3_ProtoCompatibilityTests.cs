@@ -26,16 +26,25 @@ public sealed partial class U3_ProtoCompatibilityTests
         Assert.Equal(1, CheckRequest.AttributesFieldNumber);
         Assert.Equal(1, AttributeContext.SourceFieldNumber);
         Assert.Equal(2, AttributeContext.DestinationFieldNumber);
+        Assert.Equal(4, AttributeContext.RequestFieldNumber);
+        Assert.Equal(10, AttributeContext.ContextExtensionsFieldNumber);
         Assert.Equal(12, AttributeContext.TlsSessionFieldNumber);
         Assert.Equal(1, Peer.AddressFieldNumber);
         Assert.Equal(2, Peer.ServiceFieldNumber);
+        Assert.Equal(4, Peer.PrincipalFieldNumber);
+        Assert.Equal(2, Request.HttpFieldNumber);
+        Assert.Equal(2, HttpRequest.MethodFieldNumber);
+        Assert.Equal(3, HttpRequest.HeadersFieldNumber);
+        Assert.Equal(5, HttpRequest.HostFieldNumber);
         Assert.Equal(1, Address.SocketAddressFieldNumber);
         Assert.Equal(1, SocketAddress.ProtocolFieldNumber);
         Assert.Equal(2, SocketAddress.AddressFieldNumber);
         Assert.Equal(3, SocketAddress.PortValueFieldNumber);
         Assert.Equal(1, TLSSession.SniFieldNumber);
         Assert.Equal(1, CheckResponse.StatusFieldNumber);
+        Assert.Equal(3, CheckResponse.OkResponseFieldNumber);
         Assert.Equal(4, CheckResponse.DynamicMetadataFieldNumber);
+        Assert.Equal(5, OkHttpResponse.HeadersToRemoveFieldNumber);
         Assert.Equal(1, Status.CodeFieldNumber);
         Assert.Equal(2, Status.MessageFieldNumber);
 

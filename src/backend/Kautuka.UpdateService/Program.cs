@@ -12,6 +12,12 @@ KautukaAspNetCoreStartupPolicy.SanitizeHostingStartupAssemblies();
 
 var builder = WebApplication.CreateSlimBuilder(args);
 var hostLayout = KautukaHostPathPolicy.Resolve(builder.Configuration);
+bool applianceMode = builder.Configuration.GetValue<bool>("Kautuka:Appliance:Enabled");
+string? applianceReleaseId = builder.Configuration["Kautuka:Appliance:ReleaseId"];
+string? applianceReleaseVersion = builder.Configuration["Kautuka:Appliance:ReleaseVersion"];
+if (applianceMode && (!OperatingSystem.IsLinux() || hostLayout.Mode != KautukaHostMode.Prod
+    || string.IsNullOrWhiteSpace(applianceReleaseId) || string.IsNullOrWhiteSpace(applianceReleaseVersion)))
+    throw new InvalidOperationException("Appliance UpdateService requires Linux production mode and Manager's release identity.");
 builder.WebHost.UseKestrelHttpsConfiguration();
 builder.AddKautukaLogging(LogLevel.Debug);
 builder.AddKautukaTelemetry(
@@ -29,11 +35,26 @@ builder.Services.AddSingleton<UpdateServiceRuntimePaths>();
 builder.Services.AddSingleton<UpdateServiceMtlsCerts>();
 builder.Services.AddSingleton<IManagerStatusClient, ManagerStatusClient>();
 builder.Services.AddSingleton<IUpdateServiceIntegration, UpdateServiceIntegration>();
-builder.Services.AddUpdateService();
+builder.Services.AddUpdateService(applianceMode);
 builder.Services.AddOptions<UpdateOptions>()
     .Configure<UpdateServiceRuntimePaths, IHostEnvironment>((options, paths, environment) =>
     {
         options.StateRootPath = paths.RuntimeRoot;
+        if (applianceMode)
+        {
+            options.ApplianceReleaseId = applianceReleaseId;
+            options.ApplianceReleaseVersion = applianceReleaseVersion;
+            options.ManifestPublicKeyPem = builder.Configuration["Kautuka:Appliance:ManifestPublicKeyPem"];
+            options.ManifestPublicKeyPath = null;
+            options.RepositoryOwner = "devkrity";
+            options.RepositoryName = "kautuka";
+            options.ReleaseManifestUrl = null;
+            options.ReleaseChannel = applianceReleaseVersion!.Contains("-preview.", StringComparison.Ordinal) ? "preview" : "stable";
+            options.CatalogManifestUrl = null;
+            options.CatalogManifestPublicKeyPath = null;
+            options.AllowUnsignedLocalFeeds = false;
+            return;
+        }
 
         if (hostLayout.Mode == KautukaHostMode.Prod)
         {

@@ -157,7 +157,8 @@ public sealed class WorkspaceDesiredStateStore
                     throw new InvalidOperationException("A desired-state version cannot be replayed with different content.");
                 }
 
-                bool requiresReconciliation = reconciledDesiredStateVersion != acceptedDesiredStateVersion;
+                bool requiresReconciliation = reconciledDesiredStateVersion != acceptedDesiredStateVersion
+                    || lifecyclePhase == WorkspaceDesiredStateLifecyclePhase.Failed;
                 WorkspaceDesiredStateApplyResult replay = WorkspaceDesiredStateApplyResult.IgnoredReplay(
                     acceptedDesiredStateVersion,
                     pendingPreviousConnectors,
@@ -395,6 +396,17 @@ public sealed class WorkspaceDesiredStateStore
                     reconcileAttemptCount,
                     lastFailureClass);
             }
+        }
+    }
+
+    internal bool TryCommitConnectorAdmission(WorkspaceDesiredStateSnapshot expected, Func<bool> promote)
+    {
+        lock (sync)
+        {
+            return acceptedDesiredStateVersion == expected.AcceptedVersion
+                && string.Equals(acceptedPublisherEpoch, expected.PublisherEpoch, StringComparison.Ordinal)
+                && string.Equals(acceptedContentHash, expected.ContentHash, StringComparison.Ordinal)
+                && promote();
         }
     }
 

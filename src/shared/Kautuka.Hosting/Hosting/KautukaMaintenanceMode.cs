@@ -16,9 +16,13 @@ namespace Kautuka.Hosting.Hosting;
 public static class KautukaMaintenanceMode
 {
     public const string MarkerPath = "/var/lib/kautuka-recovery/maintenance.json";
+    public const string ApplianceVerificationEnvironmentVariable = "KAUTUKA_APPLIANCE_VERIFY";
 
     public static bool IsActive
-        => OperatingSystem.IsLinux() && File.Exists(MarkerPath);
+        => IsApplianceVerification || (OperatingSystem.IsLinux() && File.Exists(MarkerPath));
+
+    public static bool IsApplianceVerification => OperatingSystem.IsLinux() &&
+        string.Equals(Environment.GetEnvironmentVariable(ApplianceVerificationEnvironmentVariable), "1", StringComparison.Ordinal);
 
     // External effects must remain paused until the update is committed.
     // An unreadable marker always suppresses workers.
@@ -40,6 +44,9 @@ public static class KautukaMaintenanceMode
 
     private static bool SuppressWorkersAtStartup()
     {
+        // Candidate containers do not need a mount of the host's recovery journal.
+        // Their verification fence lasts for the lifetime of the container process.
+        if (IsApplianceVerification) return true;
         if (!IsActive) return false;
         try { return ShouldSuppressWorkers(File.ReadAllText(MarkerPath)); }
         catch (IOException) { return true; }

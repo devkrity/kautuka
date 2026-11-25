@@ -142,6 +142,7 @@ internal static partial class GatewayRuntimeEndpointMappings
                 Allow = decision.Allow,
                 Scope = decision.Scope ?? string.Empty,
                 AllowLan = decision.AllowLan ?? false,
+                IncludeSubdomains = decision.IncludeSubdomains,
                 ExpectedRevision = decision.ExpectedRevision,
             };
 
@@ -234,8 +235,44 @@ internal static partial class GatewayRuntimeEndpointMappings
                 .Select(r => MapRuleToDto(r, userStore, catalogStore))
                 .ToArray();
 
-            var result = new NetworkRulesResponseDto(response.Revision, ruleDtos);
+            var result = new NetworkRulesResponseDto(response.Revision, ruleDtos,
+                response.Services.Select(service => new ServicePermissionViewDto(service.ServiceId, service.Total, service.Granted, service.Effective)).ToArray());
             return Results.Json(result, KautukaJsonContext.Default.NetworkRulesResponseDto);
+        });
+
+        app.MapPut("/api/network-access/services", async Task<IResult> (
+            HttpContext context,
+            [FromServices] IManagerGrpcService managerService,
+            [FromServices] IGatewayAuthGuard auth,
+            CancellationToken cancellationToken) =>
+        {
+            IResult? unauthorized = auth.RequireAuthenticated(context, out GatewayUser? user);
+            if (unauthorized is not null || user is null) return unauthorized ?? Results.Unauthorized();
+            if (!GatewayOwnershipAccess.IsAdmin(user))
+                return Results.Json(new GatewayErrorResponse("Administrator privileges required."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status403Forbidden);
+            ServicePermissionDto? dto = await context.Request.ReadFromJsonAsync(KautukaJsonContext.Default.ServicePermissionDto, cancellationToken).ConfigureAwait(false);
+            if (dto is null || string.IsNullOrWhiteSpace(dto.ServiceId) || dto.Allowed is null || dto.ExpectedRevision is null)
+                return Results.BadRequest(new GatewayErrorResponse("Invalid service payload."));
+            try
+            {
+                NetworkAccessProviderPermissionResponse response = await managerService.Client.SetServicePermissionAsync(new NetworkAccessServicePermissionRequest
+                {
+                    Actor = new NetworkAccessActorMessage { UserId = user.Id, IsAdmin = true },
+                    ServiceId = dto.ServiceId,
+                    Allowed = dto.Allowed.Value,
+                    ExpectedRevision = dto.ExpectedRevision.Value,
+                }, cancellationToken: cancellationToken).ConfigureAwait(false);
+                return Results.Json(new ServicePermissionResultDto(response.Revision, response.Status), KautukaJsonContext.Default.ServicePermissionResultDto);
+            }
+            catch (RpcException ex) when (ex.StatusCode is StatusCode.Aborted or StatusCode.FailedPrecondition or StatusCode.PermissionDenied or StatusCode.InvalidArgument)
+            {
+                int status = ex.StatusCode is StatusCode.Aborted or StatusCode.FailedPrecondition ? 409 : ex.StatusCode == StatusCode.PermissionDenied ? 403 : 400;
+                return Results.Json(new GatewayErrorResponse(ex.Status.Detail), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: status);
+            }
+            catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
+            {
+                return ManagerUnavailable("Manager could not confirm the service change. Refresh and try again.");
+            }
         });
 
         // 4. PUT /api/network-access/rules
@@ -881,7 +918,8 @@ internal static partial class GatewayRuntimeEndpointMappings
             DecidedBy: rule.DecidedBy,
             DecidedAtUtc: rule.DecidedAtUtc,
             OpenInternetBadge: rule.OpenInternetBadge,
-            ProtectedFromUser: rule.ProtectedFromUser);
+            ProtectedFromUser: rule.ProtectedFromUser,
+            SetupService: string.IsNullOrEmpty(rule.SetupService) ? null : rule.SetupService);
     }
 
     private static async Task<NetworkAccessRequestDto> BuildRequestDtoAsync(
@@ -968,7 +1006,8 @@ internal static partial class GatewayRuntimeEndpointMappings
             Purpose: string.IsNullOrWhiteSpace(req.Purpose) ? null : req.Purpose,
             CompatibilityMode: req.CompatibilityMode,
             WaitingForAdmin: waitingForAdmin,
-            OwnerCanApproveOwn: canApproveOwn);
+            OwnerCanApproveOwn: canApproveOwn,
+            BaseDomain: string.IsNullOrEmpty(req.BaseDomain) ? null : req.BaseDomain);
     }
 
     private static IResult ManagerUnavailable(string message)

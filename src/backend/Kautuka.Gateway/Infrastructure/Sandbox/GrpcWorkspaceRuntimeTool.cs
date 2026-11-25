@@ -117,9 +117,24 @@ internal sealed class GrpcWorkspaceRuntimeTool(
         CancellationToken cancellationToken = default)
     {
         WorkspaceRuntimeContext resolvedContext = this.contextResolver.ResolveAgentWorkspace(agentId, userId);
+        return await ExecAsync(resolvedContext, command, environment, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+    }
+
+    public WorkspaceRuntimeContext DescribeSkillWorkspace(string agentId, string? userId, string skillId, string executionContext)
+        => contextResolver.ResolveSkillWorkspace(agentId, userId, skillId, executionContext);
+
+    public Task<WorkspaceCommandResult> RunSkillShellAsync(
+        WorkspaceRuntimeContext workspace, string command, IReadOnlyDictionary<string, string> environment,
+        int? timeoutSeconds, CancellationToken cancellationToken)
+        => ExecAsync(workspace, command, environment, timeoutSeconds, cancellationToken);
+
+    private async Task<WorkspaceCommandResult> ExecAsync(
+        WorkspaceRuntimeContext workspace, string command, IReadOnlyDictionary<string, string> environment,
+        int? timeoutSeconds, CancellationToken cancellationToken)
+    {
         var request = new WorkspaceExecRequest
         {
-            Context = ToMessage(resolvedContext),
+            Context = ToMessage(workspace),
             Command = command,
             TimeoutSeconds = timeoutSeconds ?? 0
         };

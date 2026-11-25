@@ -5,6 +5,7 @@ using System.Text.Json;
 using Kautuka.Gateway.Domain.Connectors;
 using Kautuka.Gateway.Infrastructure.Connectors;
 using Kautuka.GoogleMail;
+using Kautuka.NetworkAccess.Client;
 
 namespace Kautuka.IntegrationTests;
 
@@ -889,6 +890,47 @@ public sealed class GoogleMailConnectorTests
         Assert.DoesNotContain(accessToken, returned, StringComparison.Ordinal);
         Assert.DoesNotContain(googleClientSecret, returned, StringComparison.Ordinal);
         Assert.DoesNotContain(verifier, returned, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ConnectorExchangeRequiresFreshSignInAfterScopedApproval()
+    {
+        var checker = new RetryNetworkChecker();
+        using var handler = new ScriptedHandler
+        {
+            Respond = request =>
+            {
+                Assert.Equal("oauth2.googleapis.com", request.RequestUri?.IdnHost);
+                return JsonResponse("""{"access_token":"access","refresh_token":"refresh"}""");
+            },
+        };
+        using var transport = new NetworkAccessCheckHandler(checker, handler);
+        using var client = new ConnectorAuthorizationClient(handler: transport);
+        var credentials = new FakeRefreshTokens();
+        var sessions = new ConnectorOAuthSessionStore();
+        void StartSession(string state) => sessions.Save(state, new ConnectorOAuthSession
+        {
+            UserId = "owner",
+            ConnectorId = "kautuka-google-mail",
+            CodeVerifier = "verifier",
+            ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5),
+        });
+        StartSession("first");
+        var service = new ConnectorOAuthService(new ConnectorAuthCatalog([Profile(googleClientId, googleClientSecret)]),
+            credentials, client, sessions);
+        CancellationToken token = TestContext.Current.CancellationToken;
+
+        await Assert.ThrowsAsync<NetworkAccessDeniedException>(() => service.CompleteAsync("owner", "first-code", "first", token));
+        var denied = Assert.Single(checker.Targets);
+        Assert.Equal("owner", denied.UserId);
+        Assert.Equal("kautuka-google-mail", denied.ConnectorId);
+        checker.Allowed = true;
+        Assert.Equal("rejected", (await service.CompleteAsync("owner", "first-code", "first", token)).Status);
+        Assert.Equal(0, handler.Calls);
+        StartSession("fresh");
+        Assert.Equal("connected", (await service.CompleteAsync("owner", "fresh-code", "fresh", token)).Status);
+        Assert.Equal(1, handler.Calls);
+        Assert.Equal("refresh", credentials.SavedRefreshToken);
     }
 
     [Fact]

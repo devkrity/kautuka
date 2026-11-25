@@ -4,15 +4,14 @@ import { useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 
 /**
- * Ensures the user has completed at least the core onboarding setup by checking if there are any configured providers.
- * If there are no providers, redirects to the /onboarding route securely.
+ * Keeps first-run setup available until the administrator has configured a helper.
  */
 export function useOnboardingGuard(authenticated: boolean, isAdmin: boolean) {
   const navigate = useNavigate();
   const location = useLocation();
   const isSuccessfulWizardHandoff = isActiveOnboardingHandoff(location.state);
 
-  const { data: status, isLoading, isFetching } = useSettingsStatus(authenticated);
+  const { data: status, isLoading, isFetching } = useSettingsStatus(authenticated && isAdmin);
 
   useEffect(() => {
     // Skip while any fetch is in-flight (initial load OR background refetch after invalidation).
@@ -26,7 +25,7 @@ export function useOnboardingGuard(authenticated: boolean, isAdmin: boolean) {
       return;
     }
 
-    const isSystemEmpty = status.providersCount === 0;
+    const isSystemEmpty = status.providersCount === 0 || status.hasConfiguredHelper === false;
     const isSetupCapableRoute =
       location.pathname === '/onboarding' || location.pathname === '/settings';
 

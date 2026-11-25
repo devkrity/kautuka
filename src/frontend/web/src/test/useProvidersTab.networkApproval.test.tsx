@@ -4,34 +4,21 @@ import type { PropsWithChildren } from 'react';
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { settingsAdminMock, checkRuleMock, resolveTargetMock } = vi.hoisted(() => ({
+const { settingsAdminMock } = vi.hoisted(() => ({
   settingsAdminMock: {
     listProviders: vi.fn(),
-    listProviderTypes: vi.fn(),
     testProvider: vi.fn(),
   },
-  checkRuleMock: vi.fn(),
-  resolveTargetMock: vi.fn(),
 }));
 
 vi.mock('@/features/settings', () => ({ settingsAdmin: settingsAdminMock }));
-vi.mock('@/features/network-access/networkAccess', () => ({
-  checkProviderSystemwideRule: checkRuleMock,
-  resolveProviderNetworkTarget: resolveTargetMock,
-}));
-
 import { useProvidersTab } from '@/features/settings/hooks/useProvidersTab';
 
 describe('useProvidersTab systemwide provider test approval', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     settingsAdminMock.listProviders.mockResolvedValue({ data: { providers: [] } });
-    settingsAdminMock.listProviderTypes.mockResolvedValue({
-      data: { providerTypes: [{ type: 'openai', defaultBaseUrl: 'https://api.openai.com' }] },
-    });
     settingsAdminMock.testProvider.mockResolvedValue({ data: { success: true, message: 'ok' } });
-    checkRuleMock.mockResolvedValue({ alreadyAllowed: false, expectedRevision: 4 });
-    resolveTargetMock.mockReturnValue({ host: 'api.openai.com', port: 443 });
   });
 
   function createWrapper() {
@@ -56,18 +43,20 @@ describe('useProvidersTab systemwide provider test approval', () => {
       });
     });
 
+    const target = { host: 'canonical.provider.example', port: 9443 };
+    settingsAdminMock.testProvider.mockResolvedValueOnce({ data: { confirmationTarget: target } });
     await act(async () => result.current.testConnection());
-
-    expect(checkRuleMock).toHaveBeenCalledWith({ host: 'api.openai.com', port: 443 });
-    expect(result.current.pendingNetworkApproval).toEqual({
-      target: { host: 'api.openai.com', port: 443 },
-      expectedRevision: 4,
-    });
-    expect(settingsAdminMock.testProvider).not.toHaveBeenCalled();
-
-    await act(async () => result.current.confirmNetworkApprovalAndTest());
-
+    expect(result.current.pendingNetworkApproval).toEqual(target);
     expect(settingsAdminMock.testProvider).toHaveBeenCalledTimes(1);
-    expect(settingsAdminMock.testProvider).toHaveBeenCalledWith(expect.objectContaining({ allowTemporaryNetworkAccess: true }));
+
+    act(() => result.current.cancelNetworkApproval());
+    expect(result.current.pendingNetworkApproval).toBeNull();
+    expect(settingsAdminMock.testProvider).toHaveBeenCalledTimes(1);
+
+    settingsAdminMock.testProvider.mockResolvedValueOnce({ data: { confirmationTarget: target } });
+    await act(async () => result.current.testConnection());
+    await act(async () => result.current.confirmNetworkApprovalAndTest());
+    expect(settingsAdminMock.testProvider).toHaveBeenLastCalledWith(expect.objectContaining({ confirmedTarget: target }));
+    expect(result.current.result?.success).toBe(true);
   });
 });

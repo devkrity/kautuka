@@ -3,63 +3,107 @@ import { Button } from '@/components/ui/button';
 import { apiClient } from '@/lib/apiClient';
 import type { NetworkAccessRuleDto, NetworkRulesResponseDto } from '@/features/network-access';
 
-const channels = [
-  { name: 'Telegram', hosts: ['api.telegram.org'] },
-  { name: 'Slack', hosts: ['slack.com'] },
+const groups = [
+  { id: 'sign-in', name: 'social sign-in', label: 'Social sign-in' },
+  { id: 'model-providers', name: 'model providers', label: 'Built-in model providers' },
+  { id: 'telegram', name: 'Telegram', label: 'Telegram' },
+  { id: 'slack', name: 'Slack', label: 'Slack' },
+  { id: 'updates', name: 'in-app updates', label: 'In-app updates' },
+  { id: 'suffix-list', name: 'suffix list refresh', label: 'Public Suffix List refresh' },
 ] as const;
+type ServicePermission = (typeof groups)[number];
 
-function channelState(rules: NetworkAccessRuleDto[], hosts: readonly string[]): 'enabled' | 'paused' | 'partial' {
-  const allowed = hosts.map(host => rules.some(rule => rule.scopeKind === 'agent' && rule.userId === 'system'
-    && rule.agentId === 'channelhost' && rule.destination === host && rule.port === 443 && rule.allowed && !rule.paused)
-    && !rules.some(rule => rule.scopeKind === 'system' && rule.destination === host && rule.port === 443 && !rule.allowed));
-  return allowed.every(Boolean) ? 'enabled' : allowed.some(Boolean) ? 'partial' : 'paused';
+function serviceTargets(rules: NetworkAccessRuleDto[], service: ServicePermission) {
+  return rules.filter(rule => rule.setupService === service.id && rule.scopeKind === 'agent'
+    && rule.userId === 'system' && rule.agentId && rule.destKind === 'host');
 }
 
-export function ChannelSettingsSection() {
+function serviceState(rules: NetworkAccessRuleDto[], targets: NetworkAccessRuleDto[]) {
+  const grants = targets.filter(rule => rule.allowed && !rule.paused);
+  const allowed = grants.filter(target => !rules.some(rule => rule.scopeKind === 'system'
+    && rule.destination === target.destination && rule.port === target.port && !rule.allowed && !rule.paused));
+  return { granted: grants.length, allowed: allowed.length };
+}
+
+export function ChannelSettingsSection({ onReviewReady }: { onReviewReady?: (ready: boolean) => void }) {
   const [rules, setRules] = useState<NetworkAccessRuleDto[] | null>(null);
+  const [revision, setRevision] = useState<number | null>(null);
+  const [services, setServices] = useState<NonNullable<NetworkRulesResponseDto['services']>>([]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const load = async () => {
     const response = await apiClient.get<NetworkRulesResponseDto>('/network-access/rules');
     setRules(response.data.rules);
+    setRevision(response.data.revision);
+    setServices(response.data.services ?? []);
     return response.data;
   };
-  useEffect(() => { void load().catch(() => setMessage('Could not load channel settings.')); }, []);
+  useEffect(() => { void load().catch(() => setMessage('Could not load service network settings.')); }, []);
+  useEffect(() => {
+    onReviewReady?.(rules !== null && !busy && groups.some(group =>
+      group.id !== 'model-providers' && services.some(service => service.serviceId === group.id)));
+  }, [onReviewReady, rules, services, busy]);
 
-  async function setChannel(hosts: readonly string[], allow: boolean) {
+  async function setService(service: ServicePermission, allow: boolean) {
     setBusy(true); setMessage('');
     try {
-      for (const host of hosts) {
-        const current = await load();
-        await apiClient.put('/network-access/rules', {
-          scopeKind: 'agent', userId: 'system', agentId: 'channelhost', destination: host,
-          destKind: 'host', port: 443, allowed: allow, allowLan: false, expectedRevision: current.revision,
-        });
+      if (revision === null) throw new Error('Policy revision is unavailable.');
+      const result = await apiClient.put<{ revision: number; status: string }>('/network-access/services', {
+        serviceId: service.id, allowed: allow, expectedRevision: revision,
+      });
+      await load();
+      const applied = result.data.status === (allow ? 'allowed' : 'paused');
+      if (service.id !== 'telegram' && service.id !== 'slack') {
+        setMessage(applied
+          ? `${service.label} ${allow ? 'enabled' : 'paused'}.`
+          : `Check the network rules for ${service.name}.`);
+        return;
       }
-      const updated = await load();
-      const result = channelState(updated.rules, hosts);
       setMessage(allow
-        ? result === 'enabled' ? 'Channel enabled.' : 'Another network rule is preventing this channel from being enabled.'
-        : result === 'paused' ? 'Channel paused. Saved account settings are kept.' : 'The channel is only partly paused. Check the setting and try again.');
+        ? applied ? 'Channel enabled.' : 'Another network rule is preventing this channel from being enabled.'
+        : applied ? 'Channel paused. Saved account settings are kept.' : 'Could not confirm the channel setting. Refresh and try again.');
     } catch {
-      await load().catch(() => undefined);
-      setMessage('Could not finish updating the channel. Some changes may have applied; check the setting and try again.');
+      await load().catch(() => setRules(null));
+      setMessage('Could not finish updating the permission. Check the current setting and try again.');
     } finally { setBusy(false); }
   }
 
-  return <section aria-label="Chat channels" className="space-y-3 rounded-xl border border-border/70 p-4">
-    <div><h3 className="font-semibold">Chat channels</h3>
-      <p className="text-sm text-muted-foreground">Allow people to connect their own accounts. Pausing a channel keeps their saved settings.</p></div>
-    {rules && channels.map(channel => {
-      const state = channelState(rules, channel.hosts);
-      return <div key={channel.name} className="flex items-center justify-between gap-3">
-        <span>{channel.name}: {state === 'partial' ? 'Partially enabled' : state === 'enabled' ? 'Enabled' : 'Paused'}</span>
+  return <section aria-label="Service network access" className="space-y-3 rounded-xl border border-border/70 p-4">
+    <div><h3 className="font-semibold">Service network access</h3>
+      <p className="text-sm text-muted-foreground">Enable the services you want to use. Pausing a chat channel keeps saved account settings.</p></div>
+    {rules && groups.map(service => {
+      const targets = serviceTargets(rules, service);
+      if (targets.length === 0) return null;
+      if (service.id === 'model-providers') {
+        return <div key={service.id}>
+          <span>{service.label}</span>
+          <p className="text-xs text-muted-foreground">
+            Kautuka uses these connections to run models. Your helpers have separate permissions for websites and connectors.
+          </p>
+          <ul className="text-xs text-muted-foreground break-all">
+            {targets.map(target => <li key={target.destination}>{target.destination} · {
+              target.paused ? 'Paused' : !target.allowed ? 'Blocked by its rule'
+                : serviceState(rules, [target]).allowed ? 'Allowed by its rule' : 'Blocked by another network rule'
+            }</li>)}
+          </ul>
+        </div>;
+      }
+      const state = services.find(item => item.serviceId === service.id);
+      const status = !state ? 'Status unavailable' : state.granted > state.effective ? 'Blocked by another network rule'
+        : state.effective === state.total ? 'Allowed by this setting' : state.effective > 0 ? 'Partially allowed' : 'Paused';
+      return <div key={service.name} className="flex flex-wrap items-center justify-between gap-3">
+        <div><span>{service.label}: {status}</span>
+          <p className="text-xs text-muted-foreground break-all">{targets.map(rule => rule.destination).join(', ')}{service.id === 'slack' ? ' and Slack subdomains' : ''}</p></div>
         <div className="flex gap-2">
-          {state !== 'enabled' && <Button type="button" variant="outline" disabled={busy} onClick={() => void setChannel(channel.hosts, true)}>Enable {channel.name}</Button>}
-          {state !== 'paused' && <Button type="button" variant="outline" disabled={busy} onClick={() => void setChannel(channel.hosts, false)}>Pause {channel.name}</Button>}
+          {state && state.granted < state.total && <Button type="button" variant="outline" disabled={busy} onClick={() => void setService(service, true)}>Enable {service.name}</Button>}
+          {state && state.granted > 0 && <Button type="button" variant="outline" disabled={busy} onClick={() => void setService(service, false)}>Pause {service.name}</Button>}
         </div>
       </div>;
     })}
     {message && <p role="status" className="text-sm">{message}</p>}
+    {rules === null && message && <Button type="button" variant="outline" onClick={() => {
+      setMessage('');
+      void load().catch(() => setMessage('Could not load service network settings.'));
+    }}>Retry loading permissions</Button>}
   </section>;
 }

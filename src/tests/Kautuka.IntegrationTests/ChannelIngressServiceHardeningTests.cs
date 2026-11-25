@@ -5599,10 +5599,20 @@ public sealed class ChannelIngressServiceHardeningTests
 
         public void Dispose()
         {
-            SqliteTestPoolCleanup.ClearPoolsUnderDirectory(root);
-            if (Directory.Exists(root))
+            for (int retry = 0; Directory.Exists(root); retry++)
             {
-                Directory.Delete(root, recursive: true);
+                SqliteTestPoolCleanup.ClearPoolsUnderDirectory(root);
+                try
+                {
+                    Directory.Delete(root, recursive: true);
+                    return;
+                }
+                catch (IOException error) when (OperatingSystem.IsWindows() && retry < 40
+                    && (error.HResult & 0xffff) is 32 or 33)
+                {
+                    // A scheduled workflow continuation can still be releasing its last SQLite connection.
+                    Thread.Sleep(50);
+                }
             }
         }
     }

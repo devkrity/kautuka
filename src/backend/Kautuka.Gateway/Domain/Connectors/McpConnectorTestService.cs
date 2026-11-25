@@ -14,6 +14,7 @@ internal sealed class McpConnectorTestService(
     IMcpHttpClientFactory httpClientFactory) : IMcpConnectorTestService
 {
     private static readonly SemaphoreSlim probeSlots = new(2, 2);
+    private const string ProbeTimedOut = "Connector discovery did not finish in time. If the connector is preparing its image, wait briefly and test again.";
 
     public async Task<McpConnectorTestResult> TestAsync(GatewayConnectorTestRequest request, CancellationToken ct)
     {
@@ -138,7 +139,11 @@ internal sealed class McpConnectorTestService(
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            return new McpConnectorTestResult(false, "Container connector probe timed out.");
+            return new McpConnectorTestResult(false, ProbeTimedOut);
+        }
+        catch (RpcException ex) when (ex.StatusCode == StatusCode.DeadlineExceeded && !ct.IsCancellationRequested)
+        {
+            return new McpConnectorTestResult(false, ProbeTimedOut);
         }
         catch (RpcException ex)
         {

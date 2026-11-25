@@ -19,7 +19,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // ── mock useSettingsStatus to fully control isLoading / isFetching / data ─────
 
 type StatusResult = {
-  data: { providersCount: number; hasProviders: boolean } | undefined;
+  data: { providersCount: number; hasProviders: boolean; hasConfiguredHelper?: boolean } | undefined;
   isLoading: boolean;
   isFetching: boolean;
 };
@@ -98,6 +98,16 @@ describe('useOnboardingGuard', () => {
 
     await act(async () => {});
     expect(navigateSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns to onboarding after a provider was saved without a helper', async () => {
+    statusOverride.data = { providersCount: 1, hasProviders: true, hasConfiguredHelper: false };
+    statusOverride.isLoading = false;
+    statusOverride.isFetching = false;
+    setup('/dashboard');
+
+    await act(async () => {});
+    expect(navigateSpy).toHaveBeenCalledWith('/onboarding', { replace: true });
   });
 
   it('does NOT redirect while the initial fetch is loading (isLoading=true)', async () => {

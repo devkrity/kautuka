@@ -23,6 +23,9 @@ public sealed record NetworkAccessRule(
     string Source = "user",
     bool DecidedByAdmin = false)
 {
+    public bool SeedIncludesSubdomains { get; init; }
+    public string? SeedSetupService { get; init; }
+
     public static string ComputeId(
         string scopeKind,
         string? userId,
@@ -38,7 +41,8 @@ public sealed record NetworkAccessRule(
 public sealed record NetworkAccessRuleView(
     NetworkAccessRule Rule,
     bool Paused,
-    bool OpenInternetBadge);
+    bool OpenInternetBadge,
+    string? SetupService = null);
 
 public sealed record NetworkAccessRequest(
     string Id,
@@ -145,7 +149,14 @@ public sealed record NetworkAccessDecisionResult(
     string Reason,
     string? Cluster = null,
     string? RequestId = null,
-    bool OpenInternetBadge = false);
+    bool OpenInternetBadge = false)
+{
+    public bool AllowLan { get; init; }
+    internal RegistryEntry? PendingSource { get; init; }
+    internal PackageProxyAdmission? PendingPackageProxy { get; init; }
+}
+
+public readonly record struct PackageProxyAdmission(bool Ready, Task<bool>? Verification = null, long Generation = 0);
 
 public sealed record ContainerConnectionInput(
     string? SourceIp,
@@ -186,7 +197,9 @@ public sealed record SeedRuleConfigEntry(
     string DestKind,
     int Port,
     bool Allowed,
-    bool AllowLan);
+    bool AllowLan,
+    bool IncludeSubdomains = false,
+    string? SetupService = null);
 
 public sealed record SeedRulesFile(
     int SchemaVersion,

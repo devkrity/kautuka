@@ -112,6 +112,7 @@ try {
     const executables = [
       'bin/kautuka-manager',
       'bin/kautuka-apply-release',
+      'bin/kautuka-apply-release-dispatch',
       'bin/kautuka-update-recovery',
       'services/gateway/kautuka-gateway',
       'services/credentialshost/kautuka-credentialshost',
@@ -126,6 +127,7 @@ try {
     }
     await mkdir(path.join(fixtureSource, 'scripts'), { recursive: true });
     await writeFile(path.join(fixtureSource, 'scripts/kautuka-apply-release.sh'), 'fixture apply script');
+    await writeFile(path.join(fixtureSource, 'scripts/kautuka-apply-release-dispatch.sh'), 'fixture dispatch script');
     await writeFile(path.join(fixtureSource, 'scripts/kautuka-update-recovery.py'), 'fixture recovery script');
     await mkdir(path.join(fixtureSource, 'src/frontend/web/dist'), { recursive: true });
     await writeFile(path.join(fixtureSource, 'src/frontend/web/dist/index.html'), 'fixture web payload');
@@ -133,7 +135,7 @@ try {
     const end = builder.indexOf('\nassert_staged_sidecar_seal "$stage_dir"', start);
     assert.ok(start >= 0 && end > start, 'must locate the complete final assembly command block');
     execFileSync('bash', ['-e', '-u', '-o', 'pipefail', '-c', builder.slice(start, end)], {
-      env: { ...process.env, stage_dir: fixtureStage, source_root: fixtureSource },
+      env: { ...process.env, stage_dir: fixtureStage, source_root: fixtureSource, appliance_image_prefix: '' },
     });
     for (const relative of executables) {
       assert.equal((await stat(path.join(fixtureStage, relative))).mode & 0o111, 0o111, `executable mode must be set for ${relative}`);

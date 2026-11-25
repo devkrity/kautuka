@@ -18,6 +18,10 @@ AAAT registration creates `invoke_agent_*` tools for explicitly exposed agents. 
 
 MCP packages enter through the package service, catalog, desired-state publication, Manager materialization, and connector execution boundary. Validate package bounds and permissions before persistence. External images require immutable digests. First-boot infrastructure images must also be listed in `runtime-images.json` (signed via the platform release). User connector images stay digest-only until package admission. Credentials remain opaque references resolved at execution.
 
+For container connector latency, the Manager debug log records transport preparation, MCP initialization, and the tool request separately. Each timing entry carries the connector and tool names with durations in milliseconds.
+
+Testing an MCP bundle gives Manager extra time to prepare a missing local image. The connector's readiness timeout and request cancellation still apply.
+
 ## Skills
 
 Skills are imported/validated packages that become agent-visible manifests and tools. Keep instructions and executable assets bounded, versioned, and owned by the package. Default Skills and MCPs are product assets; they are not an internal model or built-in agent.

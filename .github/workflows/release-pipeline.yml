@@ -419,19 +419,56 @@ jobs:
     if: ${{ needs.resolve-channel.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
     steps:
+      - name: Check for successful backend validation on this main commit
+        id: backend
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_BRANCH: ${{ needs.resolve-channel.outputs.source_branch }}
+          SOURCE_SHA: ${{ needs.resolve-channel.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$SOURCE_BRANCH" != 'main' ]]; then
+            exit 0
+          fi
+          if ! run="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/dotnet-quality.yml/runs" \
+            -f branch=main -f event=push -f head_sha="$SOURCE_SHA" -f per_page=1 \
+            | jq -ce --arg sha "$SOURCE_SHA" --arg repo "$GITHUB_REPOSITORY" '
+                .workflow_runs[0] | select(.head_sha == $sha and .head_branch == "main"
+                  and .head_repository.full_name == $repo and .event == "push"
+                  and .path == ".github/workflows/dotnet-quality.yml"
+                  and .status == "completed" and .conclusion == "success")')"; then
+            echo 'Trusted main CI result unavailable. Running the release backend suite.'
+            exit 0
+          fi
+          run_id="$(jq -er .id <<< "$run")"
+          attempt="$(jq -er .run_attempt <<< "$run")"
+          if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$attempt/jobs" \
+            | jq -e 'any(.jobs[]; .name == "Backend Build and Tests" and .conclusion == "success"
+              and ([.steps[] | select(.conclusion == "success") | .name]
+                | index("Build") != null and index("Test") != null))' >/dev/null; then
+            echo 'reused=true' >> "$GITHUB_OUTPUT"
+            echo "Reused backend validation from [Dotnet Quality run $run_id](https://github.com/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$attempt) for $SOURCE_SHA." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Backend job evidence unavailable. Running the release backend suite.'
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.backend.outputs.reused != 'true'
         with:
           fetch-depth: 0
           ref: ${{ needs.resolve-channel.outputs.source_sha }}
 
       - name: Setup Node for Narad conformance fixtures
+        if: steps.backend.outputs.reused != 'true'
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
 
       - name: Enable pinned pnpm and configure its cache
+        if: steps.backend.outputs.reused != 'true'
         run: |
           corepack enable
           corepack prepare pnpm@11.5.2 --activate
@@ -439,6 +476,7 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/.cache/pnpm-store"
 
       - name: Restore pnpm package store
+        if: steps.backend.outputs.reused != 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.0.0
         with:
           path: .cache/pnpm-store
@@ -447,9 +485,11 @@ jobs:
             kautuka-pnpm-${{ runner.os }}-11.5.2-
 
       - name: Install Narad conformance fixtures
+        if: steps.backend.outputs.reused != 'true'
         run: pnpm install --frozen-lockfile
 
       - name: Setup .NET
+        if: steps.backend.outputs.reused != 'true'
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           global-json-file: global.json
@@ -460,12 +500,15 @@ jobs:
             src/Directory.Packages.props
 
       - name: Restore
+        if: steps.backend.outputs.reused != 'true'
         run: dotnet restore src/Kautuka.slnx
 
       - name: Build
+        if: steps.backend.outputs.reused != 'true'
         run: dotnet build src/Kautuka.slnx --no-restore --maxcpucount
 
       - name: Test
+        if: steps.backend.outputs.reused != 'true'
         run: dotnet test --solution src/Kautuka.slnx --no-build
 
   validate-release-format:

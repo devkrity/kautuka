@@ -60,6 +60,7 @@ public sealed class WorkloadPostStartVerifier
         ImageCompatProfile? compatProfile = null,
         IWorkloadRegistry? registry = null,
         bool isPackageProxy = false,
+        string? applianceRole = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(containerId);
@@ -244,7 +245,9 @@ public sealed class WorkloadPostStartVerifier
             }
 
             RegistryEntry? workloadIdentity = registry?.FindByIp(allocatedIp);
-            IReadOnlyList<string> allowedMountRoots = ResolveAllowedWorkspaceRoots(workloadIdentity);
+            string? workloadName = container.TryGetProperty("Name", out JsonElement nameElement)
+                ? nameElement.GetString()?.TrimStart('/') : null;
+            IReadOnlyList<string> allowedMountRoots = ResolveAllowedWorkspaceRoots(workloadIdentity, workloadName);
             foreach (JsonElement mount in mountsElem.EnumerateArray())
             {
                 string mountType = mount.TryGetProperty("Type", out JsonElement typeElem) && typeElem.ValueKind == JsonValueKind.String
@@ -257,6 +260,12 @@ public sealed class WorkloadPostStartVerifier
 
                 string source = mount.TryGetProperty("Source", out JsonElement srcElem) ? srcElem.GetString() ?? string.Empty : string.Empty;
                 string dest = mount.TryGetProperty("Destination", out JsonElement dstElem) ? dstElem.GetString() ?? string.Empty : string.Empty;
+                if (workloadName?.StartsWith("kautuka-skill-with-agent-files-", StringComparison.Ordinal) == true
+                    && mountType.Equals("bind", StringComparison.OrdinalIgnoreCase)
+                    && (!mount.TryGetProperty("RW", out JsonElement writable) || writable.ValueKind != JsonValueKind.False))
+                {
+                    throw new InvalidOperationException("Mount check failed: skills must mount agent files read-only.");
+                }
 
                 if (!mountType.Equals("tmpfs", StringComparison.OrdinalIgnoreCase)
                     && (string.IsNullOrWhiteSpace(source) || !IsWithinAllowedRoot(source, allowedMountRoots)))
@@ -292,7 +301,7 @@ public sealed class WorkloadPostStartVerifier
                 await VerifyNetnsIpv6DisableAsync(pid, cancellationToken).ConfigureAwait(false);
                 try
                 {
-                    await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken, isPackageProxy: isPackageProxy).ConfigureAwait(false);
+                    await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken, isPackageProxy: isPackageProxy, applianceRole: applianceRole).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -309,7 +318,7 @@ public sealed class WorkloadPostStartVerifier
                 await VerifyPodmanMachineNetnsIpv6DisableAsync(pid, cancellationToken).ConfigureAwait(false);
                 try
                 {
-                    await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken, isPackageProxy: isPackageProxy).ConfigureAwait(false);
+                    await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken, isPackageProxy: isPackageProxy, applianceRole: applianceRole).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -403,7 +412,7 @@ public sealed class WorkloadPostStartVerifier
         }
     }
 
-    private IReadOnlyList<string> ResolveAllowedWorkspaceRoots(RegistryEntry? workloadIdentity)
+    private IReadOnlyList<string> ResolveAllowedWorkspaceRoots(RegistryEntry? workloadIdentity, string? workloadName)
     {
         if (workloadIdentity is null
             || string.IsNullOrWhiteSpace(workloadIdentity.AgentId)
@@ -412,8 +421,11 @@ public sealed class WorkloadPostStartVerifier
             return [];
         }
 
+        bool isSkill = workloadName?.StartsWith("kautuka-skill-", StringComparison.Ordinal) == true;
         return [.. desiredStateStore.Snapshot.DesiredWorkspaces
-            .Where(context => string.Equals(context.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
+            .Where(context => (isSkill
+                    ? context.IsSkillScope() && string.Equals(PodmanContainerTool.BuildContainerName(context), workloadName, StringComparison.Ordinal)
+                    : string.Equals(context.ScopeType, "agent", StringComparison.OrdinalIgnoreCase))
                 && (string.Equals(context.AgentId, workloadIdentity.AgentId, StringComparison.Ordinal)
                     || string.Equals(context.ScopeId, workloadIdentity.AgentId, StringComparison.Ordinal))
                 && string.Equals(context.UserId, workloadIdentity.UserId, StringComparison.Ordinal))
@@ -594,18 +606,36 @@ public sealed class WorkloadPostStartVerifier
         }
     }
 
-    public async Task<string> VerifyWorkloadRulesetAsync(string containerId, string allocatedIp, bool isPackageProxy = false, CancellationToken cancellationToken = default)
+    public async Task<string> VerifyWorkloadRulesetAsync(string containerId, string allocatedIp, bool isPackageProxy = false,
+        string? applianceRole = null, CancellationToken cancellationToken = default)
     {
         PodmanCommandResult result = await podmanRunner.RunAsync(["inspect", containerId], 15, cancellationToken).ConfigureAwait(false);
         if (result.ExitCode != 0) throw new InvalidOperationException("podman inspect failed during workload rules reconcile.");
         using JsonDocument document = JsonDocument.Parse(result.StdOut);
         JsonElement container = document.RootElement.ValueKind == JsonValueKind.Array ? document.RootElement[0] : document.RootElement;
+        return await VerifyInspectedWorkloadRulesetAsync(container, containerId, allocatedIp, isPackageProxy, applianceRole, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async Task<string> VerifyInspectedWorkloadRulesetAsync(JsonElement container, string containerId, string allocatedIp,
+        bool isPackageProxy, string? applianceRole, CancellationToken cancellationToken)
+    {
         string? canonicalId = container.TryGetProperty("Id", out JsonElement id) ? id.GetString() : null;
         if (!IsCanonicalContainerId(canonicalId)) throw new InvalidOperationException("Workload rules reconcile requires a canonical container ID.");
+        if (applianceRole is not null && (canonicalId != containerId
+            || !container.TryGetProperty("NetworkSettings", out JsonElement networkSettings)
+            || !networkSettings.TryGetProperty("Networks", out JsonElement networks)
+            || networks.ValueKind != JsonValueKind.Object || networks.EnumerateObject().Count() != 1
+            || !networks.TryGetProperty(EgressTopologyManager.WorkloadNetworkName, out JsonElement workloadNetwork)
+            || workloadNetwork.GetProperty("IPAddress").GetString() != allocatedIp))
+        {
+            throw new InvalidOperationException("The appliance service must be attached only to its reserved workload address.");
+        }
         int pid = container.GetProperty("State").GetProperty("Pid").GetInt32();
         try
         {
-            await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken, isPackageProxy: isPackageProxy).ConfigureAwait(false);
+            await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken, isPackageProxy: isPackageProxy,
+                applianceRole: applianceRole).ConfigureAwait(false);
         }
         catch (WorkloadRulesetMismatchException ex)
         {
@@ -618,7 +648,8 @@ public sealed class WorkloadPostStartVerifier
         string allocatedIp,
         CancellationToken cancellationToken,
         bool? usePodmanMachineOverride = null,
-        bool isPackageProxy = false)
+        bool isPackageProxy = false,
+        string? applianceRole = null)
     {
         string pidText = pid.ToString(System.Globalization.CultureInfo.InvariantCulture);
         string stdOut;
@@ -682,10 +713,10 @@ public sealed class WorkloadPostStartVerifier
 
         string liveHash = BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(
             stdOut,
-            WorkloadRulesetRenderer.RequiredWorkloadComments,
+            applianceRole is null ? WorkloadRulesetRenderer.RequiredWorkloadComments : WorkloadRulesetRenderer.RequiredApplianceComments,
             allocatedIp);
 
-        string expectedHash = WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(allocatedIp, isPackageProxy);
+        string expectedHash = WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(allocatedIp, isPackageProxy, applianceRole);
         if (!string.Equals(liveHash, expectedHash, StringComparison.Ordinal))
         {
             throw new WorkloadRulesetMismatchException($"In-netns ruleset verification failed: live hash '{liveHash}' does not match expected canonical golden hash '{expectedHash}'.");

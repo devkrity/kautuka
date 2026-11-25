@@ -33,6 +33,23 @@ public sealed class PersonaSettingsEndpointsTests
     };
 
     [Fact]
+    public async Task HelperCanBeSavedWithoutCustomInstructions()
+    {
+        await using var fixture = await PersonaApiFixture.CreateAsync();
+        string accessToken = await fixture.LoginAsBootstrapAdminAsync();
+
+        using JsonDocument omitted = await fixture.SendJsonAsync(
+            HttpMethod.Put, "/api/settings/agents/default-instructions",
+            new { name = "Desk Assistant", modelId = "model-1" }, accessToken);
+        using JsonDocument unset = await fixture.SendJsonAsync(
+            HttpMethod.Put, "/api/settings/agents/default-instructions",
+            new { name = "Desk Assistant", modelId = "model-1", systemPrompt = (string?)null }, accessToken);
+
+        Assert.Equal(string.Empty, omitted.RootElement.GetProperty("agent").GetProperty("systemPrompt").GetString());
+        Assert.Equal(string.Empty, unset.RootElement.GetProperty("agent").GetProperty("systemPrompt").GetString());
+    }
+
+    [Fact]
     public async Task PersonaDefinitionsEndpointsRoundTripAndRejectInvalidPayloads()
     {
         await using var fixture = await PersonaApiFixture.CreateAsync();
@@ -688,7 +705,10 @@ public sealed class PersonaSettingsEndpointsTests
             RemoveHostedService<ChannelHostIngressWorker>(builder.Services);
             RemoveHostedService<AutopilotSchedulerService>(builder.Services);
             RemoveHostedService<GatewayUserRolePrivilegesStartupSyncService>(builder.Services);
-            builder.Services.AddSingleton(new NetworkAccessPolicyStore(Path.Combine(root, "provider-network.json")));
+            var providerRules = new NetworkAccessPolicyStore(Path.Combine(root, "provider-network.json"));
+            providerRules.SetRule(new NetworkAccessActor("fixture-admin", true),
+                new RuleWriteSpec("system", null, null, null, "localhost", "host", 11434, true, true), providerRules.Revision);
+            builder.Services.AddSingleton(providerRules);
             builder.Services.AddSingleton<IManagerGrpcService, TestWorkspaceGrpcService>();
             builder.Services.RemoveAll<CredentialResolverService>();
             builder.Services.AddSingleton(

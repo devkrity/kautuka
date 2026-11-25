@@ -39,7 +39,7 @@ internal static class GatewayManagementEndpointMappings
             if (!sessions.TryBeginBrokerRotation()) return Results.Conflict();
             using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
                 userId: "system",
-                agentId: "system",
+                agentId: "gateway",
                 purpose: "broker-installation",
                 service: "connector-auth");
             try

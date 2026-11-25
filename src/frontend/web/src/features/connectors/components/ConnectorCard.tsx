@@ -6,8 +6,6 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { StatePill } from '@/components/ui/state-pill';
 import { apiError } from '@/features/settings';
-import { queryClient } from '@/lib/queryClient';
-import { connectorsQueryKeys } from '../api/queryKeys';
 import { useConnectorCredentialStatus, useConnectorOAuth, useTestConnector } from '../api/queries';
 import type { Connector } from '../schemas/connectorSchema';
 import { ConnectorSignInPanel, matchesConnectorOAuth } from './MailSignInPanel';
@@ -19,6 +17,7 @@ interface ConnectorCardProps {
   onEdit: (connector: Connector) => void;
   onDelete: (connector: Connector) => void;
   toggling: boolean;
+  disabled?: boolean;
 }
 
 function RefreshManagedTools({ connector }: { connector: Connector }) {
@@ -35,10 +34,7 @@ function RefreshManagedTools({ connector }: { connector: Connector }) {
           readinessTimeoutSeconds: null, jitCooldownSeconds: null, healthcheckUrl: null,
           healthcheckIntervalMilliseconds: null, mcpProtocolVersion: null, envKeys: [], testEnv: {},
         }, {
-          onSuccess: (result) => {
-            setMessage(result.message);
-            if (result.success) void queryClient.invalidateQueries({ queryKey: connectorsQueryKeys.list() });
-          },
+          onSuccess: (result) => setMessage(result.message),
           onError: (error) => setMessage(apiError(error)),
         });
       }}>{test.isPending ? 'Refreshing tools…' : 'Refresh tools'}</Button>
@@ -54,12 +50,14 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
   onEdit,
   onDelete,
   toggling,
+  disabled,
 }) => {
   const oauth = useConnectorOAuth();
   const managed = (oauth.data ?? []).some((status) => matchesConnectorOAuth(connector.id, status));
   const isHttp = connector.transport === 'http';
   const badge = isHttp ? 'HTTP' : 'Container';
-  const scopeBadge = connector.scope === 'system' ? 'System' : 'User';
+  const isShared = connector.scope === 'system';
+  const scopeBadge = isShared ? 'Shared' : 'User';
   const commandSummary = managed
     ? ''
     : isHttp
@@ -144,6 +142,9 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
           {connector.requiresCredentialReentry ? (
             <Badge variant="attention">Key needs to be entered again</Badge>
           ) : null}
+          {isShared && !managed && !connector.requiresCredentialReentry && connector.enabled && (
+            <p className="mt-1 text-sm text-muted-foreground">To use it with a helper, open that helper in Workspace and add it under Tools.</p>
+          )}
           {credBadge}
         </>
       }
@@ -209,17 +210,21 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
           </span>
           <StatePill
             active={connector.enabled}
-            disabled={toggling || !canManage}
+            disabled={toggling || disabled}
             onClick={() => onToggle(connector.id, !connector.enabled)}
-            title={canManage ? undefined : 'Only admins can change system connector settings'}
           >
-            {connector.enabled ? (
+            {toggling ? (
               <>
-                <CheckCircle2 className="h-3.5 w-3.5" /> Enabled
+                <Loader2 aria-hidden="true" className="h-3.5 w-3.5 motion-safe:animate-spin" />
+                {connector.enabled ? 'Disabling…' : 'Enabling…'}
+              </>
+            ) : connector.enabled ? (
+              <>
+                <CheckCircle2 className="h-3.5 w-3.5" /> {isShared ? 'Enabled for me' : 'Enabled'}
               </>
             ) : (
               <>
-                <Circle className="h-3.5 w-3.5" /> Disabled
+                <Circle className="h-3.5 w-3.5" /> {isShared ? 'Disabled for me' : 'Disabled'}
               </>
             )}
           </StatePill>

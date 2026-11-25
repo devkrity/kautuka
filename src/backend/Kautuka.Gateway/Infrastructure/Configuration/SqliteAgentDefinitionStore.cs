@@ -1120,6 +1120,7 @@ internal sealed partial class SqliteAgentDefinitionStore : IAtomicAgentDefinitio
                 ["skillId"] = attachment.SkillId,
                 ["skillName"] = skillName,
                 ["mode"] = attachment.Mode.ToString(),
+                ["context"] = attachment.Context,
             });
         }
 

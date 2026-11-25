@@ -8,6 +8,8 @@ namespace Kautuka.Gateway.Domain.Execution;
 internal sealed partial class SessionTurnQueueWorker(SessionTurnQueueStore queue, SessionTurnExecution execution, ILogger<SessionTurnQueueWorker> logger) : BackgroundService
 {
     [SuppressMessage("Design", "CA1031:Do not catch general exception types", Justification = "A queue failure must be observed without terminating unrelated channel sessions.")]
+    [SuppressMessage("Reliability", "CA2000", Justification = "ProcessAsync owns the lease through its checkpoint, or this method disposes it before transfer.")]
+    [SuppressMessage("Reliability", "CA2025", Justification = "ProcessAsync owns the lease and disposes it after the asynchronous checkpoint.")]
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var running = new Dictionary<string, (QueuedSessionTurn Job, Task Completion)>(StringComparer.Ordinal);
@@ -36,9 +38,14 @@ internal sealed partial class SessionTurnQueueWorker(SessionTurnQueueStore queue
                     {
                         if (running.Count >= 8) break;
                         if (running.ContainsKey(candidate.Id) || execution.IsBusy(candidate.TargetId, candidate.SessionId, candidate.Id)) continue;
-                        QueuedSessionTurn? leased = queue.TryLease(candidate);
-                        if (leased is null) continue;
-                        running.Add(leased.Id, (leased, ProcessAsync(leased, stoppingToken)));
+                        if (!HelperRunScope.TryAcquireRoot(out HelperRunScope? helperRunLease)) continue;
+                        ArgumentNullException.ThrowIfNull(helperRunLease);
+                        QueuedSessionTurn? leased;
+                        try { leased = queue.TryLease(candidate); }
+                        catch { helperRunLease.Dispose(); throw; }
+                        if (leased is null) { helperRunLease.Dispose(); continue; }
+                        // ProcessAsync takes ownership through the completion checkpoint.
+                        running.Add(leased.Id, (leased, ProcessAsync(leased, helperRunLease, stoppingToken)));
                     }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -56,9 +63,11 @@ internal sealed partial class SessionTurnQueueWorker(SessionTurnQueueStore queue
     }
 
     [SuppressMessage("Design", "CA1031:Do not catch general exception types", Justification = "Each durable turn is isolated; failures are retained without replaying admitted tool work.")]
-    private async Task ProcessAsync(QueuedSessionTurn job, CancellationToken cancellationToken)
+    private async Task ProcessAsync(QueuedSessionTurn job, HelperRunScope helperRunLease, CancellationToken cancellationToken)
     {
+        using HelperRunScope lease = helperRunLease;
         await Task.Yield();
+        lease.Enter();
         try
         {
             // Refresh projections after lease acquisition. Presentation failure must not reject executable work.

@@ -231,6 +231,7 @@ internal sealed class BrokerHandoffClient(
         if (!origin.IsAbsoluteUri || origin.Scheme != Uri.UriSchemeHttps || origin.AbsolutePath != "/"
             || !string.IsNullOrEmpty(origin.UserInfo) || !string.IsNullOrEmpty(origin.Query) || !string.IsNullOrEmpty(origin.Fragment))
             throw new ArgumentException("The broker must be an HTTPS origin.", nameof(origin));
+        // GetIdentityAsync has already checked this origin with the same scope.
         string url = origin.GetLeftPart(UriPartial.Authority) + path;
         async Task<HttpResponseMessage> SendOnceAsync(BrokerInstallationIdentity key, string? nonce)
         {

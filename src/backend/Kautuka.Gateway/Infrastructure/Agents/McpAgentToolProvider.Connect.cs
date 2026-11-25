@@ -14,6 +14,7 @@ namespace Kautuka.Gateway.Infrastructure.Agents;
 internal sealed partial class McpAgentToolProvider
 {
     private const string noInnerMessage = "(none)";
+    private static readonly TimeSpan remoteDiscoveryTimeout = TimeSpan.FromSeconds(10);
 
     private async Task<(string Id, IReadOnlyList<AgentToolSurfaceEntry>? Entries)> ConnectSafeAsync(
         McpServerDefinition serverDef,
@@ -21,10 +22,10 @@ internal sealed partial class McpAgentToolProvider
         CancellationToken ct)
     {
         using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        if (serverDef.Transport == McpTransport.Http) timeout.CancelAfter(TimeSpan.FromSeconds(10));
+        if (serverDef.Transport == McpTransport.Http) timeout.CancelAfter(remoteDiscoveryTimeout);
         try
         {
-            IReadOnlyList<AgentToolSurfaceEntry> entries = await ListSurfaceEntriesAsync(serverDef, context, timeout.Token).WaitAsync(timeout.Token).ConfigureAwait(false);
+            IReadOnlyList<AgentToolSurfaceEntry> entries = await ListSurfaceEntriesAsync(serverDef, context, timeout).WaitAsync(timeout.Token).ConfigureAwait(false);
             foreach (AgentToolSurfaceEntry entry in entries)
                 entry.ExecutionConfigHash = AgentToolingFingerprint.ConnectorExecutionHash(serverDef);
             McpAgentToolProviderLog.ConnectorToolsLoaded(logger, serverDef.Id, entries.Count);
@@ -70,8 +71,9 @@ internal sealed partial class McpAgentToolProvider
     private async Task<IReadOnlyList<AgentToolSurfaceEntry>> ListSurfaceEntriesAsync(
         McpServerDefinition serverDef,
         AgentToolContext context,
-        CancellationToken ct)
+        CancellationTokenSource timeout)
     {
+        CancellationToken ct = timeout.Token;
         if (serverDef.Transport == McpTransport.Container)
         {
             if (serverDef.LocalToolDefinitions is null || string.IsNullOrWhiteSpace(serverDef.LocalImageDigest)
@@ -222,7 +224,7 @@ internal sealed partial class McpAgentToolProvider
             AgentDefinition? agent = current.Agents.FirstOrDefault(candidate => string.Equals(candidate.Id, toolContext.AgentId, StringComparison.Ordinal));
             McpServerDefinition? stored = current.McpServers.FirstOrDefault(candidate => string.Equals(candidate.Id, serverDef.Id, StringComparison.Ordinal));
             if (agent is null || !agent.Enabled || !GatewayOwnershipAccess.CallerCanUse(userId, agent.Scope, agent.OwnerUserId)
-                || stored is null || !(stored.Enabled || stored.IsInternalSystemConnector)
+                || stored is null || !IsConnectorEnabled(stored, userId)
                 || !GatewayOwnershipAccess.CallerCanUse(userId, stored.Scope, stored.OwnerUserId)
                 || AllowsPrivateRuntimeDestination(stored.Scope, personalDestination, IsAdminUser(userId ?? string.Empty)) != allowPrivateDestination
                 || (gatewayState is not null && !string.IsNullOrEmpty(userId) && !gatewayState.Users.Values.Any(user => user.IsActive && string.Equals(user.Id, userId, StringComparison.Ordinal)))
@@ -352,10 +354,15 @@ internal sealed partial class McpAgentToolProvider
             McpServerDefinition? server = config.McpServers.FirstOrDefault(candidate =>
                 string.Equals(candidate.Id, binding.ConnectorId, StringComparison.Ordinal));
             if (server is null
-                || server.Transport != McpTransport.Http
-                || !(server.Enabled || server.IsInternalSystemConnector)
+                || !IsConnectorEnabled(server, context.UserId)
                 || !GatewayOwnershipAccess.CallerCanUse(context.UserId, server.Scope, server.OwnerUserId))
             {
+                continue;
+            }
+
+            if (server.Transport != McpTransport.Http)
+            {
+                endpoints.Add((server.Id, string.Empty));
                 continue;
             }
 

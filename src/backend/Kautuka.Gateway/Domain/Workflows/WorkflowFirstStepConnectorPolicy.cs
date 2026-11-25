@@ -1,3 +1,4 @@
+using Kautuka.Gateway.Domain.Connectors;
 using Kautuka.Gateway.Domain.Stores;
 
 namespace Kautuka.Gateway.Domain.Workflows;
@@ -9,7 +10,8 @@ internal static class WorkflowFirstStepConnectorPolicy
     public static bool RequiresMailConnector(GatewayWorkflowDefinition definition)
         => WorkflowSchemaSubset.DeclaresProperty(definition.InputSchema, "receivedAfter");
 
-    public static bool FirstStepHasMailConnector(GatewayWorkflowDefinition definition, IGatewayCatalogStore catalog)
+    public static bool FirstStepHasMailConnector(GatewayWorkflowDefinition definition, IGatewayCatalogStore catalog,
+        string? userId = null, IConnectorUserEnablement? enablement = null)
     {
         if (definition.Nodes.Length == 0
             || !catalog.TryGetAgent(definition.Nodes[0].AgentId, out GatewayAgent? agent)
@@ -22,7 +24,7 @@ internal static class WorkflowFirstStepConnectorPolicy
         {
             if (!catalog.TryGetMcpServer(binding.ConnectorId, out GatewayMcpServer? server)
                 || server is null
-                || !server.Enabled)
+                || !(enablement?.IsEnabled(userId, server.Id, server.Enabled) ?? server.Enabled))
             {
                 continue;
             }
@@ -37,9 +39,10 @@ internal static class WorkflowFirstStepConnectorPolicy
         return false;
     }
 
-    public static bool ValidateMailConnector(GatewayWorkflowDefinition definition, IGatewayCatalogStore catalog, out string? error)
+    public static bool ValidateMailConnector(GatewayWorkflowDefinition definition, IGatewayCatalogStore catalog, out string? error,
+        string? userId = null, IConnectorUserEnablement? enablement = null)
     {
-        error = RequiresMailConnector(definition) && !FirstStepHasMailConnector(definition, catalog)
+        error = RequiresMailConnector(definition) && !FirstStepHasMailConnector(definition, catalog, userId, enablement)
             ? MailConnectorRequiredMessage
             : null;
         return error is null;

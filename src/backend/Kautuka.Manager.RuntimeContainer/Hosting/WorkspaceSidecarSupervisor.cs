@@ -21,7 +21,8 @@ public sealed class WorkspaceSidecarSupervisor(
     ILogger<WorkspaceSidecarSupervisor> logger,
     RuntimeImageAllowlist? allowlist = null,
     PodmanImageArchiveStore? imageArchives = null,
-    NetworkAccess.EgressTopologyManager? egressTopologyManager = null)
+    NetworkAccess.EgressTopologyManager? egressTopologyManager = null,
+    bool applianceMode = false)
 {
     private const string alwaysPolicyName = "ALWAYS";
     private readonly WorkspaceSidecarCatalog catalog = catalog;
@@ -44,6 +45,32 @@ public sealed class WorkspaceSidecarSupervisor(
     private const int defaultRunningProbeIntervalMilliseconds = 1000;
 
     public IReadOnlyList<string> ManagedContainerNames => catalog.Sidecars.Select(static sidecar => sidecar.Name).ToArray();
+
+    public async Task<bool> EnsurePackageProxyReadyForVerificationAsync(CancellationToken cancellationToken)
+    {
+        if (!applianceMode || egressTopologyManager?.IsStartupGateOpen != true)
+            return false;
+
+        WorkspaceSidecarDefinition? sidecar = catalog.Sidecars.FirstOrDefault(IsPackageProxy);
+        if (sidecar is null || !ShouldEnableSidecar(sidecar))
+        {
+            egressTopologyManager.SetPackageProxyReady(false);
+            logger.LogWarning("The package proxy is missing or disabled in the candidate release.");
+            return false;
+        }
+
+        try
+        {
+            return await EnsureSidecarAsync(sidecar, cancellationToken).ConfigureAwait(false)
+                && egressTopologyManager.IsPackageProxyReady;
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            egressTopologyManager.SetPackageProxyReady(false);
+            logger.LogWarning(error, "Could not verify the candidate release's package proxy.");
+            return false;
+        }
+    }
 
     public IReadOnlyList<string> TakeDriftNotes()
     {
@@ -191,9 +218,11 @@ public sealed class WorkspaceSidecarSupervisor(
 
     private async Task<bool> EnsureSidecarAsync(WorkspaceSidecarDefinition sidecar, CancellationToken cancellationToken)
     {
+        bool ready = false;
         try
         {
-            return await EnsureSidecarCoreAsync(sidecar, cancellationToken).ConfigureAwait(false);
+            ready = await EnsureSidecarCoreAsync(sidecar, cancellationToken).ConfigureAwait(false);
+            return ready;
         }
         catch (ContainerInspectionUnavailableException ex)
         {
@@ -201,16 +230,18 @@ public sealed class WorkspaceSidecarSupervisor(
             driftNotes.Enqueue(sidecar.Name + " inspection is unavailable. Reconciliation is deferred.");
             return false;
         }
+        finally
+        {
+            if (!ready && IsPackageProxy(sidecar))
+            {
+                egressTopologyManager?.SetPackageProxyReady(false);
+            }
+        }
     }
 
     private async Task<bool> EnsureSidecarCoreAsync(WorkspaceSidecarDefinition sidecar, CancellationToken cancellationToken)
     {
         bool isPackageProxy = IsPackageProxy(sidecar);
-        if (isPackageProxy)
-        {
-            egressTopologyManager?.SetPackageProxyReady(false);
-        }
-
         if (string.IsNullOrWhiteSpace(sidecar.Name) || string.IsNullOrWhiteSpace(sidecar.Image))
         {
             logger.LogWarning("Sidecar configuration is incomplete for image '{Image}'.", sidecar.Image);
@@ -231,19 +262,29 @@ public sealed class WorkspaceSidecarSupervisor(
             return false;
         }
 
-        ContainerState state = await InspectStateAsync(sidecar.Name, cancellationToken).ConfigureAwait(false);
-        if (state.IsRunning && await IsHealthyAsync(sidecar, cancellationToken).ConfigureAwait(false))
+        int inspectionTimeout = isPackageProxy && applianceMode
+            ? egressTopologyManager?.InspectionTimeoutSeconds ?? PodmanContainerInspector.DefaultTimeoutSeconds
+            : PodmanContainerInspector.DefaultTimeoutSeconds;
+        ContainerState state = await InspectStateAsync(sidecar.Name, cancellationToken, inspectionTimeout).ConfigureAwait(false);
+        bool hasScheduledPackageHealth = isPackageProxy && sidecar.HealthCheck is null
+            && string.Equals(state.HealthStatus, "healthy", StringComparison.OrdinalIgnoreCase);
+        if (isPackageProxy && egressTopologyManager is not null
+            && !(state.IsRunning && hasScheduledPackageHealth && state.InspectJson is not null
+                && egressTopologyManager.IsRegisteredPackageProxyContainer(ReadInspectString(state.InspectJson, "Id"))))
         {
-            string? drift = await DescribeDriftAsync(sidecar, state.InspectJson!, cancellationToken).ConfigureAwait(false);
+            egressTopologyManager.SetPackageProxyReady(false);
+        }
+
+        if (state.IsRunning && (hasScheduledPackageHealth || await IsHealthyAsync(sidecar, cancellationToken).ConfigureAwait(false)))
+        {
+            (string? drift, string imageId) = await DescribeDriftAsync(sidecar, state.InspectJson!, inspectionTimeout, cancellationToken).ConfigureAwait(false);
             if (drift is null)
             {
                 if (IsPackageProxy(sidecar)
-                    && !await AuthorizeExistingPackageProxyAsync(sidecar, state.InspectJson!, cancellationToken).ConfigureAwait(false))
+                    && !await AuthorizeExistingPackageProxyAsync(sidecar, state.InspectJson!, imageId, cancellationToken).ConfigureAwait(false))
                 {
                     return false;
                 }
-
-                if (isPackageProxy) egressTopologyManager?.SetPackageProxyReady(true);
 
                 logger.LogInformation("Sidecar {Name} is ready.", sidecar.Name);
                 return true;
@@ -251,6 +292,11 @@ public sealed class WorkspaceSidecarSupervisor(
 
             logger.LogInformation("Sidecar {Name} is healthy but {Drift}. Replacing it.", sidecar.Name, drift);
             driftNotes.Enqueue(sidecar.Name + " was replaced because " + drift + ".");
+        }
+
+        if (isPackageProxy)
+        {
+            egressTopologyManager?.SetPackageProxyReady(false);
         }
 
         if (!await EnsureImageAvailableAsync(sidecar, cancellationToken).ConfigureAwait(false))
@@ -318,7 +364,7 @@ public sealed class WorkspaceSidecarSupervisor(
             ready = verifiedState.IsRunning
                 && string.Equals(verifiedState.HealthStatus, "healthy", StringComparison.OrdinalIgnoreCase)
                 && verifiedState.InspectJson is not null
-                && await AuthorizeExistingPackageProxyAsync(sidecar, verifiedState.InspectJson, cancellationToken).ConfigureAwait(false);
+                && await AuthorizeExistingPackageProxyAsync(sidecar, verifiedState.InspectJson, imageId: null, cancellationToken).ConfigureAwait(false);
             if (!ready)
             {
                 if (verifiedState.InspectJson is not null)
@@ -337,7 +383,6 @@ public sealed class WorkspaceSidecarSupervisor(
             }
         }
 
-        if (isPackageProxy) egressTopologyManager?.SetPackageProxyReady(ready);
         if (ready)
         {
             logger.LogInformation("Sidecar {Name} is ready.", sidecar.Name);
@@ -345,11 +390,12 @@ public sealed class WorkspaceSidecarSupervisor(
         return ready;
     }
 
-    private async Task<string?> DescribeDriftAsync(WorkspaceSidecarDefinition sidecar, string inspectJson, CancellationToken cancellationToken)
+    private async Task<(string? Drift, string ImageId)> DescribeDriftAsync(
+        WorkspaceSidecarDefinition sidecar, string inspectJson, int inspectionTimeout, CancellationToken cancellationToken)
     {
         PodmanCommandResult image = await this.podmanCommandRunner.RunAsync(
             ["image", "inspect", "--format", "{{.Id}}", sidecar.Image],
-            10,
+            inspectionTimeout,
             cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         if (image.ExitCode != 0 || string.IsNullOrWhiteSpace(image.StdOut))
@@ -359,20 +405,21 @@ public sealed class WorkspaceSidecarSupervisor(
 
         try
         {
+            string imageId = image.StdOut.Trim();
             string? drift = LiveContainerSpec.DescribeSidecarDrift(
                 inspectJson,
                 sidecar.Image,
                 sidecar.Ports,
-                image.StdOut.Trim(),
+                imageId,
                 sidecar.Volumes,
                 sidecar.Environment,
                 ResolveNetwork(sidecar));
             if (drift is null && IsPackageProxy(sidecar))
             {
-                drift = DescribePackageProxyIdentityDrift(inspectJson, NormalizeImageId(image.StdOut.Trim()));
+                drift = DescribePackageProxyIdentityDrift(inspectJson, NormalizeImageId(imageId));
             }
 
-            return drift;
+            return (drift, imageId);
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException)
         {
@@ -393,23 +440,7 @@ public sealed class WorkspaceSidecarSupervisor(
                 cancellationToken).ConfigureAwait(false);
             if (!ready || !IsPackageProxy(sidecar)) return ready;
 
-            PodmanCommandResult healthCheck = await podmanCommandRunner.RunAsync(
-                ["healthcheck", "run", sidecar.Name],
-                10,
-                cancellationToken).ConfigureAwait(false);
-            if (healthCheck.ExitCode != 0)
-            {
-                logger.LogWarning(
-                    "Package proxy image healthcheck failed (exit {ExitCode}; error {Error}; output {Output}).",
-                    healthCheck.ExitCode,
-                    healthCheck.StdErr.Trim(),
-                    healthCheck.StdOut.Trim());
-                return false;
-            }
-
-            ContainerState proxyState = await InspectStateAsync(sidecar.Name, cancellationToken).ConfigureAwait(false);
-            return proxyState.IsRunning
-                && string.Equals(proxyState.HealthStatus, "healthy", StringComparison.OrdinalIgnoreCase);
+            return await WaitForPackageProxyHealthAsync(sidecar.Name, cancellationToken).ConfigureAwait(false);
         }
 
         if (!IsLoopbackHost(sidecar.HealthCheck.Url.Host))
@@ -459,6 +490,40 @@ public sealed class WorkspaceSidecarSupervisor(
         }
 
         logger.LogWarning("Sidecar {Name} did not become healthy at {Url}.", sidecar.Name, sidecar.HealthCheck.Url);
+        return false;
+    }
+
+    private async Task<bool> WaitForPackageProxyHealthAsync(string name, CancellationToken cancellationToken)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(defaultRunningProbeTimeoutSeconds));
+        try
+        {
+            while (!deadline.IsCancellationRequested)
+            {
+                // Podman may not schedule image health checks in a rootless session.
+                PodmanCommandResult probe = await podmanCommandRunner.RunAsync(
+                    ["healthcheck", "run", name], 10, deadline.Token).ConfigureAwait(false);
+                deadline.Token.ThrowIfCancellationRequested();
+                if (probe.ExitCode == 0)
+                {
+                    ContainerState state = await InspectStateAsync(name, deadline.Token).ConfigureAwait(false);
+                    if (state.IsRunning && string.Equals(state.HealthStatus, "healthy", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+
+                await Task.Delay(defaultRunningProbeIntervalMilliseconds, deadline.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && deadline.IsCancellationRequested)
+        {
+            // The caller may retry reconciliation. Keep the proxy unavailable meanwhile.
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        logger.LogWarning("Package proxy image healthcheck did not become healthy within {TimeoutSeconds}s.", defaultRunningProbeTimeoutSeconds);
         return false;
     }
 
@@ -549,12 +614,22 @@ public sealed class WorkspaceSidecarSupervisor(
                 }
             }
 
+            if (applianceMode && IsPackageProxy(sidecar) && imageArchives is not null
+                && allowlist.Images.FirstOrDefault(static entry => entry.Id == "git-pkgs-proxy") is { } baseImage)
+                await imageArchives.TryEnsureImageAsync(baseImage.Image, cancellationToken).ConfigureAwait(false);
+
             return await BuildImageAsync(sidecar, dockerfile, expectedSourceHash, cancellationToken).ConfigureAwait(false);
         }
 
         if (await ImageExistsAsync(sidecar.Image, cancellationToken).ConfigureAwait(false))
         {
             return true;
+        }
+
+        if (applianceMode && IsPackageProxy(sidecar))
+        {
+            logger.LogWarning("Package proxy image {Image} is missing from the appliance's local image store.", sidecar.Image);
+            return false;
         }
 
         if (IsFullyQualifiedImage(sidecar.Image))
@@ -588,6 +663,12 @@ public sealed class WorkspaceSidecarSupervisor(
             "-f", dockerfile,
             sidecar.BuildContext
         ];
+        if (applianceMode && IsPackageProxy(sidecar))
+        {
+            // The release supplies the pinned base as an OCI archive. Build offline
+            // and retain the Docker health check used by Podman's scheduled probe.
+            args.InsertRange(1, ["--pull=never", "--network=none", "--format=docker"]);
+        }
 
         if (logger.IsEnabled(LogLevel.Information))
         {
@@ -743,7 +824,7 @@ public sealed class WorkspaceSidecarSupervisor(
             throw new InvalidOperationException("Package proxy create arguments do not contain the image reference.");
         }
 
-        createArguments.InsertRange(imageIndex, ["--annotation", $"io.kautuka.image-id={imageId}"]);
+        createArguments.InsertRange(imageIndex, ["--pull=never", "--annotation", $"io.kautuka.image-id={imageId}"]);
         PodmanCommandResult createResult = await podmanCommandRunner.RunAsync(createArguments, 30, cancellationToken).ConfigureAwait(false);
         if (createResult.ExitCode != 0)
         {
@@ -798,6 +879,7 @@ public sealed class WorkspaceSidecarSupervisor(
     private async Task<bool> AuthorizeExistingPackageProxyAsync(
         WorkspaceSidecarDefinition sidecar,
         string inspectJson,
+        string? imageId,
         CancellationToken cancellationToken)
     {
         if (egressTopologyManager is null)
@@ -806,11 +888,14 @@ public sealed class WorkspaceSidecarSupervisor(
             return false;
         }
 
-        PodmanCommandResult imageInspect = await podmanCommandRunner.RunAsync(
-            ["image", "inspect", "--format", "{{.Id}}", sidecar.Image], 10, cancellationToken).ConfigureAwait(false);
-        string imageId = NormalizeImageId(imageInspect.StdOut.Trim());
-        if (imageInspect.ExitCode != 0
-            || !IsImageId(imageId)
+        if (imageId is null)
+        {
+            PodmanCommandResult imageInspect = await podmanCommandRunner.RunAsync(
+                ["image", "inspect", "--format", "{{.Id}}", sidecar.Image], 10, cancellationToken).ConfigureAwait(false);
+            imageId = imageInspect.ExitCode == 0 ? imageInspect.StdOut.Trim() : string.Empty;
+        }
+        imageId = NormalizeImageId(imageId);
+        if (!IsImageId(imageId)
             || !IsPackageProxyInspectAuthorized(inspectJson, imageId, requireRunningIp: true))
         {
             logger.LogWarning("Existing package proxy failed Manager identity/image/IP verification.");
@@ -819,14 +904,15 @@ public sealed class WorkspaceSidecarSupervisor(
 
         string containerId = ReadInspectString(inspectJson, "Id");
         await egressTopologyManager.AuthorizePackageProxyContainerAsync(containerId, imageId, cancellationToken).ConfigureAwait(false);
-        if (!await egressTopologyManager.VerifyPackageProxyRulesetAsync(containerId, cancellationToken).ConfigureAwait(false))
+        if (!await egressTopologyManager.VerifyPackageProxyRulesetAsync(
+            containerId, registerAfterVerification: true, cancellationToken).ConfigureAwait(false))
         {
+            egressTopologyManager.SetPackageProxyReady(false);
             await RevokeAndRemovePackageProxyAsync(containerId, sidecar.Name, cancellationToken).ConfigureAwait(false);
             logger.LogError("Package proxy did not have the required Envoy-only workload rules; it was removed.");
             return false;
         }
 
-        egressTopologyManager.RegisterVerifiedPackageProxyContainer(containerId);
         return true;
     }
 
@@ -1135,9 +1221,10 @@ public sealed class WorkspaceSidecarSupervisor(
     private static bool PathExists(string path)
         => Directory.Exists(path) || File.Exists(path);
 
-    private async Task<ContainerState> InspectStateAsync(string containerName, CancellationToken cancellationToken)
+    private async Task<ContainerState> InspectStateAsync(
+        string containerName, CancellationToken cancellationToken, int timeoutSeconds = PodmanContainerInspector.DefaultTimeoutSeconds)
     {
-        string? inspectJson = await PodmanContainerInspector.ReadAsync(this.podmanCommandRunner, containerName, cancellationToken).ConfigureAwait(false);
+        string? inspectJson = await PodmanContainerInspector.ReadAsync(this.podmanCommandRunner, containerName, cancellationToken, timeoutSeconds).ConfigureAwait(false);
         if (inspectJson is null)
         {
             return new ContainerState(false, false, null);

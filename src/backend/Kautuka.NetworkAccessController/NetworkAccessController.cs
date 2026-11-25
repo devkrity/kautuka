@@ -11,11 +11,23 @@ public sealed class NetworkAccessController
     private sealed record ProviderTestGrant(string UserId, string Host, int Port, bool AllowLan, DateTimeOffset ExpiresAt);
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ProviderTestGrant> providerTests = new(StringComparer.Ordinal);
 
-    public string BeginProviderTest(NetworkAccessActor actor, string host, int port, bool allowLan)
+    public (string Status, string Reason, string Token) PrepareProviderTest(NetworkAccessActor actor, string host, int port,
+        bool allowLan, bool confirmed)
     {
         ArgumentNullException.ThrowIfNull(actor);
         if (!actor.IsAdmin) throw new UnauthorizedAccessException("Provider tests require an administrator.");
-        if (port is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(port));
+        var input = new OutboundCheckInput(actor.UserId, "gateway", null, host, port, "provider-test", null);
+        NetworkAccessDecisionResult decision = ApplianceMode
+            ? EvaluateGatewayConnect(input, publicOnly: false, recordPendingRequest: false)
+            : EvaluateOutboundCheck(input, recordPendingRequest: false);
+        if (decision.Allowed) return ("allowed", decision.Reason, string.Empty);
+        if (decision.Reason != "no_rule") return ("blocked", decision.Reason, string.Empty);
+        return confirmed ? ("allowed", "provider_test", CreateProviderTestGrant(actor, host, port, allowLan))
+            : ("confirmation_required", decision.Reason, string.Empty);
+    }
+
+    private string CreateProviderTestGrant(NetworkAccessActor actor, string host, int port, bool allowLan)
+    {
         string normalized;
         if (!NetworkDestinationNormalizer.TryNormalizeIpv4(host, out normalized, out _)
             && !NetworkDestinationNormalizer.TryNormalizeHostname(host, out normalized, out _))
@@ -43,14 +55,12 @@ public sealed class NetworkAccessController
     public const string ClusterOrigDstPublic = "orig_dst_public";
     public const string ClusterOrigDstLan = "orig_dst_lan";
     public const string ClusterPackageProxy = "pkgs_proxy";
-
     private readonly NetworkAccessPolicyStore policyStore;
     private readonly IWorkloadRegistry registry;
     private readonly NetworkAccessAuditRing auditRing;
     private readonly Func<bool>? isContainerAuthorizationGateOpen;
-    private readonly Func<bool>? isPackageProxyReady;
+    private readonly Func<PackageProxyAdmission>? packageProxyAdmission;
     private readonly TimeProvider timeProvider;
-
     private long checks;
     private long allowed;
     private long denied;
@@ -63,8 +73,9 @@ public sealed class NetworkAccessController
         IWorkloadRegistry registry,
         NetworkAccessAuditRing? auditRing = null,
         Func<bool>? isContainerAuthorizationGateOpen = null,
-        Func<bool>? isPackageProxyReady = null,
-        TimeProvider? timeProvider = null)
+        Func<PackageProxyAdmission>? packageProxyAdmission = null,
+        TimeProvider? timeProvider = null,
+        bool applianceMode = false)
     {
         ArgumentNullException.ThrowIfNull(policyStore);
         ArgumentNullException.ThrowIfNull(registry);
@@ -72,19 +83,19 @@ public sealed class NetworkAccessController
         this.registry = registry;
         this.auditRing = auditRing ?? new NetworkAccessAuditRing();
         this.isContainerAuthorizationGateOpen = isContainerAuthorizationGateOpen;
-        this.isPackageProxyReady = isPackageProxyReady;
+        this.packageProxyAdmission = packageProxyAdmission;
         this.timeProvider = timeProvider ?? TimeProvider.System;
+        ApplianceMode = applianceMode;
 
-        // Fail closed on startup if state.json is malformed (C12).
+        // Fail closed on startup if the stored policy cannot be read.
         this.policyStore.EnsureLoaded();
         this.registry.ContainerDeregistered += (_, args) => this.policyStore.ClearProbeContainer(args.ContainerId);
         this.registry.ContainerIdPromoted += (_, args) => this.policyStore.PromoteProbeContainerId(args.PreviousContainerId, args.ActualContainerId);
     }
 
-    public void ClearProbeContainer(string containerId) => policyStore.ClearProbeContainer(containerId);
+    public bool ApplianceMode { get; }
 
     public NetworkAccessPolicyStore PolicyStore => policyStore;
-
     public IWorkloadRegistry Registry => registry;
 
     public NetworkAccessAuditRing AuditRing => auditRing;
@@ -139,7 +150,23 @@ public sealed class NetworkAccessController
         string? destinationIp,
         int destinationPort,
         bool isTls,
-        string? sni)
+        string? sni,
+        RegistryEntry? expectedSource = null,
+        bool recordPendingRequest = true)
+        => EvaluateContainerConnection(sourceIp, destinationIp, destinationPort, isTls, sni,
+            expectedSource, recordPendingRequest, waitForPackageVerification: false);
+
+    internal NetworkAccessDecisionResult EvaluateContainerConnection(
+        string? sourceIp,
+        string? destinationIp,
+        int destinationPort,
+        bool isTls,
+        string? sni,
+        RegistryEntry? expectedSource,
+        bool recordPendingRequest,
+        bool waitForPackageVerification,
+        long? expectedPackageProxyGeneration = null,
+        bool allowVerifiedPackageProxy = true)
     {
         Interlocked.Increment(ref checks);
         DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -174,6 +201,8 @@ public sealed class NetworkAccessController
         // 0. Emergency Brake check FIRST (Section 4.1.4 / C21)
         NetworkAccessPolicyState state = policyStore.GetRawStateSnapshot();
         bool foundSource = registry.TryGetByIp(sourceIp, out RegistryEntry? entry);
+        if (expectedSource is not null && expectedSource != entry)
+            return RecordDeny(now, sourceIp, expectedSource, sni ?? destinationIp ?? string.Empty, destinationPort, "stale_workload");
 
         if (state.Brake.System)
         {
@@ -246,9 +275,24 @@ public sealed class NetworkAccessController
             return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "blocked");
         }
 
-        if (isPackageProxyService && isPackageProxyReady?.Invoke() == false)
+        if (isPackageProxyService)
         {
-            return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "package_proxy_unavailable");
+            PackageProxyAdmission admission = packageProxyAdmission?.Invoke() ?? new(Ready: true);
+            bool invalid = !allowVerifiedPackageProxy
+                || (expectedPackageProxyGeneration is { } generation && generation != admission.Generation);
+            if (!admission.Ready || invalid)
+            {
+                if (!invalid && waitForPackageVerification && admission.Verification is not null)
+                {
+                    return new NetworkAccessDecisionResult(false, "package_proxy_unavailable")
+                    {
+                        PendingPackageProxy = admission,
+                        PendingSource = entry,
+                    };
+                }
+
+                return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "package_proxy_unavailable");
+            }
         }
         if (entry.Egress == "proxy-only" && !isPackageProxyService)
         {
@@ -261,6 +305,34 @@ public sealed class NetworkAccessController
         ScopeMatchOutcome match = ResolveContainerScopeRule(state, entry, destKind, normalizedDestination, destinationPort);
         if (match.Kind == ScopeMatchKind.BlockedByRule)
             return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "blocked");
+
+        if (entry.Ip == NetworkAddressClassifier.ApplianceChannelHostAddress)
+        {
+            if (entry.Purpose == "appliance-channelhost" && entry.UserId == "system" && entry.AgentId == "channelhost"
+                && isTls && destinationIp == NetworkAddressClassifier.SinkholeAddress)
+            {
+                ScopeMatchOutcome channel = ResolveChannelProviderPermission(state, destKind, normalizedDestination, destinationPort);
+                return channel.Kind == ScopeMatchKind.Allowed
+                    ? RecordAllow(now, sourceIp, entry, normalizedDestination, destinationPort, channel.Reason, ClusterDfpPublic, openInternetBadge: false)
+                    : RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, channel.Reason);
+            }
+
+            return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "channel_provider_denied");
+        }
+
+        if (entry.Ip == NetworkAddressClassifier.ApplianceUpdateServiceAddress)
+        {
+            if (entry.Purpose == "appliance-updateservice" && entry.UserId == "system" && entry.AgentId == "updateservice"
+                && isTls && destinationPort == 443 && destinationIp == NetworkAddressClassifier.SinkholeAddress
+                && FindSystemSeedRule(policyStore.SeedRules, "updateservice", destKind, normalizedDestination, destinationPort) is { } releaseSeed
+                && (FindExactRule(state.Rules, "agent", "system", "updateservice", null, destKind, normalizedDestination, destinationPort) is { } releaseRule
+                    ? releaseRule.Allowed && !NetworkAccessRuleMatcher.IsPaused(state, releaseRule)
+                    : releaseSeed.Allowed))
+                return RecordAllow(now, sourceIp, entry, normalizedDestination, destinationPort,
+                    "release_provider", ClusterDfpPublic, openInternetBadge: false);
+
+            return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "release_provider_denied");
+        }
 
         // 5. Ephemeral in-memory probe grant/block check (v7-14) BEFORE persistent rule evaluation.
         if (isProbe && policyStore.TryEvaluateTemporaryProbeDecision(
@@ -340,6 +412,8 @@ public sealed class NetworkAccessController
                     return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "no_rule", probeRequestId);
                 }
 
+                if (!recordPendingRequest)
+                    return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "no_rule");
                 (string? requestId, bool overflow) = policyStore.RecordOrUpdatePendingRequest(
                     entry.UserId,
                     entry.AgentId,
@@ -360,14 +434,15 @@ public sealed class NetworkAccessController
                     return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "request_overflow");
                 }
 
-                return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "no_rule", requestId);
+                NetworkAccessDecisionResult pending = RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "no_rule", requestId);
+                return pending;
         }
     }
 
     /// <summary>
     /// Evaluates an app-level outbound check (<c>CheckOutbound</c> RPC) from Gateway or ChannelHost.
     /// </summary>
-    public NetworkAccessDecisionResult EvaluateOutboundCheck(OutboundCheckInput input)
+    public NetworkAccessDecisionResult EvaluateOutboundCheck(OutboundCheckInput input, bool recordPendingRequest = true)
     {
         ArgumentNullException.ThrowIfNull(input);
         Interlocked.Increment(ref checks);
@@ -426,46 +501,46 @@ public sealed class NetworkAccessController
         // System actor check (Gateway / ChannelHost system traffic, seeded providers & channels)
         if (string.Equals(userId, "system", StringComparison.Ordinal))
         {
-            IReadOnlyList<NetworkAccessRule> platformRules = NetworkAccessRuleMatcher.FindApplicable(
-                state, null, null, null, destKind, normalizedDestination, input.Port);
-            if (platformRules.Any(static rule => !rule.Allowed))
-                return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
-            bool slackChannel = agentId == "channelhost" && destKind == "host" && input.Port == 443
-                && (normalizedDestination == "slack.com" || normalizedDestination.EndsWith(".slack.com", StringComparison.Ordinal));
-            NetworkAccessRule? explicitSystemRule = FindSystemExplicitRule(state.Rules, agentId, destKind, normalizedDestination, input.Port);
-            if (slackChannel && normalizedDestination != "slack.com")
+            if (agentId == "channelhost")
             {
-                NetworkAccessRule? channelRule = FindSystemExplicitRule(state.Rules, agentId, destKind, "slack.com", input.Port);
-                if (channelRule is { Allowed: false } || explicitSystemRule is null)
-                    explicitSystemRule = channelRule;
+                ScopeMatchOutcome channel = ResolveChannelProviderPermission(state, destKind, normalizedDestination, input.Port);
+                return channel.Kind == ScopeMatchKind.Allowed
+                    ? RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, channel.Reason)
+                    : RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, channel.Reason);
             }
+
+            IReadOnlyList<NetworkAccessRule> matchingRules = NetworkAccessRuleMatcher.FindApplicable(
+                policyStore.RegistrableDomain, state, "system", agentId, null, destKind, normalizedDestination, input.Port, includeSystemDomainFallback: true);
+            if (matchingRules.Any(static rule => !rule.Allowed && rule.ScopeKind is ("system" or "agent")))
+                return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
+            NetworkAccessRule? explicitSystemRule = FindSystemExplicitRule(state.Rules, agentId, destKind, normalizedDestination, input.Port)
+                ?? matchingRules.FirstOrDefault(static rule => rule.ScopeKind == "agent" && rule.DestKind == "domain");
             if (explicitSystemRule is { Allowed: false })
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
-            NetworkAccessRule? seedRule = FindSystemSeedRule(policyStore.SeedRules, agentId, destKind, slackChannel ? "slack.com" : normalizedDestination, input.Port);
+            NetworkAccessRule? seedRule = FindSystemSeedRule(policyStore.SeedRules, agentId, destKind, normalizedDestination, input.Port);
             if (explicitSystemRule is null && seedRule is { Allowed: false })
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
+            bool systemWideAllow = matchingRules.Any(static rule => rule.ScopeKind == "system" && rule.Allowed);
+            bool systemWideAllowLan = systemWideAllow && matchingRules.Any(static rule => rule.ScopeKind == "system" && rule.Allowed && rule.AllowLan);
             if (destKind == "ip" && NetworkAddressClassifier.IsNonPublicV4(normalizedDestination)
-                && (platformRules.Any(static rule => rule.Allowed) || explicitSystemRule is { Allowed: true })
-                && !platformRules.Any(static rule => rule.Allowed && rule.AllowLan) && explicitSystemRule is not { Allowed: true, AllowLan: true })
+                && (systemWideAllow || explicitSystemRule is { Allowed: true })
+                && !systemWideAllowLan && explicitSystemRule is not { Allowed: true, AllowLan: true })
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "not_public");
-            if (platformRules.Any(static rule => rule.Allowed))
-                return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "rule_system");
-            if (explicitSystemRule is not null)
+            if (systemWideAllow)
+                return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "rule_system",
+                    allowLan: systemWideAllowLan || explicitSystemRule is { Allowed: true, AllowLan: true });
+            if (explicitSystemRule is { Allowed: true })
             {
-                if (explicitSystemRule.Allowed)
-                {
-                    return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "rule_system");
-                }
-
-                policyStore.IncrementBlockedRequestAttemptInMemory("system", agentId, null, destKind, normalizedDestination, input.Port);
-                return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
+                return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "rule_system", allowLan: explicitSystemRule.AllowLan);
             }
 
             if (seedRule is not null && seedRule.Allowed)
             {
-                return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "seed");
+                return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "seed", allowLan: seedRule.AllowLan);
             }
 
+            if (!recordPendingRequest)
+                return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "no_rule");
             (string? sysReqId, bool sysOverflow) = policyStore.RecordOrUpdatePendingRequest(
                 "system",
                 agentId,
@@ -507,7 +582,8 @@ public sealed class NetworkAccessController
         switch (match.Kind)
         {
             case ScopeMatchKind.Allowed:
-                return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, match.Reason, match.OpenInternetBadge);
+                return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, match.Reason,
+                    openInternetBadge: match.OpenInternetBadge, allowLan: match.AllowLan);
 
             case ScopeMatchKind.DeniedNotPublic:
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "not_public");
@@ -523,15 +599,18 @@ public sealed class NetworkAccessController
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
 
             default:
-                if (input.Purpose == "provider-test" && input.CorrelationId is { Length: > 0 } token
+                if (input.Purpose == "provider-test" && input.AgentId == "gateway" && connectorId is null
+                    && input.CorrelationId is { Length: > 0 } token
                     && providerTests.TryGetValue(token, out ProviderTestGrant? grant)
                     && grant.ExpiresAt > timeProvider.GetUtcNow()
                     && grant.UserId == userId && grant.Host == normalizedDestination && grant.Port == input.Port
                     && (destKind != "ip" || !NetworkAddressClassifier.IsNonPublicV4(normalizedDestination) || grant.AllowLan))
                 {
-                    return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "provider_test");
+                    return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "provider_test", allowLan: grant.AllowLan);
                 }
 
+                if (!recordPendingRequest)
+                    return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "no_rule");
                 (string? reqId, bool overflow) = policyStore.RecordOrUpdatePendingRequest(
                     userId,
                     userConnectorWithoutAgent ? null : agentId,
@@ -556,9 +635,56 @@ public sealed class NetworkAccessController
         }
     }
 
-    private static bool HasPackageServiceExplicitDeny(
+    public NetworkAccessDecisionResult EvaluateGatewayConnect(OutboundCheckInput input, bool publicOnly, bool recordPendingRequest = true)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        if (isContainerAuthorizationGateOpen?.Invoke() != true)
+        {
+            Interlocked.Increment(ref checks);
+            return RecordOutboundDeny(timeProvider.GetUtcNow(), input.UserId, input.AgentId, input.ConnectorId, input.Host, input.Port, "topology_closed");
+        }
+
+        if (publicOnly && NetworkDestinationNormalizer.TryNormalizeIpv4(input.Host, out string normalized, out _)
+            && NetworkAddressClassifier.IsNonPublicV4(normalized))
+        {
+            Interlocked.Increment(ref checks);
+            return RecordOutboundDeny(timeProvider.GetUtcNow(), input.UserId, input.AgentId, input.ConnectorId, normalized, input.Port, "not_public");
+        }
+
+        return EvaluateOutboundCheck(input, recordPendingRequest);
+    }
+
+    private ScopeMatchOutcome ResolveChannelProviderPermission(
+        NetworkAccessPolicyState state, string destKind, string destination, int port)
+    {
+        const string channelHost = "channelhost";
+        if (destKind != "host" || port != 443)
+            return new(ScopeMatchKind.NoMatch, "channel_provider_denied", false, false);
+
+        NetworkAccessRule? seed = policyStore.SeedRules.FirstOrDefault(rule =>
+            rule.UserId == "system" && rule.AgentId == channelHost && rule.DestKind == destKind && rule.Port == port
+            && rule.SeedIncludesSubdomains && destination.EndsWith("." + rule.Destination, StringComparison.Ordinal))
+            ?? FindSystemSeedRule(policyStore.SeedRules, channelHost, destKind, destination, port);
+        if (seed is null)
+            return new(ScopeMatchKind.NoMatch, "channel_provider_denied", false, false);
+
+        NetworkAccessRule? exact = FindSystemExplicitRule(state.Rules, channelHost, destKind, destination, port);
+        NetworkAccessRule? providerSwitch = seed.Destination == destination ? exact
+            : FindSystemExplicitRule(state.Rules, channelHost, destKind, seed.Destination, port);
+        IReadOnlyList<NetworkAccessRule> platform = NetworkAccessRuleMatcher.FindApplicable(policyStore.RegistrableDomain, state, null, null, null, destKind, destination, port);
+        if (exact is { Allowed: false } || providerSwitch is { Allowed: false } || platform.Any(static rule => !rule.Allowed))
+            return new(ScopeMatchKind.BlockedByRule, "blocked", false, false);
+        if (exact is { Allowed: true } || providerSwitch is { Allowed: true })
+            return new(ScopeMatchKind.Allowed, "rule_system", false, false);
+
+        if (seed.Allowed)
+            return new(ScopeMatchKind.Allowed, "seed", false, false);
+        return new(ScopeMatchKind.BlockedByRule, "blocked", false, false);
+    }
+
+    private bool HasPackageServiceExplicitDeny(
         NetworkAccessPolicyState state, RegistryEntry entry, string destKind, string destination, int port)
-        => NetworkAccessRuleMatcher.FindApplicable(state, entry.UserId, entry.AgentId, entry.ConnectorId, destKind, destination, port)
+        => NetworkAccessRuleMatcher.FindApplicable(policyStore.RegistrableDomain, state, entry.UserId, entry.AgentId, entry.ConnectorId, destKind, destination, port)
             .Any(static rule => !rule.Allowed);
     private ScopeMatchOutcome ResolvePackageServiceDefault(
         NetworkAccessPolicyState state,
@@ -585,7 +711,7 @@ public sealed class NetworkAccessController
         int port)
     {
         IReadOnlyList<NetworkAccessRule> applicable = NetworkAccessRuleMatcher.FindApplicable(
-            state, entry.UserId, entry.AgentId, entry.ConnectorId, destKind, destination, port,
+            policyStore.RegistrableDomain, state, entry.UserId, entry.AgentId, entry.ConnectorId, destKind, destination, port,
             allowAnyPublic: entry.ExecContext is "isolated" or "isolated-with-agent-files");
         if (applicable.Any(static rule => !rule.Allowed))
             return new ScopeMatchOutcome(ScopeMatchKind.BlockedByRule, "blocked", false, false);
@@ -771,7 +897,8 @@ public sealed class NetworkAccessController
         string destination,
         int port,
         string reason,
-        bool openInternetBadge = false)
+        bool openInternetBadge = false,
+        bool allowLan = false)
     {
         Interlocked.Increment(ref allowed);
         auditRing.Record(new NetworkAccessActivityEntry(
@@ -787,7 +914,7 @@ public sealed class NetworkAccessController
             Cluster: null,
             openInternetBadge,
             CompatibilityMode: false));
-        return new NetworkAccessDecisionResult(true, reason, Cluster: null, RequestId: null, openInternetBadge);
+        return new NetworkAccessDecisionResult(true, reason, Cluster: null, RequestId: null, openInternetBadge) { AllowLan = allowLan };
     }
 
     private NetworkAccessDecisionResult RecordOutboundDeny(

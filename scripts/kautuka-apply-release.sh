@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Kautuka-Apply-Protocol: 6
+# Kautuka-Host-Tools-Generation: 1
 set -euo pipefail
+original_args=("$@")
 
 # Root helper invoked by UpdateService. It deploys or retargets one release.
 # UpdateService never extracts or flips current itself.
@@ -9,8 +11,12 @@ usage() {
     cat <<'EOF'
 Usage:
   kautuka-apply-release --artifact <tar.gz> --version <version>
+  kautuka-apply-release --stage-appliance --artifact <tar.gz> --version <version>
+  kautuka-apply-release --activate-appliance --artifact <tar.gz> --version <version>
+  kautuka-apply-release --consume-appliance-request
   kautuka-apply-release --recover
   kautuka-apply-release --boot-recover
+  kautuka-apply-release --renew-channel-certificates
   kautuka-apply-release --commit --version <version>
   kautuka-apply-release --complete-recovery --version <source-version>
   kautuka-apply-release --capabilities
@@ -23,13 +29,26 @@ maintenance_path="$recovery_root/maintenance.json"
 journal_path="$recovery_root/operation.json"
 backups_root="$recovery_root/backups"
 recovery_tool='/usr/local/lib/kautuka/update-recovery.py'
+host_tools_selector='/usr/local/lib/kautuka/host-tools-current'
+host_tools_directory=''
+helper_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
+if [[ "$helper_path" =~ ^(/opt/kautuka/manager/versions/[A-Za-z0-9][A-Za-z0-9._-]{0,127})/kautuka-apply-release$ ]]; then
+    host_tools_directory="${BASH_REMATCH[1]}"
+    recovery_tool="$host_tools_directory/kautuka-update-recovery"
+fi
 artifact=''
 version=''
 recover='false'
 boot_recover='false'
+renew_channel_certificates='false'
 commit='false'
 complete_recovery='false'
 capabilities='false'
+stage_appliance='false'
+activate_appliance='false'
+consume_appliance_request='false'
+appliance_request_id=''
+recovery_layout=host-service
 
 if [[ ${EUID} -ne 0 ]]; then
     echo 'error: kautuka-apply-release must run as root.' >&2
@@ -54,9 +73,11 @@ is_disposable_test() {
 # UpdateService invokes this helper via sudo from a user-scoped unit. Restarting
 # manager (podman Delegate) can tear down user.slice and SIGTERM the whole US
 # cgroup — live exit 143 with pointers already flipped. Re-enter as a system
-# transient unit so apply/revert finishes outside that cgroup.
+# transient unit so apply/revert finishes outside that cgroup. The Channel
+# renewal timer already runs as a host systemd service.
 # Must run before argument parsing so "$@" is still intact for systemd-run.
-if [[ "${KAUTUKA_APPLY_DETACHED:-}" != '1' && "${1:-}" != '--boot-recover' && "${1:-}" != '--capabilities' ]] && command -v systemd-run >/dev/null 2>&1; then
+if [[ "${KAUTUKA_APPLY_DETACHED:-}" != '1' && "${1:-}" != '--boot-recover' &&
+    "${1:-}" != '--capabilities' && "${1:-}" != '--renew-channel-certificates' ]] && command -v systemd-run >/dev/null 2>&1; then
     self="$(readlink -f "$0")"
     unit="kautuka-apply-${RANDOM}$$"
     setenv_args=(
@@ -92,12 +113,28 @@ while [[ $# -gt 0 ]]; do
             version="$2"
             shift 2
             ;;
+        --stage-appliance)
+            stage_appliance='true'
+            shift
+            ;;
+        --activate-appliance)
+            activate_appliance='true'
+            shift
+            ;;
+        --consume-appliance-request)
+            consume_appliance_request='true'
+            shift
+            ;;
         --recover)
             recover='true'
             shift
             ;;
         --boot-recover)
             boot_recover='true'
+            shift
+            ;;
+        --renew-channel-certificates)
+            renew_channel_certificates='true'
             shift
             ;;
         --commit)
@@ -123,6 +160,21 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ "$renew_channel_certificates" == 'true' && ( $# != 0 || -n "$artifact" || -n "$version" ||
+       "$activate_appliance" == 'true' || "$stage_appliance" == 'true' || "$consume_appliance_request" == 'true' ||
+       "$recover" == 'true' || "$boot_recover" == 'true' || "$commit" == 'true' ||
+       "$complete_recovery" == 'true' || "$capabilities" == 'true' ) ]] ||
+    [[ "$activate_appliance" == 'true' && "$stage_appliance" == 'true' ]] ||
+    [[ "$consume_appliance_request" == 'true' && ( -n "$artifact" || -n "$version" ||
+       "$activate_appliance" == 'true' || "$stage_appliance" == 'true' || "$recover" == 'true' ||
+       "$boot_recover" == 'true' || "$commit" == 'true' || "$complete_recovery" == 'true' || "$capabilities" == 'true' ) ]] ||
+    [[ ( "$stage_appliance" == 'true' || "$activate_appliance" == 'true' ) &&
+       ( "$recover" == 'true' || "$boot_recover" == 'true' || "$commit" == 'true' ||
+         "$complete_recovery" == 'true' || "$capabilities" == 'true' ) ]]; then
+    usage >&2
+    exit 2
+fi
 
 require_version_token() {
     local value="$1"
@@ -191,6 +243,43 @@ assert_safe_artifact() {
 # UpdateService runs as an unprivileged account and its staging directory is
 # writable by that account. Copy the inputs into a root-only directory, then
 # verify the signature and copied archive independently before extracting it.
+# Only the privileged helper records this specific pre-journal failure.
+record_appliance_preflight_space_failure() {
+    [[ "$consume_appliance_request" == true && -n "$appliance_request_id" && -n "${source_pointers[manager]:-}" ]] || return 0
+    python3 - "$recovery_root" "$appliance_request_id" "${source_pointers[manager]}" "$version" <<'PY'
+import json, os, sys, tempfile
+root, request, source, target = sys.argv[1:]
+fd, name = tempfile.mkstemp(prefix='.activation-preflight-', dir=root)
+try:
+    os.fchmod(fd, 0o644)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        json.dump({'requestId': request, 'sourceVersion': source, 'targetVersion': target, 'code': 'insufficient_space'}, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(name, os.path.join(root, 'activation-preflight.json'))
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try: os.fsync(directory)
+    finally: os.close(directory)
+finally:
+    if os.path.exists(name): os.unlink(name)
+PY
+}
+
+check_verified_archive_space() {
+    local test_free_bytes=''
+    if is_disposable_test; then test_free_bytes="${KAUTUKA_TEST_FREE_BYTES:-}"; fi
+    python3 - "$1" "$test_free_bytes" <<'PY' || { local status=$?; [[ "$status" != 73 ]] || record_appliance_preflight_space_failure; return "$status"; }
+import os, sys
+archive_size = os.stat(sys.argv[1]).st_size
+fs = os.statvfs('/var/tmp')
+available = int(sys.argv[2]) if sys.argv[2] else fs.f_bavail * fs.f_frsize
+required = archive_size + 256 * 1024 * 1024
+if available < required:
+    print(f'error: insufficient free space for the private verified archive: need {required} bytes, have {available} bytes', file=sys.stderr)
+    raise SystemExit(73)
+PY
+}
+
 verify_staged_artifact() {
     local source="$1"
     local target_version="$2"
@@ -223,15 +312,7 @@ verify_staged_artifact() {
         return 1
     }
 
-    python3 - "$source" <<'PY'
-import os, sys
-archive_size = os.stat(sys.argv[1]).st_size
-fs = os.statvfs('/var/tmp')
-available = fs.f_bavail * fs.f_frsize
-required = archive_size + 256 * 1024 * 1024
-if available < required:
-    raise SystemExit(f'error: insufficient free space for the private verified archive: need {required} bytes, have {available} bytes')
-PY
+    check_verified_archive_space "$source" || return $?
     verified_root="$(mktemp -d /var/tmp/kautuka-verified-XXXXXX)"
     cp -- "$manifest" "$verified_root/manifest.json"
     cp -- "$signature" "$verified_root/signature.b64"
@@ -244,12 +325,17 @@ PY
         echo 'error: release manifest signature verification failed in privileged helper' >&2
         return 1
     }
-    python3 - "$verified_root/manifest.json" "$verified_root/artifact.tar.gz" "$target_version" <<'PY'
+    python3 - "$verified_root/manifest.json" "$verified_root/artifact.tar.gz" "$target_version" "$recovery_layout" <<'PY'
 import hashlib, json, os, sys
 
-manifest_path, artifact_path, requested = sys.argv[1:]
+manifest_path, artifact_path, requested, layout = sys.argv[1:]
 with open(manifest_path, encoding='utf-8') as f:
     manifest = json.load(f)
+has_appliance = any(key.casefold() == 'appliancedeployment' for key in manifest)
+if layout == 'appliance' and 'applianceDeployment' not in manifest:
+    raise SystemExit('error: staging requires a signed appliance deployment')
+if layout != 'appliance' and has_appliance:
+    raise SystemExit('error: appliance deployment requires a Manager appliance activation transaction')
 expected_tag = requested if requested.startswith('v') else 'v' + requested
 if manifest.get('releaseTag') != expected_tag or manifest.get('version') != expected_tag[1:]:
     raise SystemExit('error: signed manifest identity does not match requested version')
@@ -281,20 +367,24 @@ system_units=(kautuka-credentialshost.service kautuka-channelhost.service kautuk
 service_user='kautuka'
 database_root='/var/lib/kautuka'
 database_writer_lock='/run/kautuka-db-writer.lock'
+helper_run_lock='/run/kautuka-helper-run.lock'
 database_writer_lease_active='false'
 
 write_durable_record() {
     local destination="$1" operation_id="$2" phase="$3" source_release="$4" target_release="$5" snapshot="$6"
     shift 6
     python3 - "$destination" "$operation_id" "$phase" "$source_release" "$target_release" "$snapshot" "$database_root" "$@" <<'PY'
-import json, os, sys, tempfile
+import json, os, sys, tempfile, time
 path, operation, phase, source, target, snapshot, data_root, *pairs = sys.argv[1:]
 pointers = {}
 manifest_sha256 = None
+snapshot_prune_status = None
 for pair in pairs:
     name, value = pair.split('=', 1)
     if name == 'snapshotManifestSha256':
         manifest_sha256 = value
+    elif name == 'snapshotPruneStatus':
+        snapshot_prune_status = value
     else:
         pointers[name] = value
 document = {
@@ -306,9 +396,12 @@ document = {
     'snapshot': snapshot,
     'dataRoot': data_root,
     'sourcePointers': pointers,
+    'updatedUnixMilliseconds': time.time_ns() // 1_000_000,
 }
 if manifest_sha256 is not None:
     document['snapshotManifestSha256'] = manifest_sha256
+if snapshot_prune_status is not None:
+    document['snapshotPruneStatus'] = snapshot_prune_status
 os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
 fd, temporary = tempfile.mkstemp(prefix='.record-', dir=os.path.dirname(path))
 try:
@@ -359,7 +452,7 @@ PY
 }
 
 set_operation_phase() {
-    local phase="$1" manifest_sha256
+    local phase="$1" prune_status="${2:-}" write_fence="${3:-true}" manifest_sha256
     local operation_id source_release target_release snapshot
     local pointer_pairs=()
     operation_id="$(read_journal_field operationId)"
@@ -385,15 +478,18 @@ with open(sys.argv[1], encoding='utf-8') as stream:
 PY
 )"
     [[ -z "$manifest_sha256" ]] || pointer_pairs+=("snapshotManifestSha256=$manifest_sha256")
-    write_durable_record "$journal_path" "$operation_id" "$phase" "$source_release" "$target_release" "$snapshot" "${pointer_pairs[@]}"
-    write_durable_record "$maintenance_path" "$operation_id" "$phase" "$source_release" "$target_release" "$snapshot" "${pointer_pairs[@]}"
+    [[ -z "$prune_status" ]] || pointer_pairs+=("snapshotPruneStatus=$prune_status")
+    write_durable_record "$journal_path" "$operation_id" "$phase" "$source_release" "$target_release" "$snapshot" "${pointer_pairs[@]}" || return 1
+    if [[ "$write_fence" == 'true' ]]; then
+        write_durable_record "$maintenance_path" "$operation_id" "$phase" "$source_release" "$target_release" "$snapshot" "${pointer_pairs[@]}"
+    fi
 }
 
 ensure_maintenance_fence_from_journal() {
     local operation_id phase source_release target_release snapshot
     local validate_only="${1:-false}"
     local pointer_pairs=()
-    python3 - "$journal_path" "$backups_root" "$database_root" "${host_services[@]}" <<'PY'
+    python3 - "$journal_path" "$backups_root" "$database_root" "${host_services[@]}" <<'PY' || return 1
 import hashlib, json, re, sys
 path, backups_root, data_root, *services = sys.argv[1:]
 with open(path, encoding='utf-8') as stream:
@@ -707,6 +803,20 @@ stop_database_writers() {
     if is_disposable_test; then
         return 0
     fi
+    if [[ "$recovery_layout" == appliance ]]; then
+        local running id
+        appliance_systemctl stop kautuka-manager.service || return 1
+        running="$(appliance_user podman ps --no-trunc --filter label=io.kautuka.appliance.service --format '{{.ID}}')" || return 1
+        while IFS= read -r id; do
+            [[ -n "$id" ]] || continue
+            [[ "$id" =~ ^[a-f0-9]{64}$ ]] || return 1
+            appliance_user podman stop --ignore --time 10 "$id" >/dev/null || return 1
+        done <<< "$running"
+        running="$(appliance_user podman ps --filter label=io.kautuka.appliance.service --format '{{.ID}}')" || return 1
+        [[ -z "$running" ]] || return 1
+        assert_database_writers_absent
+        return
+    fi
 
     for unit in "${system_units[@]}"; do
         if systemctl is-active --quiet "$unit" 2>/dev/null; then
@@ -797,13 +907,16 @@ release_database_writer_exclusion() {
 # --boot-recover flag or a systemctl/mock result when deciding whether it is
 # safe to replace SQLite files: inspect the actual process table instead.
 assert_database_writers_absent() {
-    python3 - <<'PY'
+    # The dispatcher execs this helper from the Manager release directory.
+    # Exempt its own Bash processes by PID so actual runtime writers still match.
+    python3 - "$$" "$BASHPID" <<'PY'
 import os, sys
 services = ('manager', 'gateway', 'channelhost', 'credentialshost')
 prefix = '/opt/kautuka/'
+updater_pids = set(sys.argv[1:])
 found = []
 for entry in os.scandir('/proc'):
-    if not entry.name.isdigit():
+    if not entry.name.isdigit() or entry.name in updater_pids:
         continue
     pid = entry.name
     try:
@@ -868,9 +981,18 @@ ensure_selinux_runtime_exec_policy() {
 
 stage_extract_root=''
 stage_version_in_progress=''
+appliance_stage_root=''
+
+cleanup_stage_extract() {
+    if [[ -n "$stage_extract_root" ]]; then
+        rm -rf -- "$stage_extract_root" || return 1
+        stage_extract_root=''
+    fi
+}
 
 cleanup_staging() {
-    [[ -z "$stage_extract_root" ]] || rm -rf -- "$stage_extract_root"
+    [[ -z "$appliance_stage_root" ]] || rm -rf -- "$appliance_stage_root"
+    cleanup_stage_extract || true
     if [[ -n "$stage_version_in_progress" ]]; then
         local service current
         # Never remove a release that any current pointer has reached.
@@ -884,21 +1006,177 @@ cleanup_staging() {
     fi
 }
 
+same_file_contents() {
+    python3 -c '
+from pathlib import Path
+import sys
+try:
+    left = sys.stdin.buffer.read() if sys.argv[1] == "-" else Path(sys.argv[1]).read_bytes()
+    sys.exit(left != Path(sys.argv[2]).read_bytes())
+except OSError:
+    sys.exit(1)
+' "$1" "$2"
+}
+
+validate_appliance_host_tools() {
+    local generation="$1" tool
+    [[ -d "$generation" && ! -L "$generation" && "$(stat -c %u -- "$generation")" == 0 &&
+        -z "$(find "$generation" -maxdepth 0 -perm /022 -print -quit)" ]] || return 1
+    for tool in kautuka-apply-release kautuka-update-recovery; do
+        [[ -f "$generation/$tool" && ! -L "$generation/$tool" && -x "$generation/$tool" &&
+            "$(stat -c %u -- "$generation/$tool")" == 0 &&
+            -z "$(find "$generation/$tool" -maxdepth 0 -perm /022 -print -quit)" ]] || return 1
+    done
+    [[ "$(sed -n '2p' "$generation/kautuka-apply-release")" == '# Kautuka-Apply-Protocol: 6' ]] || return 1
+    grep -Fxq '# Kautuka-Host-Tools-Generation: 1' "$generation/kautuka-apply-release" || return 1
+    grep -Fq 'safe-state-recovery-v6' "$generation/kautuka-apply-release" || return 1
+    python3 - "$generation/kautuka-update-recovery" <<'PY'
+import pathlib, sys
+source = pathlib.Path(sys.argv[1]).read_bytes()
+compile(source, sys.argv[1], 'exec')
+if b'def prune_appliance_snapshots(' not in source or b'def verify(' not in source:
+    raise SystemExit(1)
+PY
+}
+
+publish_appliance_host_tools() {
+    local release="$1" generation="/opt/kautuka/manager/versions/$1" temporary_dir
+    [[ "$release" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || return 1
+    validate_appliance_host_tools "$generation" || return 1
+    [[ -d /usr/local/lib/kautuka && ! -L /usr/local/lib/kautuka &&
+        "$(stat -c %u /usr/local/lib/kautuka)" == 0 &&
+        -z "$(find /usr/local/lib/kautuka -maxdepth 0 -perm /022 -print -quit)" ]] || return 1
+    # A killed publisher can leave this directory behind; a random private
+    # name lets boot recovery retry without PID reuse blocking publication.
+    temporary_dir="$(mktemp -d /usr/local/lib/kautuka/.host-tools-stage.XXXXXXXX)" || return 1
+    ln -s -- "$generation" "$temporary_dir/current" || { rmdir -- "$temporary_dir"; return 1; }
+    mv -Tf -- "$temporary_dir/current" "$host_tools_selector" || {
+        rm -f -- "$temporary_dir/current"; rmdir -- "$temporary_dir"; return 1;
+    }
+    rmdir -- "$temporary_dir" || return 1
+    sync -f /usr/local/lib/kautuka
+}
+
+# Selection precedes lock acquisition, so another committed update may have
+# changed it while this process waited. Redispatch only before any mutation.
+recheck_host_tools_after_lock() {
+    [[ -n "$host_tools_directory" ]] || return 0
+    if [[ ! -L "$host_tools_selector" || "$(stat -c %u -- "$host_tools_selector")" != 0 ||
+          "$(readlink -- "$host_tools_selector")" != "$host_tools_directory" ]]; then
+        flock -u 9
+        exec 9>&-
+        exec /usr/local/lib/kautuka/apply-release "${original_args[@]}"
+    fi
+}
+
+stage_appliance_version() {
+    local target="$1" manager_root=/opt/kautuka/manager
+    local versions="$manager_root/versions" directory role archive selinux_state
+    local destination="$versions/$target"
+    selinux_state=''
+    if command -v getenforce >/dev/null 2>&1; then selinux_state="$(getenforce 2>/dev/null || true)"; fi
+    for directory in /opt /opt/kautuka "$manager_root" "$versions"; do
+        [[ -d "$directory" && ! -L "$directory" && "$(stat -c '%u' -- "$directory")" == 0 &&
+            -z "$(find "$directory" -maxdepth 0 -perm /022 -print -quit)" ]] || {
+            echo "error: unsafe appliance installation directory: $directory" >&2
+            return 1
+        }
+    done
+    if [[ -e "$destination" || -L "$destination" ]]; then
+        [[ -d "$destination" && ! -L "$destination" ]] &&
+            same_file_contents "$verified_root/manifest.json" "$destination/kautuka-platform-release.json" &&
+            same_file_contents "$verified_root/signature.b64" "$destination/kautuka-platform-release.sig" || {
+            echo 'error: the appliance version is already staged with different release metadata' >&2
+            return 1
+        }
+        rm -- "$verified_root/artifact.tar.gz" || return 1
+    else
+        install -d -o root -g root -m 0755 "$backups_root"
+        [[ ! -L "$backups_root" && "$(stat -c '%u' "$backups_root")" == 0 &&
+            -z "$(find "$backups_root" -maxdepth 0 -perm /022 -print -quit)" ]] || return 1
+        check_staging_space "$verified_root/artifact.tar.gz" appliance || return 1
+        stage_extract_root="$(mktemp -d /var/tmp/kautuka-appliance-stage.XXXXXXXX)"
+        (umask 022
+         tar --no-same-owner --no-same-permissions --no-overwrite-dir \
+            -xzf "$verified_root/artifact.tar.gz" -C "$stage_extract_root") || return 1
+        # Extraction is complete. The original download remains with UpdateService.
+        rm -- "$verified_root/artifact.tar.gz" || return 1
+        local payload="$stage_extract_root/bin"
+        [[ -d "$payload" && ! -L "$payload" && -f "$payload/kautuka-manager" && ! -L "$payload/kautuka-manager" &&
+            -x "$payload/kautuka-manager" && "$(head -c 4 -- "$payload/kautuka-manager")" == $'\x7fELF' &&
+            -d "$payload/scripts" && ! -L "$payload/scripts" &&
+            -f "$payload/scripts/kautuka-oci-hook" && ! -L "$payload/scripts/kautuka-oci-hook" &&
+            -x "$payload/scripts/kautuka-oci-hook" && "$(head -c 4 -- "$payload/scripts/kautuka-oci-hook")" == $'\x7fELF' ]] || {
+            echo 'error: appliance bundle must contain executables for Manager and the native OCI hook' >&2
+            return 1
+        }
+        verify_nac_hook_compatibility "$payload" "$appliance_service_home" || return 1
+        verify_envoy_selinux_policy_compatibility "$payload" "$manager_root/current" "$selinux_state" || return 1
+        verify_envoy_selinux_policy_compatibility "$payload" "$manager_root/current" "$selinux_state" kautuka_manager_peer || return 1
+        appliance_stage_root="$(mktemp -d "$versions/.stage-appliance.XXXXXXXX")"
+        cp -a --no-preserve=context "$payload/." "$appliance_stage_root/"
+        [[ ! -e "$appliance_stage_root/service-images" && ! -L "$appliance_stage_root/service-images" ]] || return 1
+        for role in kautuka-platform-release.json kautuka-platform-release.sig release-id.txt; do
+            [[ ! -L "$appliance_stage_root/$role" ]] || return 1
+        done
+        if [[ -e "$stage_extract_root/service-images" || -L "$stage_extract_root/service-images" ]]; then
+            [[ -d "$stage_extract_root/service-images" && ! -L "$stage_extract_root/service-images" ]] || return 1
+            install -d -m 0755 "$appliance_stage_root/service-images"
+            for role in credentialshost channelhost gateway webhost updateservice; do
+                archive="$stage_extract_root/service-images/$role.tar"
+                [[ -e "$archive" || -L "$archive" ]] || continue
+                [[ -f "$archive" && ! -L "$archive" && -s "$archive" ]] || return 1
+                mv -T -- "$archive" "$appliance_stage_root/service-images/$role.tar" || return 1
+                chmod 0644 -- "$appliance_stage_root/service-images/$role.tar" || return 1
+            done
+        fi
+        install -T -m 0644 "$verified_root/manifest.json" "$appliance_stage_root/kautuka-platform-release.json"
+        install -T -m 0644 "$verified_root/signature.b64" "$appliance_stage_root/kautuka-platform-release.sig"
+        printf 'v%s\n' "$target" > "$appliance_stage_root/release-id.txt"
+        chmod 0644 "$appliance_stage_root/release-id.txt"
+        chown -R root:root "$appliance_stage_root"
+        chmod -R go-w "$appliance_stage_root"
+        chmod 0755 "$appliance_stage_root"
+        sync -f "$appliance_stage_root"
+        mv -T --no-clobber "$appliance_stage_root" "$destination"
+        [[ ! -d "$appliance_stage_root" ]] || return 1
+        appliance_stage_root=''
+        stage_version_in_progress="$target"
+        # The promoted root-owned release contains its own image archives.
+        # Drop only this transaction's private extraction before Podman imports them.
+        cleanup_stage_extract || return 1
+        sync -f "$versions"
+    fi
+    validate_appliance_host_tools "$destination" || {
+        echo 'error: signed appliance release has invalid or incompatible host tools' >&2
+        return 1
+    }
+    if [[ -n "$selinux_state" && "$selinux_state" != 'Disabled' ]]; then
+        restorecon -RF "$destination" || return 1
+    fi
+    local image_status=0
+    appliance_user env KAUTUKA_APPLIANCE_VERIFY=1 \
+        "$destination/kautuka-manager" --prepare-appliance-images --candidate-version "$target" || image_status=$?
+    if (( image_status != 0 )); then
+        [[ "$image_status" != 73 ]] || record_appliance_preflight_space_failure
+        return "$image_status"
+    fi
+    stage_version_in_progress=''
+}
+
 check_staging_space() {
     local test_free_bytes=''
     if is_disposable_test; then test_free_bytes="${KAUTUKA_TEST_FREE_BYTES:-}"; fi
-    python3 - "$1" "$database_root" "$backups_root" "$recovery_tool" "$test_free_bytes" <<'PY'
-import glob, importlib.util, os, sys, tarfile
-archive, data_root, backup_root, recovery_path, test_free_bytes = sys.argv[1:]
+    python3 - "$1" "$database_root" "$backups_root" "$recovery_tool" "$test_free_bytes" "${2:-host-service}" <<'PY' || { local status=$?; [[ "$status" != 73 ]] || record_appliance_preflight_space_failure; return "$status"; }
+import os, runpy, sys, tarfile
+from pathlib import Path
+archive, data_root, backup_root, recovery_path, test_free_bytes, layout = sys.argv[1:]
 with tarfile.open(archive, 'r:gz') as bundle:
     payload = sum(item.size for item in bundle if item.isfile())
 if payload <= 0:
     raise SystemExit('error: signed update archive contains no files')
-spec = importlib.util.spec_from_file_location('kautuka_recovery', recovery_path)
-recovery = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(recovery)
-database_paths = [os.path.join(data_root, name) for name in recovery.DATABASES]
-database_paths.extend(glob.glob(os.path.join(data_root, 'agents', '*', 'agent.db')))
+inventory = runpy.run_path(recovery_path)['inventory']
+database_paths = [os.path.join(data_root, name) for name, kind in inventory(Path(data_root), layout) if kind == "database"]
 databases = []
 for path in database_paths:
     for suffix in ('', '-wal', '-shm'):
@@ -913,24 +1191,25 @@ for path, required in needs.values():
     fs = os.statvfs(path)
     available = int(test_free_bytes) if test_free_bytes else fs.f_bavail * fs.f_frsize
     if available < required:
-        raise SystemExit(f'error: insufficient free space for safe update staging at {path}: need {required} bytes, have {available} bytes')
+        print(f'error: insufficient free space for safe update staging at {path}: need {required} bytes, have {available} bytes', file=sys.stderr)
+        raise SystemExit(73)
 PY
 }
 
 verify_envoy_selinux_policy_compatibility() {
-    local candidate="$1" current="$2" selinux_state="$3"
+    local candidate="$1" current="$2" selinux_state="$3" policy="${4:-kautuka_envoy}"
     case "$selinux_state" in Enforcing|Permissive) ;; *) return 0 ;; esac
-    if [[ ! -f "$candidate/scripts/kautuka_envoy.cil" || ! -f "$current/scripts/kautuka_envoy.cil" ]] ||
-       ! cmp -s "$candidate/scripts/kautuka_envoy.cil" "$current/scripts/kautuka_envoy.cil"; then
-        echo 'error: the Envoy SELinux policy differs from this release; run the current signed Linux installer before updating.' >&2
+    if [[ ! -f "$candidate/scripts/$policy.cil" || ! -f "$current/scripts/$policy.cil" ]] ||
+       ! same_file_contents "$candidate/scripts/$policy.cil" "$current/scripts/$policy.cil"; then
+        echo "error: the $policy SELinux policy differs from this release; run the current signed Linux installer before updating." >&2
         return 1
     fi
     local modules loaded expected
-    modules="$(semodule -lfull -m)" || { echo 'error: cannot inspect the loaded Envoy SELinux policy.' >&2; return 1; }
-    loaded="$(printf '%s\n' "$modules" | awk '$2 == "kautuka_envoy" && $3 == "cil" && $1 ~ /^[0-9]+$/ { if ($1 > priority) { priority=$1; checksum=$4; disabled=($0 ~ /disabled/) } } END { if (!disabled) print checksum }')"
-    expected="sha256:$(sha256sum "$current/scripts/kautuka_envoy.cil" | cut -d' ' -f1)"
+    modules="$(semodule -lfull -m)" || { echo "error: cannot inspect the loaded $policy SELinux policy." >&2; return 1; }
+    loaded="$(printf '%s\n' "$modules" | awk -v policy="$policy" '$2 == policy && $3 == "cil" && $1 ~ /^[0-9]+$/ { if ($1 > priority) { priority=$1; checksum=$4; disabled=($0 ~ /disabled/) } } END { if (!disabled) print checksum }')"
+    expected="sha256:$(sha256sum "$current/scripts/$policy.cil" | cut -d' ' -f1)"
     if [[ "$loaded" != "$expected" ]]; then
-        echo 'error: the loaded Envoy SELinux policy differs from the installed release; run the current signed Linux installer before updating.' >&2
+        echo "error: the loaded $policy SELinux policy differs from the installed release; run the current signed Linux installer before updating." >&2
         return 1
     fi
 }
@@ -938,13 +1217,97 @@ verify_envoy_selinux_policy_compatibility() {
 verify_nac_hook_compatibility() {
     local candidate="$1" service_home="$2"
     local hooks_dir="$service_home/.config/containers/hooks.d" file
+    local manager_current="${3:-/opt/kautuka/manager/current}"
+    # Native installations point at the versioned Manager payload. The update
+    # transaction switches that stable pointer only after this preflight passes.
+    if python3 - "$hooks_dir/kautuka_hook.json" "$manager_current/scripts/kautuka-oci-hook" <<'PY'
+import json, sys
+try:
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result: raise ValueError('duplicate property')
+            result[key] = value
+        return result
+    with open(sys.argv[1], encoding='utf-8') as source:
+        hook = json.load(source, object_pairs_hook=unique)
+    valid = (hook == {'version': '1.0.0', 'hook': {'path': sys.argv[2], 'timeout': 45},
+                      'when': {'always': True}, 'stages': ['createRuntime']}
+             and type(hook['hook']['timeout']) is int and hook['when']['always'] is True)
+except (OSError, ValueError, TypeError, KeyError):
+    valid = False
+sys.exit(0 if valid else 1)
+PY
+    then
+        local manager_root resolved active candidate_hook checked mode owner
+        manager_root="$(dirname "$manager_current")"
+        [[ -L "$manager_current" && "$(stat -c '%u' "$manager_current")" == 0 ]] || {
+            echo 'error: native NAC hook Manager pointer is not trusted.' >&2; return 1;
+        }
+        resolved="$(readlink -f "$manager_current")" || return 1
+        [[ "$resolved" == "$manager_root/versions/"* && "${resolved#"$manager_root/versions/"}" != */* ]] || {
+            echo 'error: native NAC hook Manager pointer is outside its version directory.' >&2; return 1;
+        }
+        active="$resolved/scripts/kautuka-oci-hook"
+        candidate_hook="$candidate/scripts/kautuka-oci-hook"
+        for checked in "$(dirname "$manager_root")" "$manager_root" "$manager_root/versions" "$resolved" "$resolved/scripts" "$active"; do
+            [[ ! -L "$checked" && -e "$checked" ]] || { echo 'error: native NAC hook path is missing or symbolic.' >&2; return 1; }
+            owner="$(stat -c '%u' "$checked")" || return 1
+            mode="$(stat -c '%a' "$checked")" || return 1
+            [[ "$owner" == 0 && "$mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 8#022) == 0 )) || {
+                echo 'error: native NAC hook Manager path is not root-owned and protected.' >&2; return 1;
+            }
+        done
+        for checked in "$active" "$candidate_hook"; do
+            [[ -f "$checked" && ! -L "$checked" && -x "$checked" ]] || {
+                echo 'error: native NAC hook executable is missing or not executable.' >&2; return 1;
+            }
+        done
+        [[ ! -L "$candidate/scripts" ]] || { echo 'error: native NAC hook candidate scripts directory is symbolic.' >&2; return 1; }
+        if ! python3 - "$active" "$candidate_hook" <<'PY'
+import os, platform, struct, sys
+machine = {'x86_64': 62, 'aarch64': 183}.get(platform.machine())
+try:
+    if machine is None: raise ValueError('unsupported architecture')
+    for path in sys.argv[1:]:
+        with open(path, 'rb') as source:
+            header = source.read(64)
+            if (len(header) != 64 or header[:4] != b'\x7fELF' or header[4:7] != b'\x02\x01\x01'
+                or struct.unpack_from('<H', header, 16)[0] not in (2, 3)
+                or struct.unpack_from('<H', header, 18)[0] != machine
+                or struct.unpack_from('<I', header, 20)[0] != 1
+                or struct.unpack_from('<H', header, 52)[0] != 64
+                or struct.unpack_from('<H', header, 54)[0] != 56):
+                raise ValueError('invalid ELF header')
+            offset = struct.unpack_from('<Q', header, 32)[0]
+            count = struct.unpack_from('<H', header, 56)[0]
+            if count == 0 or offset < 64 or offset + count * 56 > os.fstat(source.fileno()).st_size:
+                raise ValueError('invalid ELF program headers')
+            source.seek(offset)
+            program_headers = source.read(count * 56)
+            if not any(struct.unpack_from('<I', program_headers, i * 56)[0] == 1
+                       and struct.unpack_from('<I', program_headers, i * 56 + 4)[0] & 1
+                       for i in range(count)):
+                raise ValueError('missing executable ELF segment')
+except (OSError, ValueError, struct.error):
+    sys.exit(1)
+PY
+        then
+            echo 'error: native NAC hook is not a supported ELF executable.' >&2; return 1
+        fi
+        if ! printf '[engine]\nhooks_dir = ["%s", { append = true }]\n' "$hooks_dir" | same_file_contents - "$service_home/.config/containers/containers.conf.d/99-kautuka-hooks.conf"; then
+            echo 'error: NAC hook configuration is missing or incompatible; run the current signed Linux installer before updating.' >&2
+            return 1
+        fi
+        return 0
+    fi
     for file in kautuka_hook.py kautuka_workload.nft.json.tmpl kautuka_package_proxy.nft.json.tmpl; do
-        if [[ ! -f "$candidate/scripts/$file" || ! -f "$hooks_dir/$file" ]] || ! cmp -s "$candidate/scripts/$file" "$hooks_dir/$file"; then
+        if [[ ! -f "$candidate/scripts/$file" || ! -f "$hooks_dir/$file" ]] || ! same_file_contents "$candidate/scripts/$file" "$hooks_dir/$file"; then
             echo 'error: the installed NAC hook differs from this release; run the current signed Linux installer before updating.' >&2
             return 1
         fi
     done
-    if ! printf '[engine]\nhooks_dir = ["%s", { append = true }]\n' "$hooks_dir" | cmp -s - "$service_home/.config/containers/containers.conf.d/99-kautuka-hooks.conf"; then
+    if ! printf '[engine]\nhooks_dir = ["%s", { append = true }]\n' "$hooks_dir" | same_file_contents - "$service_home/.config/containers/containers.conf.d/99-kautuka-hooks.conf"; then
         echo 'error: NAC hook configuration is missing or incompatible; run the current signed Linux installer before updating.' >&2
         return 1
     fi
@@ -1083,15 +1446,21 @@ retarget_current() {
         [[ -d "$version_root" ]] || {
             eval "${previous_trap:-trap - HUP TERM INT}"
             echo "error: missing version directory: $version_root" >&2
-            exit 1
+            return 1
         }
-        ln -sfn "$version_root" "$next_link"
+        ln -sfn "$version_root" "$next_link" || {
+            eval "${previous_trap:-trap - HUP TERM INT}"
+            return 1
+        }
     done
 
     for service_key in "${host_services[@]}"; do
         current_link="/opt/kautuka/${service_key}/current"
         next_link="/opt/kautuka/${service_key}/current.next"
-        mv -Tf "$next_link" "$current_link"
+        mv -Tf "$next_link" "$current_link" || {
+            eval "${previous_trap:-trap - HUP TERM INT}"
+            return 1
+        }
     done
 
     for service_key in "${host_services[@]}"; do
@@ -1100,11 +1469,12 @@ retarget_current() {
         if [[ "$resolved" != "$target_version" ]]; then
             eval "${previous_trap:-trap - HUP TERM INT}"
             echo "error: current pointer mismatch for ${service_key}: expected ${target_version} got ${resolved}" >&2
-            exit 1
+            return 1
         fi
     done
 
     eval "${previous_trap:-trap - HUP TERM INT}"
+    if [[ "$recovery_layout" == appliance ]]; then sync -f /opt/kautuka/manager; fi
 }
 
 start_units() {
@@ -1410,7 +1780,7 @@ PY
         done
         rm -rf "$backups_root/.candidate-${operation_id}"
         set_operation_phase aborted
-        if [[ "$boot_only" != 'true' ]]; then
+        if [[ "$boot_only" != 'true' && "$recovery_layout" != appliance ]]; then
             start_units || return 1
         fi
         clear_maintenance_fence
@@ -1423,20 +1793,23 @@ PY
     fi
     acquire_database_writer_exclusion || return 1
     [[ "$snapshot_manifest_sha256" =~ ^[a-f0-9]{64}$ ]] || { echo 'error: recovery journal lacks an immutable snapshot manifest binding' >&2; return 1; }
-    python3 "$recovery_tool" verify --data-root "$database_root" --snapshot "$snapshot" \
+    python3 "$recovery_tool" verify --layout "$recovery_layout" --data-root "$database_root" --snapshot "$snapshot" \
         --operation "$operation_id" --source "$source_release" --target "$target_release" \
         --manifest-sha256 "$snapshot_manifest_sha256" || return 1
-    set_operation_phase restoring
-    python3 "$recovery_tool" restore --data-root "$database_root" --snapshot "$snapshot" \
+    set_operation_phase restoring || return 1
+    python3 "$recovery_tool" restore --layout "$recovery_layout" --data-root "$database_root" --snapshot "$snapshot" \
         --operation "$operation_id" --source "$source_release" --target "$target_release" \
         --manifest-sha256 "$snapshot_manifest_sha256" \
         --lock-journal "$recovery_root/restore-metadata.json" || return 1
-    retarget_current "$source_release"
+    retarget_current "$source_release" || return 1
     # Regenerate desired runtime state from the restored Gateway database before
     # Manager is allowed to reconcile. This file is generated state, not a user file store.
     rm -f "$database_root/manager/manager-desired-state.json"
-    set_operation_phase recovered
+    set_operation_phase recovered || return 1
     release_database_writer_exclusion
+    if [[ "$recovery_layout" == appliance ]]; then
+        return 0
+    fi
     if [[ "$boot_only" == 'true' ]]; then
         echo "Restored verified pre-update snapshot for operation $operation_id before application services started; maintenance remains active."
         return 0
@@ -1445,6 +1818,302 @@ PY
     wait_for_manager_desired_state || return 1
     verify_runtime_health "$source_release" || return 1
     echo "Restored verified pre-update state for operation $operation_id; maintenance fence remains until UpdateService completes recovery."
+}
+
+configure_appliance_layout() {
+    local scope=/etc/kautuka/service-scope.json
+    [[ -f "$scope" && ! -L "$scope" && "$(stat -c '%u' "$scope")" == 0 &&
+        -z "$(find "$scope" -maxdepth 0 -perm /022 -print -quit)" ]] || return 1
+    python3 - "$scope" <<'PY' || return 1
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    scope = json.load(f)
+if (scope.get('schemaVersion') != 2 or scope.get('username') != 'kautuka'
+    or scope.get('userUnits') != ['kautuka-manager.service'] or scope.get('systemUnits') != []):
+    raise SystemExit(1)
+PY
+    appliance_service_home="$(getent passwd "$service_user" | cut -d: -f6)"
+    [[ "$appliance_service_home" == "$database_root" ]] || return 1
+    appliance_xdg_runtime_dir="/run/user/$(id -u "$service_user")"
+    host_services=(manager)
+    system_units=()
+    recovery_layout=appliance
+}
+
+appliance_user() {
+    runuser -u "$service_user" -- env HOME="$appliance_service_home" XDG_RUNTIME_DIR="$appliance_xdg_runtime_dir" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$appliance_xdg_runtime_dir/bus" "$@"
+}
+
+appliance_systemctl() {
+    appliance_user systemctl --user "$@"
+}
+
+channel_certificate_status() {
+    local manager=/opt/kautuka/manager/current/kautuka-manager
+    [[ -x "$manager" && "$(stat -c '%u:%a' "$database_root")" == '0:1771' &&
+        "$(realpath -e "$database_root/security/channel")" == "$database_root/security/channel" &&
+        "$(stat -c '%u:%a' "$database_root/security")" == '0:711' &&
+        "$(stat -c '%u:%a' "$database_root/security/channel")" == '0:711' ]] || return 1
+    "$manager" --maintain-channel-certificates check
+}
+
+check_serving_channel_before_resume() {
+    local manager=/opt/kautuka/manager/current/kautuka-manager
+    local restart="$database_root/security/.channel-renewal-restart" selected_release
+    [[ ! -e "$restart" && ! -L "$restart" ]] || return 1
+    selected_release="$(readlink -f /opt/kautuka/manager/current)" || return 1
+    if ! "$manager" --maintain-channel-certificates check-serving ||
+        ! appliance_user env KAUTUKA_APPLIANCE_VERIFY= "$manager" \
+            --check-appliance-ready --candidate-version "${selected_release##*/}"; then
+        echo 'error: could not verify that the installed release and its Channel connection are ready' >&2
+        return 1
+    fi
+}
+
+renew_appliance_channel_certificates() {
+    local boot_only="$1" status=0
+    local manager=/opt/kautuka/manager/current/kautuka-manager
+    local security="$database_root/security"
+    local current="$security/channel" candidate="$security/.channel-renewal"
+    local restart="$security/.channel-renewal-restart" role material selected_release
+    [[ "$(realpath -e "$security")" == "$security" && "$(stat -c '%u:%a' "$security")" == '0:711' &&
+        "$(realpath -e "$current")" == "$current" && "$(stat -c '%u:%a' "$current")" == '0:711' &&
+        "$(realpath -e "$current/offline-authority")" == "$current/offline-authority" &&
+        "$(stat -c '%u:%a' "$current/offline-authority")" == '0:700' ]] || return 1
+    channel_certificate_status || status=$?
+    if [[ "$status" == 10 || "$status" == 11 || "$status" == 12 ]]; then
+        if [[ -e "$candidate" || -L "$candidate" ]]; then
+            [[ ! -L "$candidate" && "$(stat -c '%u' "$candidate")" == 0 ]] || return 1
+            rm -rf -- "$candidate" || return 1
+        fi
+        install -d -o root -g root -m 0700 "$candidate" "$candidate/offline-authority" || return 1
+        for material in channel-ca.key channel-ca.cer; do
+            [[ -f "$current/offline-authority/$material" && ! -L "$current/offline-authority/$material" &&
+                "$(stat -c '%u:%a' "$current/offline-authority/$material")" == '0:600' ]] || return 1
+            ln -- "$current/offline-authority/$material" "$candidate/offline-authority/$material" || return 1
+        done
+        "$manager" --maintain-channel-certificates stage || return 1
+        for role in gateway-private gateway-trust channel-private channel-trust; do
+            find "$candidate/$role" -maxdepth 1 -type f -exec chmod 0600 {} + || return 1
+            chown -R -- "$service_user:$(id -gn "$service_user")" "$candidate/$role" || return 1
+        done
+        sync -f "$candidate" || return 1
+        if [[ "$boot_only" != 'true' ]]; then
+            if [[ ! -e "$restart" ]]; then
+                (umask 077; set -o noclobber; : > "$restart") || return 1
+                sync -f "$security" || return 1
+            fi
+            stop_database_writers || return 1
+        fi
+        chmod 0711 "$candidate" || return 1
+        "$manager" --maintain-channel-certificates publish || return 1
+        chmod 0700 "$candidate" || return 1
+        sync -f "$security" || return 1
+        echo 'Renewed the ChannelHost server and Gateway client and delegation certificates.'
+    elif [[ "$status" != 0 ]]; then
+        return 1
+    fi
+    if [[ "$boot_only" != 'true' && -f "$restart" ]]; then
+        selected_release="$(readlink -f /opt/kautuka/manager/current)" || return 1
+        start_appliance_manager normal && wait_for_appliance_release "${selected_release##*/}" normal || return 1
+    fi
+    if [[ -e "$candidate" || -L "$candidate" ]]; then
+        [[ ! -L "$candidate" && "$(stat -c '%u' "$candidate")" == 0 ]] || return 1
+        rm -rf -- "$candidate" || return 1
+    fi
+    if [[ -f "$restart" ]]; then
+        rm -- "$restart" || return 1
+        sync -f "$security" || return 1
+    fi
+}
+
+start_appliance_manager() {
+    if [[ "$1" == verifying ]]; then
+        appliance_systemctl set-environment KAUTUKA_APPLIANCE_VERIFY=1 || return 1
+    else
+        appliance_systemctl unset-environment KAUTUKA_APPLIANCE_VERIFY || return 1
+    fi
+    appliance_systemctl reset-failed kautuka-manager.service 2>/dev/null || true
+    appliance_systemctl start kautuka-manager.service
+}
+
+wait_for_appliance_release() {
+    local expected="$1" mode="$2" probe="${3:-/opt/kautuka/manager/current/kautuka-manager}" attempt
+    local verify_env=''
+    if [[ "$mode" == verifying ]]; then verify_env=1; fi
+    for ((attempt = 0; attempt < 30; attempt++)); do
+        if appliance_user env KAUTUKA_APPLIANCE_VERIFY="$verify_env" "$probe" \
+            --check-appliance-ready --candidate-version "$expected" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+    echo "error: Manager did not report release $expected ready in $mode mode" >&2
+    return 1
+}
+
+retain_appliance_snapshot() {
+    local snapshot operation_id link
+    snapshot="$(read_journal_field snapshot)" || return 1
+    operation_id="$(read_journal_field operationId)" || return 1
+    link="$backups_root/.last-known-good-$operation_id"
+    ln -sfn -- "$snapshot" "$link" || return 1
+    mv -Tf -- "$link" "$backups_root/last-known-good" || return 1
+    sync -f "$backups_root"
+}
+
+retire_superseded_appliance_images() {
+    local previous="$1" current="$2" manager=/opt/kautuka/manager
+    local versions="$manager/versions" directory version role path
+    local roles=(credentialshost channelhost gateway webhost updateservice)
+    local obsolete=() archives=()
+    [[ "$(readlink -f -- "$manager/current")" == "$versions/$current" ]] || return 1
+    for directory in /opt /opt/kautuka "$manager" "$versions"; do
+        [[ -d "$directory" && ! -L "$directory" && "$(stat -c '%u' -- "$directory")" == 0 &&
+            -z "$(find "$directory" -maxdepth 0 -perm /022 -print -quit)" ]] || return 1
+    done
+    # Strictly forward updates cannot select any release older than the
+    # predecessor again. Leave future staged releases alone.
+    for directory in "$versions"/*; do
+        [[ -d "$directory" && ! -L "$directory" ]] || continue
+        version="${directory##*/}"
+        assert_forward_version "$version" "$previous" >/dev/null 2>&1 || continue
+        obsolete+=("$version")
+    done
+    (( ${#obsolete[@]} )) || return 0
+
+    # Verify offline repair material before offering anything for retirement.
+    # Validate all deletion paths first so a malformed cohort leaves files alone.
+    for version in "$current" "$previous" "${obsolete[@]}"; do
+        for directory in "$versions/$version" "$versions/$version/service-images"; do
+            [[ -d "$directory" && ! -L "$directory" && "$(stat -c '%u' -- "$directory")" == 0 &&
+                -z "$(find "$directory" -maxdepth 0 -perm /022 -print -quit)" ]] || return 1
+        done
+        for role in "${roles[@]}"; do
+            path="$directory/$role.tar"
+            if [[ "$version" != "$current" && "$version" != "$previous" && ! -e "$path" && ! -L "$path" ]]; then
+                continue
+            fi
+            [[ -f "$path" && ! -L "$path" && "$(stat -c '%u' -- "$path")" == 0 &&
+                -z "$(find "$path" -maxdepth 0 -perm /022 -print -quit)" ]] || return 1
+            if [[ "$version" != "$current" && "$version" != "$previous" ]]; then
+                archives+=("$path")
+            elif [[ ! -s "$path" ]]; then
+                return 1
+            fi
+        done
+    done
+
+    appliance_user "$versions/$current/kautuka-manager" --retire-appliance-images "${obsolete[@]}" || return 1
+    if (( ${#archives[@]} )); then
+        rm -- "${archives[@]}" || return 1
+        sync -f "$versions" || return 1
+    fi
+}
+
+recover_appliance_operation() {
+    local boot_only="$1" phase expected operation_id manifest_digest source_release target_release prune_status
+    [[ -e "$journal_path" || -L "$journal_path" || -e "$maintenance_path" || -L "$maintenance_path" ]] || return 0
+    [[ -f "$journal_path" && ! -L "$journal_path" && "$(stat -c '%u' "$journal_path")" == 0 &&
+        -z "$(find "$journal_path" -maxdepth 0 -perm /022 -print -quit)" ]] || return 1
+    ensure_maintenance_fence_from_journal true || return 1
+    phase="$(read_journal_field phase)" || return 1
+    case "$phase" in
+        committed|completed|recovered|aborted) ;;
+        *)
+            ensure_maintenance_fence_from_journal || return 1
+            restore_operation "$boot_only" || return 1
+            phase="$(read_journal_field phase)" || return 1
+            ;;
+    esac
+    if [[ "$phase" == committed ]]; then
+        expected="$(read_journal_field targetRelease)" || return 1
+    else
+        expected="$(read_journal_field sourceRelease)" || return 1
+    fi
+    [[ "$(readlink -f /opt/kautuka/manager/current)" == "/opt/kautuka/manager/versions/$expected" ]] || return 1
+    if [[ "$phase" == committed ]]; then
+        publish_appliance_host_tools "$expected" || return 1
+        test_crash_at host-tools-published
+    fi
+    if [[ "$phase" == recovered ]]; then
+        retain_appliance_snapshot || return 1
+        set_operation_phase completed || return 1
+        phase=completed
+    fi
+    release_database_writer_exclusion || return 1
+    clear_maintenance_fence || return 1
+    if [[ "$boot_only" != 'true' ]]; then
+        start_appliance_manager normal && wait_for_appliance_release "$expected" normal || return 1
+    fi
+    if [[ "$phase" == committed || "$phase" == completed ]]; then
+        prune_status="$(read_journal_field snapshotPruneStatus 2>/dev/null || true)"
+        if [[ "$boot_only" != 'true' || "$prune_status" == pending ]]; then
+            operation_id="$(read_journal_field operationId)" || return 1
+            manifest_digest="$(read_journal_field snapshotManifestSha256)" || return 1
+            source_release="$(read_journal_field sourceRelease)" || return 1
+            target_release="$(read_journal_field targetRelease)" || return 1
+            if python3 "$recovery_tool" prune-appliance --backups "$backups_root" --operation "$operation_id" --manifest-sha256 "$manifest_digest" --data-root "$database_root" --source "$source_release" --target "$target_release"; then
+                prune_status=succeeded
+            else
+                prune_status=failed
+            fi
+            if [[ "$phase" == committed ]]; then
+                set_operation_phase committed "$prune_status" false || return 1
+            fi
+            if [[ "$prune_status" == failed ]]; then
+                echo 'error: the selected appliance release was retained, but superseded backups could not be pruned' >&2
+                [[ "$boot_only" == 'true' ]] || return 1
+            fi
+        fi
+    fi
+    if [[ "$phase" == committed && "$(read_journal_field snapshotPruneStatus 2>/dev/null || true)" == succeeded &&
+        -d "${appliance_xdg_runtime_dir:-}" ]]; then
+        source_release="$(read_journal_field sourceRelease)" || return 1
+        retire_superseded_appliance_images "$source_release" "$expected" ||
+            echo 'warning: Kautuka kept older appliance images because retirement could not be verified' >&2
+    fi
+    echo "Appliance recovery selected release $expected."
+}
+
+capture_appliance_snapshot() {
+    local source="$1" target="$2" operation snapshot pending digest
+    operation="$(python3 -c 'import secrets; print(secrets.token_hex(16))')" || return 1
+    snapshot="$backups_root/$operation"
+    pending="$backups_root/.candidate-$operation"
+    write_durable_record "$journal_path" "$operation" capturing "$source" "$target" "$snapshot" "manager=$source" || return 1
+    ensure_maintenance_fence_from_journal || return 1
+    test_crash_at capturing
+    stop_database_writers && acquire_database_writer_exclusion || return 1
+    python3 "$recovery_tool" capture --layout appliance --data-root "$database_root" --destination "$pending" \
+        --operation "$operation" --source "$source" --target "$target" || return 1
+    digest="$(sha256sum "$pending/manifest.json" | cut -d' ' -f1)" || return 1
+    [[ "$digest" =~ ^[a-f0-9]{64}$ ]] || return 1
+    write_durable_record "$journal_path" "$operation" capturing "$source" "$target" "$snapshot" \
+        "manager=$source" "snapshotManifestSha256=$digest" || return 1
+    mv -- "$pending" "$snapshot" && sync -f "$backups_root" && set_operation_phase verified
+}
+
+activate_appliance_version() {
+    local source="$1" target="$2"
+    wait_for_appliance_release "$source" normal "/opt/kautuka/manager/versions/$target/kautuka-manager" || return 1
+    if ! capture_appliance_snapshot "$source" "$target" ||
+        ! retarget_current "$target" || ! set_operation_phase verifying; then
+        recover_appliance_operation false || echo 'error: appliance recovery remains pending' >&2
+        return 1
+    fi
+    test_crash_at switched
+    release_database_writer_exclusion
+    if ! start_appliance_manager verifying || ! wait_for_appliance_release "$target" verifying ||
+        ! stop_database_writers || ! retain_appliance_snapshot; then
+        recover_appliance_operation false || echo 'error: appliance recovery remains pending' >&2
+        return 1
+    fi
+    set_operation_phase committed pending || return 1
+    test_crash_at committed
+    recover_appliance_operation false || return 1
+    echo "Committed signed appliance release $target."
 }
 
 commit_operation() {
@@ -1543,19 +2212,176 @@ PY
 
 # Installing or starting the early-boot recovery unit during a first-time or
 # bootstrap install is a no-op when no recovery decision exists. Avoid taking
-# the update lock in that case: the installer may already hold it while systemd
-# orders a just-created user@ unit behind this no-op recovery service.
+# the update lock if certificates are current: the installer may already hold
+# it while systemd orders a just-created user@ unit behind this recovery service.
 if [[ "$boot_recover" == 'true' \
     && ! -e "$journal_path" && ! -L "$journal_path" \
     && ! -e "$maintenance_path" && ! -L "$maintenance_path" ]]; then
     assert_no_legacy_recovery_markers || exit 1
-    exit 0
+    if ! configure_appliance_layout; then
+        # A fresh or legacy install has no appliance payload to renew.
+        [[ ! -d /opt/kautuka/manager/current/service-images ]] || exit 1
+        exit 0
+    fi
+    if [[ ! -x /opt/kautuka/manager/current/kautuka-manager ]]; then
+        [[ -f /var/lib/kautuka-recovery/first-install.pending &&
+            ! -e /opt/kautuka/manager/current && ! -L /opt/kautuka/manager/current ]] || exit 1
+        exit 0
+    fi
+    certificate_status=0
+    channel_certificate_status || certificate_status=$?
+    if [[ "$certificate_status" == 0 ]]; then
+        exit 0
+    fi
+    [[ "$certificate_status" == 10 || "$certificate_status" == 11 || "$certificate_status" == 12 ]] || exit 1
+    exec 9>"$lock_path"
+    flock 9
+    recheck_host_tools_after_lock
+    renew_appliance_channel_certificates true
+    exit $?
 fi
 
 exec 9>"$lock_path"
-if ! flock -n 9; then
+if [[ "$consume_appliance_request" == 'true' ]]; then
+    flock 9
+elif ! flock -n 9; then
+    if [[ "$renew_channel_certificates" == 'true' ]]; then
+        echo 'Deferred Channel certificate maintenance until the next timer run because an update is active.'
+        exit 0
+    fi
     echo "error: another apply-release is already running." >&2
     exit 1
+fi
+
+recheck_host_tools_after_lock
+
+if [[ "$consume_appliance_request" == 'true' ]]; then
+    activate_appliance='true'
+fi
+
+if [[ "$renew_channel_certificates" == 'true' ]]; then
+    configure_appliance_layout || exit 1
+    if [[ -e "$maintenance_path" || -L "$maintenance_path" ]]; then
+        echo 'Deferred Channel certificate maintenance while release recovery is pending.'
+        exit 0
+    fi
+    if [[ -e "$journal_path" || -L "$journal_path" ]]; then
+        [[ -f "$journal_path" && ! -L "$journal_path" ]] || exit 1
+        case "$(read_journal_field phase)" in
+            committed|completed|aborted) ;;
+            *) echo 'Deferred Channel certificate maintenance while a release decision is pending.'; exit 0 ;;
+        esac
+    fi
+    # The inode is stable and mounted read-only into Gateway. Writing one byte
+    # never replaces it; an admitted shared holder may finish nested work.
+    [[ -f "$helper_run_lock" && ! -L "$helper_run_lock" && "$(stat -c '%u:%a' "$helper_run_lock")" == '0:644' ]] || {
+        echo 'error: root-owned Kautuka helper run lock is missing or unsafe' >&2
+        exit 1
+    }
+    channel_restart_marker="$database_root/security/.channel-renewal-restart"
+    certificate_status=0
+    channel_certificate_status || certificate_status=$?
+    case "$certificate_status" in
+        0)
+            if [[ ! -e "$channel_restart_marker" && ! -L "$channel_restart_marker" ]]; then
+                [[ "$(head -c 1 -- "$helper_run_lock")" != 0 ]] || exit 0
+                check_serving_channel_before_resume || exit 1
+                printf 0 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none || exit 1
+                exit 0
+            fi ;;
+        10|11|12) ;;
+        *)
+            echo "error: could not determine Channel certificate status ($certificate_status)" >&2
+            # Preserve the existing admission state unless a restart was interrupted.
+            if [[ -e "$channel_restart_marker" || -L "$channel_restart_marker" ]]; then
+                printf 2 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none || exit 1
+            fi
+            exit 1 ;;
+    esac
+    if [[ "$certificate_status" == 12 ]]; then
+        printf 2 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none || exit 1
+    elif [[ "$certificate_status" == 11 ]]; then
+        if [[ "$(head -c 1 -- "$helper_run_lock")" != 2 ]]; then
+            printf 1 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none || exit 1
+        fi
+    fi
+    (
+        exec 7<"$helper_run_lock" || exit 1
+        if [[ "$certificate_status" == 12 ]]; then
+            # Expired/invalid identities require recovery even if a run is stuck.
+            echo 'Channel identities expired or invalid; recovery may interrupt active helpers.'
+        elif ! flock -x -w "$([[ "$certificate_status" == 11 ]] && printf 30 || printf 0)" 7; then
+            echo 'Deferred Channel certificate maintenance while a helper is active.'
+            exit 0
+        fi
+        renewal_status=0
+        renew_appliance_channel_certificates false || renewal_status=$?
+        if [[ "$renewal_status" != 0 ]]; then
+            echo "error: Channel certificate renewal failed ($renewal_status)" >&2
+            if [[ "$certificate_status" == 10 || "$certificate_status" == 11 ]] &&
+                check_serving_channel_before_resume; then
+                printf 0 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none || exit 1
+            else
+                printf 2 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none || exit 1
+            fi
+            exit "$renewal_status"
+        fi
+        printf 0 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none
+    )
+    exit $?
+fi
+
+if [[ "$stage_appliance" == 'true' || "$activate_appliance" == 'true' ]]; then
+    configure_appliance_layout || {
+        echo 'error: this command requires an installed Manager-supervised appliance' >&2
+        exit 1
+    }
+elif [[ "$recover" == 'true' || "$boot_recover" == 'true' ]]; then
+    if configure_appliance_layout; then
+        assert_no_legacy_recovery_markers
+        recover_appliance_operation "$boot_recover" || exit $?
+        if [[ "$boot_recover" == 'true' ]]; then
+            renew_appliance_channel_certificates true
+            exit $?
+        fi
+        exit 0
+    fi
+fi
+
+if [[ "$consume_appliance_request" == 'true' ]]; then
+    version="$(python3 - <<'PY'
+import os, re, stat
+from contextlib import ExitStack
+
+name = 'activate-appliance'
+with ExitStack() as stack:
+    directory = None
+    try:
+        for part in ('/var/lib', 'kautuka', 'updateService', 'updates'):
+            directory = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            stack.callback(os.close, directory)
+        request = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+    except FileNotFoundError:
+        raise SystemExit(0)
+    except OSError as error:
+        if directory is not None and error.filename == name:
+            os.unlink(name, dir_fd=directory)
+        raise SystemExit(f'error: cannot open appliance update request: {error.strerror}')
+    stack.callback(os.close, request)
+    os.unlink(name, dir_fd=directory)
+    metadata = os.fstat(request)
+    if not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= 162:
+        raise SystemExit('error: invalid appliance update request file')
+    value = os.read(request, 163)
+    if not re.fullmatch(rb'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\n[0-9a-f]{32}\n', value):
+        raise SystemExit('error: invalid appliance update request')
+    print(value[:-1].decode('ascii'))
+PY
+)"
+    [[ -n "$version" ]] || exit 0
+    appliance_request_id="${version#*$'\n'}"
+    version="${version%%$'\n'*}"
+    artifact="/var/lib/kautuka/updateService/updates/staging/v${version}/kautuka-linux-amd64.tar.gz"
 fi
 
 if [[ "$capabilities" == 'true' ]]; then
@@ -1710,7 +2536,7 @@ with open(sys.argv[1], encoding='utf-8') as stream:
     print(json.load(stream).get('snapshotManifestSha256', ''))
 PY
 )"
-                python3 "$recovery_tool" verify --data-root "$database_root" --snapshot "$snapshot" \
+                python3 "$recovery_tool" verify --layout "$recovery_layout" --data-root "$database_root" --snapshot "$snapshot" \
                     --operation "$operation_id" --source "$source_release" --target "$target_release" \
                     --manifest-sha256 "$manifest_digest" || return 1
                 [[ "$(readlink -f "$backups_root/last-known-good" 2>/dev/null || true)" == "$snapshot" ]] || {
@@ -1740,6 +2566,22 @@ PY
     exit 2
 }
 require_version_token "$version"
+if [[ "$recovery_layout" == appliance ]]; then
+    assert_no_unresolved_update_operation
+    record_source_pointers
+    assert_forward_version "${source_pointers[manager]}" "$version"
+    artifact="$(assert_safe_artifact "$artifact")"
+    verified_root=''
+    trap 'cleanup_staging; [[ -z "$verified_root" ]] || rm -rf "$verified_root"' EXIT
+    verify_staged_artifact "$artifact" "$version"
+    stage_appliance_version "$version"
+    echo "Staged signed appliance release $version."
+    if [[ "$activate_appliance" == 'true' ]]; then
+        assert_database_writer_lock_ready
+        activate_appliance_version "${source_pointers[manager]}" "$version"
+    fi
+    exit 0
+fi
 assert_no_unresolved_update_operation || exit 1
 artifact="$(assert_safe_artifact "$artifact")"
 assert_supported_data_configuration

@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-
 namespace Kautuka.Manager.RuntimeContainer.Hosting;
 
 internal static class AgentSandboxInstallContract
@@ -24,12 +22,13 @@ internal static class AgentSandboxInstallContract
                 && pair.Left.ArgsTemplate.SequenceEqual(pair.Right.ArgsTemplate, StringComparer.Ordinal)
                 && pair.Left.EnvTemplate.SequenceEqual(pair.Right.EnvTemplate));
 
-    public static string BuildInstallRoot(WorkspaceMcpContainerConnectorDefinition connector)
+    public static string BuildInstallRoot(WorkspaceMcpContainerConnectorDefinition connector, string? bundleDigest = null)
     {
         ArgumentNullException.ThrowIfNull(connector);
         string digest = ExtractDigest(McpbImageMaterializer.BuildSandboxArtifactImageReference(
             connector.ServerType ?? throw new InvalidOperationException($"Container connector '{connector.ConnectorId}' is missing server_type."),
-            ComputeBundleDigest(connector)));
+            bundleDigest ?? McpbImageMaterializer.ComputeSha256Hex(connector.BundlePath
+                ?? throw new InvalidOperationException($"Container connector '{connector.ConnectorId}' is missing bundle_path."))));
         return $"{installRoot}/by-digest/{digest}";
     }
 
@@ -99,14 +98,6 @@ internal static class AgentSandboxInstallContract
         string entryPoint = remaining[0];
         remaining.RemoveAt(0);
         return ($"{bundleRoot}/.venv/bin/{entryPoint}", remaining);
-    }
-
-    private static string ComputeBundleDigest(WorkspaceMcpContainerConnectorDefinition connector)
-    {
-        string path = connector.BundlePath
-            ?? throw new InvalidOperationException($"Container connector '{connector.ConnectorId}' is missing bundle_path.");
-        using FileStream stream = File.OpenRead(path);
-        return Convert.ToHexStringLower(SHA256.HashData(stream));
     }
 
     private static string ExtractDigest(string runtimeImage)

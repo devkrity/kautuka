@@ -44,7 +44,7 @@ static_resources:
                   envoy_grpc:
                     cluster_name: manager-authorization
                     authority: kautuka-decision.internal
-                  timeout: 2s
+                  timeout: {{AUTHORIZATION_DEADLINE}}
             - name: envoy.filters.network.set_filter_state
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.set_filter_state.v3.Config
@@ -72,7 +72,7 @@ static_resources:
                   envoy_grpc:
                     cluster_name: manager-authorization
                     authority: kautuka-decision.internal
-                  timeout: 2s
+                  timeout: {{AUTHORIZATION_DEADLINE}}
             - name: envoy.filters.network.set_filter_state
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.set_filter_state.v3.Config
@@ -176,8 +176,8 @@ static_resources:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
                 stat_prefix: tcp_tls_lan
                 cluster: dfp_lan_egress
-  clusters:
-    - name: manager-authorization
+{{GATEWAY_CONNECT_LISTENER}}{{TELEMETRY_LISTENER}}{{TELEMETRY_SECRET}}  clusters:
+{{TELEMETRY_CLUSTER}}    - name: manager-authorization
       connect_timeout: 0.5s
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:

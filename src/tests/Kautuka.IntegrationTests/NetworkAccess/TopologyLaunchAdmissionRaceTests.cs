@@ -293,12 +293,12 @@ public sealed class TopologyLaunchAdmissionRaceTests
             workloadLaunchGate: new WorkloadLaunchGate(admission, policyStore));
         try
         {
-            Task<IReadOnlyList<string>> reconcile = service.ReconcileDesiredConnectorsAsync([connector], TestContext.Current.CancellationToken);
+            var reconcile = service.ReconcileDesiredConnectorsAsync([connector], null, TestContext.Current.CancellationToken);
             Task runOrReconcile = await Task.WhenAny(packageRunStarted.Task, reconcile)
                 .WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
             if (runOrReconcile == reconcile)
             {
-                IReadOnlyList<string> notes = await reconcile.ConfigureAwait(false);
+                IReadOnlyList<string> notes = (await reconcile.ConfigureAwait(false)).Notes;
                 Assert.Fail("Reconciliation completed without reaching the networked package-builder run. Notes: " + string.Join("; ", notes) + " Calls: " + string.Join(" | ", podmanCalls));
             }
             Assert.Contains("--network", packageRunArguments ?? []);

@@ -11,6 +11,7 @@ using Kautuka.Gateway.Infrastructure.Appliance;
 using Kautuka.Gateway.Infrastructure.Channels;
 using Kautuka.Gateway.Infrastructure.Connectors;
 using Kautuka.Gateway.Infrastructure.Credentials;
+using Kautuka.Gateway.Infrastructure.Egress;
 using Kautuka.Gateway.Infrastructure.Grpc;
 using Kautuka.Gateway.Infrastructure.Updates;
 using Kautuka.Gateway.RuntimePlane;
@@ -120,6 +121,7 @@ internal static partial class GatewayAppBootstrap
         });
         builder.Services.AddOpenApi();
         builder.Services.AddKautukaPlatform(builder.Configuration);
+        builder.Services.AddSingleton(sp => GatewayOutboundHttpTransport.FromConfiguration(sp.GetRequiredService<IConfiguration>()));
         builder.Services.AddKautukaRuntimePlane();
 
         // Manager mTLS certs (stable CA + rotating client leaf)
@@ -191,7 +193,8 @@ internal static partial class GatewayAppBootstrap
 
             return new ManagerGrpcServiceClient(
                 new DeadlineCallInvoker(new LazyCallInvoker(lazyChannel)),
-                baseAddress);
+                baseAddress,
+                builder.Configuration.GetValue("Kautuka:ConnectorImagePreparationSeconds", ManagerGrpcServiceClient.DefaultBundlePreparationSeconds));
         });
         builder.Services.AddSingleton<INetworkAccessChecker>(sp =>
         {

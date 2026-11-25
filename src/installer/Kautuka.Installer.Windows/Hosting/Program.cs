@@ -33,7 +33,7 @@ internal static partial class Program
             return;
         }
 
-        if (args.Contains("--express") || args.Contains("--resume"))
+        if (args.Contains("--express"))
         {
             RunExpressApplianceInstall(log, launchOptions.InstallDefaults);
             return;

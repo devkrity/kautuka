@@ -14,7 +14,8 @@ internal sealed class KautukaAiClientFactory(
     CredentialResolverService credentialResolver,
     IProviderTypeCatalog providerTypeCatalog,
     IRunLimitResolver? runLimitResolver = null,
-    INetworkAccessChecker? checker = null)
+    INetworkAccessChecker? checker = null,
+    Func<INetworkAccessChecker?, HttpMessageHandler>? transportFactory = null)
 {
     public KautukaAiClientFactory(IEnumerable<IAiClientProvider> providers, CredentialResolverService credentialResolver)
         : this(providers, credentialResolver, new SeededProviderTypeCatalog())
@@ -68,7 +69,7 @@ internal sealed class KautukaAiClientFactory(
         JsonObject settingsJson = ToSettingsObject(provider);
         string? apiKey = await ResolveApiKeyAsync(provider.Id, providerType, settingsJson, ct).ConfigureAwait(false);
 
-        return strategy.TryCreate(settingsJson, modelName, apiKey);
+        return CreateRuntimeClient(strategy, settingsJson, modelName, apiKey);
     }
 
     public async Task<IEmbeddingGenerator<string, Embedding<float>>?> TryCreateEmbeddingGeneratorAsync(
@@ -92,7 +93,7 @@ internal sealed class KautukaAiClientFactory(
         JsonObject settingsJson = ToSettingsObject(provider);
         string? apiKey = await ResolveApiKeyAsync(provider.Id, providerType, settingsJson, ct).ConfigureAwait(false);
 
-        return strategy.TryCreateEmbeddingGenerator(settingsJson, modelName, apiKey);
+        return CreateRuntimeEmbeddingGenerator(strategy, settingsJson, modelName, apiKey);
     }
 
     public async Task<IEmbeddingGenerator<string, Embedding<float>>?> TryCreateEmbeddingGeneratorAsync(
@@ -115,7 +116,7 @@ internal sealed class KautukaAiClientFactory(
 
         string? apiKey = await ResolveApiKeyAsync(providerId, normalizedProviderType, settings, ct).ConfigureAwait(false);
 
-        return strategy.TryCreateEmbeddingGenerator(settings, modelName, apiKey);
+        return CreateRuntimeEmbeddingGenerator(strategy, settings, modelName, apiKey);
     }
 
     /// <summary>
@@ -141,7 +142,23 @@ internal sealed class KautukaAiClientFactory(
         // Inline api_key (e.g. from test/validation request) takes priority over CredentialsHost.
         string? apiKey = await ResolveApiKeyAsync(providerId, normalizedProviderType, settings, ct).ConfigureAwait(false);
 
-        return strategy.TryCreate(settings, modelName, apiKey);
+        return CreateRuntimeClient(strategy, settings, modelName, apiKey);
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope", Justification = "The returned chat client owns the provider client.")]
+    private static IChatClient? CreateRuntimeClient(IAiClientProvider strategy, JsonObject settings,
+        string modelName, string? apiKey)
+    {
+        IChatClient? client = strategy.TryCreate(settings, modelName, apiKey);
+        return client;
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope", Justification = "The returned embedding generator owns the provider generator.")]
+    private static IEmbeddingGenerator<string, Embedding<float>>? CreateRuntimeEmbeddingGenerator(
+        IAiClientProvider strategy, JsonObject settings, string modelName, string? apiKey)
+    {
+        IEmbeddingGenerator<string, Embedding<float>>? generator = strategy.TryCreateEmbeddingGenerator(settings, modelName, apiKey);
+        return generator;
     }
 
     public async Task<IReadOnlyList<DiscoveredModelDefinition>> DiscoverModelsAsync(
@@ -149,6 +166,7 @@ internal sealed class KautukaAiClientFactory(
         string providerType,
         JsonObject settings,
         bool throwOnFailure = false,
+        bool useStoredCredential = true,
         CancellationToken ct = default)
     {
         string normalizedProviderType = ProviderTypeCatalogSettings.NormalizeType(providerType);
@@ -167,7 +185,9 @@ internal sealed class KautukaAiClientFactory(
         }
 
         // Inline api_key (e.g. from test request) takes priority; falls back to CredentialsHost.
-        string? apiKey = await ResolveApiKeyAsync(providerId, normalizedProviderType, settings, ct).ConfigureAwait(false);
+        string? apiKey = useStoredCredential
+            ? await ResolveApiKeyAsync(providerId, normalizedProviderType, settings, ct).ConfigureAwait(false)
+            : AiProviderSettings.GetString(settings, "api_key");
 
         return await strategy.DiscoverModelsAsync(settings, apiKey, throwOnFailure, ct).ConfigureAwait(false);
     }
@@ -250,7 +270,7 @@ internal sealed class KautukaAiClientFactory(
             return null;
         }
 
-        return new OpenAiCompatibleProvider(providerType, allowCatalogDefaults ? metadata.DefaultBaseUrl : null, runLimitResolver, checker);
+        return new OpenAiCompatibleProvider(providerType, allowCatalogDefaults ? metadata.DefaultBaseUrl : null, runLimitResolver, checker, transportFactory);
     }
 
     private JsonObject MaterializeCatalogDefaults(string providerType, JsonObject settings)

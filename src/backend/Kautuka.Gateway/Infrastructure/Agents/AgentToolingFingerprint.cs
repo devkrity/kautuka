@@ -116,6 +116,7 @@ internal static class AgentToolingFingerprint
             Append(builder, "skill");
             Append(builder, attachment.SkillId);
             Append(builder, attachment.Mode.ToString());
+            Append(builder, attachment.Context);
             Append(builder, skills.TryGetValue(attachment.SkillId, out SkillDefinition? skill) ? skill.PackageHash : string.Empty);
         }
 

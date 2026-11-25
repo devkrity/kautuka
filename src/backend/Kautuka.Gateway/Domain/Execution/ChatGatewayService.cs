@@ -136,6 +136,8 @@ internal sealed partial class ChatGatewayService : IChatGatewayService, IMemoryE
         GatewaySession session = string.IsNullOrWhiteSpace(sessionId)
             ? await sessionLifecycleService.CreateSessionAsync(targetType, targetId, userId ?? string.Empty, cancellationToken, source).ConfigureAwait(false)
             : await sessionLifecycleService.EnsureSessionAsync(targetType, targetId, sessionId, userId ?? string.Empty, cancellationToken, source).ConfigureAwait(false);
+        using HelperRunScope helperRunLease = await HelperRunScope.AcquireAsync(cancellationToken).ConfigureAwait(false);
+        helperRunLease.Enter();
         using IDisposable executionLease = await SessionExecutionGate.EnterAsync($"{targetId}:{session.Id}", cancellationToken).ConfigureAwait(false);
         if (source?.Trim().ToUpperInvariant() is "TELEGRAM" or "SLACK" or "CHANNEL" or "NARAD" or "BROWSER"
             && state.AgentDefinitionStore.HasActiveRunForSession(state.AgentDefinitionStore.GetStorageLocatorKey(targetId), session.Id))
@@ -288,6 +290,8 @@ internal sealed partial class ChatGatewayService : IChatGatewayService, IMemoryE
         Func<NaradPersistedEvent, CancellationToken, ValueTask>? beforeWaitTerminal = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        using HelperRunScope helperRunLease = await HelperRunScope.AcquireAsync(cancellationToken).ConfigureAwait(false);
+        helperRunLease.Enter();
         using IDisposable executionLease = await SessionExecutionGate.EnterAsync($"{targetId}:{sessionId}", cancellationToken).ConfigureAwait(false);
         ToolApprovalResponseInfo continuationApprovalResponse = approvalResponse with
         {

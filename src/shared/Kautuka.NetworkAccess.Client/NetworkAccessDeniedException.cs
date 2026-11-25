@@ -78,7 +78,7 @@ public sealed class NetworkAccessDeniedException : HttpRequestException
         string? purpose = null,
         string? customMessage = null,
         Exception? innerException = null)
-        : base(FormatMessage(kind, destination, port, userId, customMessage), innerException)
+        : base(FormatMessage(kind, reason, destination, port, customMessage), innerException)
     {
         Destination = destination;
         Port = port;
@@ -104,9 +104,9 @@ public sealed class NetworkAccessDeniedException : HttpRequestException
 
     private static string FormatMessage(
         NetworkAccessDenialKind kind,
+        string reason,
         string destination,
         int port,
-        string? userId,
         string? customMessage)
     {
         if (!string.IsNullOrWhiteSpace(customMessage))
@@ -118,12 +118,14 @@ public sealed class NetworkAccessDeniedException : HttpRequestException
 
         return kind switch
         {
+            NetworkAccessDenialKind.Unavailable when reason == "topology_closed" =>
+                "Kautuka paused this connection while checking network protection. Try again in a moment.",
             NetworkAccessDenialKind.Unavailable =>
                 "Network access control isn't responding, so this connection was stopped. It isn't a permission problem.",
             NetworkAccessDenialKind.Paused =>
                 "Network access has been paused.",
             _ =>
-                $"This agent hasn't been allowed to reach {destFormatted} yet. A request has been sent to {(string.IsNullOrWhiteSpace(userId) ? "the owner" : userId)}. Tell the user it needs approval, then try again once it's approved.",
+                $"Your helper needs permission to connect to {destFormatted}.",
         };
     }
 }

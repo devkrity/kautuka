@@ -2,8 +2,12 @@ import { SegmentedControl } from '@/components/ui/segmented-control';
 import { TabsContent } from '@/components/ui/tabs';
 import { HitlFunctionStat } from '@/features/approvals';
 import type { Skill, SkillAttachmentMode } from '@/features/skills';
+import { cn } from '@/lib/utils';
 import type { AgentSettingsEntry } from '../types/settingsTypes';
 import { SkillCard } from './shared/SkillCard';
+import { executionContextOptions } from './shared/executionContextOptions';
+
+type ExecutionContext = (typeof executionContextOptions)[number]['value'];
 
 interface AgentSkillsEditorProps {
   agent: AgentSettingsEntry;
@@ -24,15 +28,12 @@ export function AgentSkillsEditor({
   selectionEnabled,
   onPatch,
 }: Readonly<AgentSkillsEditorProps>) {
-  const getMode = (skillId: string): SkillAttachmentMode =>
-    agent.skillAttachments.find((entry) => entry.skillId === skillId)?.mode ?? 'disabled';
-
-  const setMode = (skillId: string, mode: SkillAttachmentMode) => {
+  const setAttachment = (skillId: string, mode: SkillAttachmentMode, context: ExecutionContext) => {
     onPatch((previous) => ({
       ...previous,
       skillAttachments: [
         ...previous.skillAttachments.filter((entry) => entry.skillId !== skillId),
-        { skillId, mode },
+        { skillId, mode, context },
       ],
     }));
   };
@@ -53,14 +54,11 @@ export function AgentSkillsEditor({
             No platform skills imported yet. Import them from the Skills page first.
           </p>
         ) : (
-          <div
-            className={[
-              'space-y-2',
-              !selectionEnabled ? 'pointer-events-none opacity-60' : '',
-            ].join(' ')}
-          >
+          <div className={cn('space-y-2', !selectionEnabled && 'pointer-events-none opacity-60')}>
             {skills.map((skill) => {
-              const selectedMode = getMode(skill.id);
+              const attachment = agent.skillAttachments.find((entry) => entry.skillId === skill.id);
+              const selectedMode = attachment?.mode ?? 'disabled';
+              const executionContext = attachment?.context ?? 'OwnContext';
               return (
                 <SkillCard
                   key={skill.id}
@@ -72,7 +70,7 @@ export function AgentSkillsEditor({
                     <SegmentedControl
                       value={selectedMode}
                       disabled={!selectionEnabled}
-                      onChange={(option) => setMode(skill.id, option)}
+                      onChange={(option) => setAttachment(skill.id, option, executionContext)}
                       options={(['disabled', 'trusted', 'require_approval'] as const).map((option) => ({
                         value: option,
                         label: modeLabel(option),
@@ -89,8 +87,18 @@ export function AgentSkillsEditor({
                   details={
                     !selectionEnabled ? (
                       <p>Enable sandbox to attach and run skills.</p>
-                    ) : skill.hasScripts && selectedMode === 'require_approval' ? (
-                      <p>Script execution will enter HITL approval flow.</p>
+                    ) : selectedMode !== 'disabled' ? (
+                      <div className="space-y-2">
+                        <div className="text-sm font-medium">Execution Context</div>
+                        <SegmentedControl
+                          value={executionContext}
+                          onChange={(option) => setAttachment(skill.id, selectedMode, option)}
+                          options={executionContextOptions.map((option) => ({ ...option }))}
+                        />
+                        {skill.hasScripts && selectedMode === 'require_approval' && (
+                          <p>Script execution requires approval.</p>
+                        )}
+                      </div>
                     ) : undefined
                   }
                 />

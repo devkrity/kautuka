@@ -19,15 +19,17 @@ internal sealed class ContainerInspectionUnavailableException : IOException
 
 internal static class PodmanContainerInspector
 {
-    internal static async Task<string?> ReadAsync(PodmanCommandRunner runner, string name, CancellationToken cancellationToken)
+    internal const int DefaultTimeoutSeconds = 10;
+
+    internal static async Task<string?> ReadAsync(PodmanCommandRunner runner, string name, CancellationToken cancellationToken, int timeoutSeconds = DefaultTimeoutSeconds)
     {
-        PodmanCommandResult inspection = await runner.RunAsync(["inspect", name], 10, cancellationToken).ConfigureAwait(false);
+        PodmanCommandResult inspection = await runner.RunAsync(["inspect", name], timeoutSeconds, cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         if (inspection.ExitCode != 0)
         {
             if (inspection.TerminationReason != ProcessTerminationReason.TimedOut)
             {
-                PodmanCommandResult existence = await runner.RunAsync(["container", "exists", name], 10, cancellationToken).ConfigureAwait(false);
+                PodmanCommandResult existence = await runner.RunAsync(["container", "exists", name], timeoutSeconds, cancellationToken).ConfigureAwait(false);
                 cancellationToken.ThrowIfCancellationRequested();
                 if (existence.ExitCode == 1 && existence.TerminationReason == ProcessTerminationReason.NonZeroExit)
                 {

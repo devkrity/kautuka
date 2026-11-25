@@ -47,6 +47,7 @@ export function NetworkAccessPage() {
   const [activeTab, setActiveTab] = React.useState<ViewTab>(tabParam);
   const [search, setSearch] = React.useState('');
   const [generalError, setGeneralError] = React.useState<string | null>(null);
+  const [decisionNotice, setDecisionNotice] = React.useState<string | null>(null);
   const [editingRule, setEditingRule] = React.useState<NetworkAccessRuleDto | null>(null);
   const [openInternetDialog, setOpenInternetDialog] = React.useState(false);
 
@@ -125,11 +126,20 @@ export function NetworkAccessPage() {
   // Decisions
   const handleDecide = async (decision: RequestDecisionDto, requestId: string) => {
     setGeneralError(null);
+    setDecisionNotice(null);
+    const request = requests.find((candidate) => candidate.id === requestId);
     try {
       const result = await decideMutation.mutateAsync({
         requestId,
         decision,
       });
+      if (decision.allow && request?.purpose !== 'probe' && result.rule?.allowed) {
+        setDecisionNotice(
+          request?.userId === currentUser?.id
+            ? 'Access approved. Try again.'
+            : 'Access approved. They can try again.'
+        );
+      }
       await requestsQuery.refetch();
       await rulesQuery.refetch();
       return result;
@@ -269,6 +279,7 @@ export function NetworkAccessPage() {
           {generalError}
         </Alert>
       )}
+      {decisionNotice && <p role="status" className="text-sm text-muted-foreground">{decisionNotice}</p>}
 
       {userIdParam && (
         <Alert variant="default" className="text-sm flex items-center justify-between">

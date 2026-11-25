@@ -15,6 +15,8 @@ public readonly record struct CidrRange(string CanonicalCidr, string AddressPref
 public static class NetworkAddressClassifier
 {
     public const string SinkholeAddress = "198.18.250.250";
+    public const string ApplianceChannelHostAddress = "10.247.0.8";
+    public const string ApplianceUpdateServiceAddress = "10.247.0.9";
     public const string SinkholeCidr = "198.18.0.0/15";
     public const string PackageProxyServiceAddress = "198.18.250.249";
     public const int PackageProxyServicePort = 20101;

@@ -132,7 +132,16 @@ internal static class GatewayConnectorEndpointMappings
             }
 
             request.UserId ??= user.Id;
-            bool maySaveDiscovery = saved is not null && GatewayOwnershipAccess.CanManageConnector(user, saved) && !hasCallerEnvironment;
+            bool mayManage = saved is not null && GatewayOwnershipAccess.CanManageConnector(user, saved);
+            bool mayRefreshWebTools = !mayManage && saved is not null
+                && saved.Id == "kautuka-web-tools"
+                && saved.Scope == GatewayOwnershipScopes.System
+                && saved.Transport == "container"
+                && !string.IsNullOrWhiteSpace(saved.BundlePath)
+                && saved.EnvKeys is not { Count: > 0 }
+                && request.TestEnv is not { Count: > 0 }
+                && !HasCurrentLocalTools(saved);
+            bool maySaveDiscovery = !hasCallerEnvironment && (mayManage || mayRefreshWebTools);
             request.SaveDiscovery = maySaveDiscovery && !string.Equals(request.Transport, "http", StringComparison.OrdinalIgnoreCase);
             McpConnectorTestResult result = await testService.TestAsync(request, ct).ConfigureAwait(false);
             if (maySaveDiscovery && result.Success && result.ToolDefinitions is not null && saved is not null
@@ -141,6 +150,8 @@ internal static class GatewayConnectorEndpointMappings
                 string? digest = string.IsNullOrWhiteSpace(saved.BundlePath) ? null : result.SourceDigest;
                 if (!IsCanonicalImageDigest(result.ImageDigest) || (!string.IsNullOrWhiteSpace(saved.BundlePath) && !IsCanonicalSourceDigest(digest)))
                     return Results.Json(new GatewayErrorResponse("Connector tools could not be saved without an immutable artifact digest."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
+                if (mayRefreshWebTools && !string.Equals(digest, saved.RuntimeArtifactSourceDigest, StringComparison.OrdinalIgnoreCase))
+                    return ConnectorEnablementConflict("The Web Tools bundle changed during discovery. Test it again.");
                 try
                 {
                     await catalog.SaveVerifiedLocalToolsAsync(saved.Id, saved.UpdatedAt, result.ToolDefinitions, digest, result.ImageDigest!, ct).ConfigureAwait(false);
@@ -322,24 +333,83 @@ internal static class GatewayConnectorEndpointMappings
             return Results.Json(ToConnectorPayload(saved), KautukaJsonContext.Default.GatewayConnectorListItem);
         });
 
-        app.MapGet("/api/connectors", (IGatewayCatalogStore catalog, IGatewayAuthGuard auth, HttpContext context) =>
+        app.MapGet("/api/connectors", (IGatewayCatalogStore catalog, ConnectorUserEnablement enablement, IGatewayAuthGuard auth, HttpContext context) =>
         {
             if (!auth.TryAuthorize(context, out GatewayUser? user) || user is null)
                 return Results.Unauthorized();
 
             return Results.Json(
-                new GatewayConnectorsResponse([.. catalog.ListMcpServers().Where(server => GatewayOwnershipAccess.CanAccessConnector(user, server)).Select(ToConnectorPayload)]),
+                new GatewayConnectorsResponse([.. catalog.ListMcpServers().Where(server => GatewayOwnershipAccess.CanAccessConnector(user, server))
+                    .Select(server => ToConnectorPayload(server) with { Enabled = enablement.IsEnabled(user.Id, server.Id, server.Enabled) })]),
                 KautukaJsonContext.Default.GatewayConnectorsResponse);
         });
 
-        app.MapGet("/api/connectors/{serverId}", (string serverId, IGatewayCatalogStore catalog, IGatewayAuthGuard auth, HttpContext context) =>
+        app.MapGet("/api/connectors/{serverId}", (string serverId, IGatewayCatalogStore catalog, ConnectorUserEnablement enablement, IGatewayAuthGuard auth, HttpContext context) =>
         {
             if (!auth.TryAuthorize(context, out GatewayUser? user) || user is null)
                 return Results.Unauthorized();
 
-            return catalog.TryGetMcpServer(serverId, out GatewayMcpServer? server) && GatewayOwnershipAccess.CanAccessConnector(user, server)
-                ? Results.Json(ToConnectorPayload(server!), KautukaJsonContext.Default.GatewayConnectorListItem)
+            return catalog.TryGetMcpServer(serverId, out GatewayMcpServer? server) && server is not null && GatewayOwnershipAccess.CanAccessConnector(user, server)
+                ? Results.Json(ToConnectorPayload(server) with { Enabled = enablement.IsEnabled(user.Id, serverId, server.Enabled) }, KautukaJsonContext.Default.GatewayConnectorListItem)
                 : Results.Json(new GatewayErrorResponse("Connector not found"), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status404NotFound);
+        });
+
+        app.MapPut("/api/connectors/{serverId}/enabled", async (string serverId, IGatewayCatalogStore catalog,
+            ConnectorUserEnablement enablement, RemoteMcpCredentialRevisionTracker revisions, IWorkspaceDesiredStatePublisher desiredState,
+            IMcpConnectorTestService testService, IGatewayAuthGuard auth, HttpContext context, CancellationToken ct) =>
+        {
+            if (!auth.TryAuthorize(context, out GatewayUser? user) || user is null) return Results.Unauthorized();
+            GatewayConnectorUpsertRequest? request = await context.Request.ReadFromJsonAsync(
+                KautukaJsonContext.Default.GatewayConnectorUpsertRequest, ct).ConfigureAwait(false);
+            if (request?.Enabled is not bool enabled) return Results.BadRequest();
+            if (!catalog.TryGetMcpServer(serverId, out GatewayMcpServer? visible) || visible is null
+                || !GatewayOwnershipAccess.CanAccessConnector(user, visible)) return Results.NotFound();
+
+            if (enabled && string.Equals(visible.Transport, "container", StringComparison.OrdinalIgnoreCase)
+                && visible.EnvKeys is not { Count: > 0 } && !HasCurrentLocalTools(visible))
+            {
+                GatewayConnectorTestRequest probe = StoredDefinition(visible, new GatewayConnectorTestRequest { Id = serverId });
+                probe.UserId = user.Id;
+                probe.SaveDiscovery = true;
+                McpConnectorTestResult result = await testService.TestAsync(probe, ct).ConfigureAwait(false);
+                string? sourceDigest = string.IsNullOrWhiteSpace(visible.BundlePath) ? null : result.SourceDigest;
+                if (!result.Success) return ConnectorEnablementConflict(result.Message);
+                if (result.ToolDefinitions is null || !IsCanonicalImageDigest(result.ImageDigest)
+                    || (!string.IsNullOrWhiteSpace(visible.BundlePath) && !IsCanonicalSourceDigest(sourceDigest)))
+                    return ConnectorEnablementConflict("Connector tools could not be verified against an immutable image.");
+                try
+                {
+                    visible = await catalog.SaveVerifiedLocalToolsAsync(serverId, visible.UpdatedAt, result.ToolDefinitions,
+                        sourceDigest, result.ImageDigest!, ct).ConfigureAwait(false);
+                }
+                catch (InvalidOperationException ex) { return ConnectorEnablementConflict(ex.Message); }
+            }
+
+            bool saved = false;
+            try
+            {
+                using IDisposable change = revisions.BeginExclusiveChange(serverId, "user:" + user.Id);
+                await catalog.WithMcpServerLockAsync(serverId, _ =>
+                {
+                    if (catalog.TryGetMcpServer(serverId, out GatewayMcpServer? server)
+                        && ReferenceEquals(server, visible) && GatewayOwnershipAccess.CanAccessConnector(user, server))
+                    {
+                        enablement.SetEnabled(user.Id, serverId, enabled);
+                        saved = true;
+                    }
+                    return Task.CompletedTask;
+                }, ct).ConfigureAwait(false);
+            }
+            catch (InvalidOperationException ex) { return ConnectorEnablementConflict(ex.Message); }
+            if (!saved) return ConnectorEnablementConflict("Connector settings changed. Try again.");
+
+            if (string.Equals(visible.Transport, "container", StringComparison.OrdinalIgnoreCase))
+            {
+                DesiredStatePublishResult published = await desiredState.TryPublishCurrentAsync("connector-user-enablement", ct).ConfigureAwait(false);
+                if (!published.Accepted)
+                    return ConnectorEnablementConflict("Your setting was saved, but Manager could not apply it yet. Retry the change.");
+            }
+            return Results.NoContent();
         });
 
         app.MapPost("/api/connectors/{serverId}", async (string serverId, IGatewayCatalogStore catalog, ConnectorAuthCatalog connectorAuth, IMcpConnectorTestService testService, CredentialResolverService credentialResolver, ConnectorOAuthService connectorOAuth, KautukaDatabase database, IGatewayAuthGuard auth, HttpContext context, CancellationToken ct) =>
@@ -479,6 +549,9 @@ internal static class GatewayConnectorEndpointMappings
 
         return app;
     }
+
+    private static IResult ConnectorEnablementConflict(string message)
+        => Results.Json(new GatewayErrorResponse(message), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status409Conflict);
 
     private static GatewayUser? ActiveUser(IGatewayUserStore users, string id)
         => users.TryGetUserById(id, out GatewayUser? user) && user is { IsActive: true } ? user : null;
@@ -708,7 +781,8 @@ internal static class GatewayConnectorEndpointMappings
         server.McpProtocolVersion,
         [.. server.Credentials ?? []],
         [.. server.HttpHeaders ?? []],
-        server.RequiresCredentialReentry);
+        server.RequiresCredentialReentry,
+        server.Enabled);
 
     private static bool HasCurrentLocalTools(GatewayMcpServer server)
         => !string.Equals(server.Transport, "container", StringComparison.OrdinalIgnoreCase)

@@ -1,7 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization.Metadata;
@@ -11,10 +10,8 @@ using Grpc.Core;
 using Kautuka.Gateway.Domain.Auth;
 using Kautuka.Gateway.Domain.Autopilot;
 using Kautuka.Gateway.Domain.Providers;
-using Kautuka.Gateway.Endpoints.Settings;
 using Kautuka.Gateway.Infrastructure.Channels;
 using Kautuka.Gateway.Infrastructure.Credentials;
-using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Protos;
 using Kautuka.NetworkAccess.Client;
 using Kautuka.NetworkAccessController;
@@ -23,6 +20,7 @@ using Kautuka.Manager.Protos;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -42,19 +40,71 @@ namespace Kautuka.IntegrationTests;
 public sealed class ProviderSettingsEndpointTests
 {
     [Fact]
-    public async Task SavingProviderRollsBackWhenRuleWriteFails()
+    public async Task ProviderPermissionConfirmationIsBoundToTheDestinationAndPolicyRevision()
+    {
+        await using var fixture = await ProviderModelFixture.CreateAsync();
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        const string path = "/api/settings/providers/save";
+        var body = new JsonObject
+        {
+            ["id"] = "confirmation-test",
+            ["type"] = "ollama",
+            ["settings"] = new JsonObject { ["base_url"] = "http://192.168.1.12:11434" },
+        };
+        using HttpResponseMessage first = await fixture.SendAsync(HttpMethod.Post, path, body, token);
+        Assert.Equal(HttpStatusCode.Conflict, first.StatusCode);
+        Assert.Null(fixture.GetConfiguredProviderType("confirmation-test"));
+        JsonNode? confirmation = JsonNode.Parse(await first.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+        Assert.Equal("192.168.1.12", confirmation?["destination"]?.GetValue<string>());
+        Assert.True(confirmation?["allowLan"]?.GetValue<bool>());
+
+        var admin = new NetworkAccessActor("admin", true);
+        fixture.ProviderRules.SetRule(admin, new RuleWriteSpec("system", null, null, null, "other.example", "host", 443, false),
+            fixture.ProviderRules.Revision);
+        body["networkPermission"] = confirmation;
+        using HttpResponseMessage stale = await fixture.SendAsync(HttpMethod.Post, path, body, token);
+        Assert.Equal(HttpStatusCode.Conflict, stale.StatusCode);
+        Assert.Null(fixture.GetConfiguredProviderType("confirmation-test"));
+        Assert.DoesNotContain(fixture.ProviderRules.ListRules(admin).Rules, view => view.Rule.Destination == "192.168.1.12");
+
+        body["networkPermission"] = JsonNode.Parse(await stale.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+        body["settings"]!["base_url"] = "http://192.168.1.13:11434";
+        using HttpResponseMessage changed = await fixture.SendAsync(HttpMethod.Post, path, body, token);
+        Assert.Equal(HttpStatusCode.Conflict, changed.StatusCode);
+        Assert.Null(fixture.GetConfiguredProviderType("confirmation-test"));
+
+        body["networkPermission"] = JsonNode.Parse(await changed.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+        using HttpResponseMessage saved = await fixture.SendAsync(HttpMethod.Post, path, body, token);
+        Assert.Equal(HttpStatusCode.OK, saved.StatusCode);
+        NetworkAccessRule grant = Assert.Single(fixture.ProviderRules.ListRules(admin).Rules, view => view.Rule.Destination == "192.168.1.13").Rule;
+        Assert.True(grant.Allowed && grant.AllowLan);
+    }
+
+    [Fact]
+    public async Task SavingProviderReportsTheSavedIdWhenTheFinalRuleWriteFails()
     {
         await using var fixture = await ProviderModelFixture.CreateAsync();
         string token = await fixture.LoginAsBootstrapAdminAsync();
         fixture.FailRuleWrite = true;
         using HttpResponseMessage response = await fixture.SendAsync(HttpMethod.Post, "/api/settings/providers/save",
-            new { id = "failed-rule", type = "ollama", settings = new { base_url = "http://localhost:11434" } }, token);
-        Assert.False(response.IsSuccessStatusCode);
-        Assert.Null(fixture.GetConfiguredProviderType("failed-rule"));
+            new
+            {
+                id = "failed-rule",
+                type = "ollama",
+                settings = new { base_url = "http://localhost:11434" },
+                networkPermission = new { destination = "localhost", port = 11434, allowLan = true, revision = fixture.ProviderRules.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture) }
+            }, token);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal("ollama", fixture.GetConfiguredProviderType("failed-rule"));
+        using JsonDocument details = JsonDocument.Parse(await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+        Assert.Equal("failed-rule", details.RootElement.GetProperty("providerId").GetString());
+        Assert.Equal("provider_network_activation_incomplete", details.RootElement.GetProperty("code").GetString());
+        Assert.DoesNotContain(fixture.ProviderRules.ListRules(new NetworkAccessActor("admin", true)).Rules,
+            view => view.Rule.Destination == "localhost" && view.Rule.Allowed);
     }
 
     [Fact]
-    public async Task UpdatingProviderRestoresPreviousSettingsWhenRuleWriteFails()
+    public async Task UpdatingProviderCanRetryTheSameSavedIdWhenTheFinalRuleWriteFails()
     {
         await using var fixture = await ProviderModelFixture.CreateAsync();
         string token = await fixture.LoginAsBootstrapAdminAsync();
@@ -62,11 +112,31 @@ public sealed class ProviderSettingsEndpointTests
             new { id = "existing-provider", type = "ollama", settings = new { base_url = "http://localhost:11434" } }, token);
         fixture.FailRuleWrite = true;
         using HttpResponseMessage response = await fixture.SendAsync(HttpMethod.Post, "/api/settings/providers/save",
-            new { id = "existing-provider", type = "ollama", settings = new { base_url = "http://192.168.1.12:11434" } }, token);
-        Assert.False(response.IsSuccessStatusCode);
+            new
+            {
+                id = "existing-provider",
+                type = "ollama",
+                settings = new { base_url = "http://192.168.1.12:11434" },
+                networkPermission = new { destination = "192.168.1.12", port = 11434, allowLan = true, revision = fixture.ProviderRules.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture) }
+            }, token);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
         using JsonDocument providers = await fixture.SendJsonAsync(HttpMethod.Get, "/api/settings/providers", null, token);
         JsonElement saved = providers.RootElement.GetProperty("providers").EnumerateArray().Single(item => item.GetProperty("id").GetString() == "existing-provider");
-        Assert.Equal("http://localhost:11434", saved.GetProperty("settings").GetProperty("base_url").GetString());
+        Assert.Equal("http://192.168.1.12:11434", saved.GetProperty("settings").GetProperty("base_url").GetString());
+        var admin = new NetworkAccessActor("admin", true);
+        Assert.DoesNotContain(fixture.ProviderRules.ListRules(admin).Rules, view => view.Rule.Destination == "192.168.1.12");
+
+        fixture.FailRuleWrite = false;
+        using HttpResponseMessage retry = await fixture.SendAsync(HttpMethod.Post, "/api/settings/providers/save",
+            new
+            {
+                id = "existing-provider",
+                type = "ollama",
+                settings = new { base_url = "http://192.168.1.12:11434" },
+                networkPermission = new { destination = "192.168.1.12", port = 11434, allowLan = true, revision = fixture.ProviderRules.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture) }
+            }, token);
+        Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
+        Assert.Contains(fixture.ProviderRules.ListRules(admin).Rules, view => view.Rule.Destination == "192.168.1.12" && view.Rule.Allowed);
     }
 
     [Fact]
@@ -75,11 +145,104 @@ public sealed class ProviderSettingsEndpointTests
         await using var fixture = await ProviderModelFixture.CreateAsync(useControlledValidation: true);
         string token = await fixture.LoginAsBootstrapAdminAsync();
         using JsonDocument response = await fixture.SendJsonAsync(HttpMethod.Post, "/api/settings/providers/test",
-            new { id = "test", type = "openai", allowTemporaryNetworkAccess = true, settings = new { base_url = "https://provider.example/v1", api_key = "test" } }, token);
+            new { id = "test", type = "openai", confirmedTarget = new { host = "provider.example", port = 443 }, settings = new { base_url = "https://provider.example/v1", api_key = "test" } }, token);
         Assert.True(response.RootElement.GetProperty("success").GetBoolean());
         Assert.True(fixture.TemporaryTestAllowed);
         Assert.True(fixture.TemporaryTestEnded);
         Assert.DoesNotContain(fixture.ProviderRules.ListRules(new NetworkAccessActor("admin", true)).Rules, view => view.Rule.Destination == "provider.example");
+    }
+
+    [Fact]
+    public async Task FailedCleanupPreservesTheProviderTestResultAndUnavailableManagerStopsDiscovery()
+    {
+        await using var fixture = await ProviderModelFixture.CreateAsync(useControlledValidation: true);
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        var request = new
+        {
+            id = "local",
+            type = "ollama",
+            settings = new { base_url = "http://192.168.1.24:8199" },
+            confirmedTarget = new { host = "192.168.1.24", port = 8199 }
+        };
+        fixture.ManagerUnavailable = true;
+        using HttpResponseMessage unavailable = await fixture.SendAsync(HttpMethod.Post, "/api/settings/providers/test", request, token);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, unavailable.StatusCode);
+        Assert.False(fixture.TemporaryTestAllowed);
+        fixture.ManagerUnavailable = false;
+        fixture.FailTestCleanup = true;
+        using JsonDocument success = await fixture.SendJsonAsync(HttpMethod.Post, "/api/settings/providers/test", request, token);
+        Assert.True(success.RootElement.GetProperty("success").GetBoolean());
+        Assert.True(fixture.TemporaryTestAllowed);
+        Assert.False(fixture.TemporaryTestEnded);
+    }
+
+    [Fact]
+    public async Task CancellingProviderDiscoveryEndsItsTemporaryGrant()
+    {
+        var validation = new PausedProviderValidation();
+        await using var fixture = await ProviderModelFixture.CreateAsync(configureServices: services =>
+            services.AddSingleton<IProviderValidationService>(validation));
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        using var cancellation = new CancellationTokenSource();
+        Task<HttpResponseMessage> pending = fixture.SendCancellableAsync(HttpMethod.Post, "/api/settings/providers/test",
+            new
+            {
+                id = "local",
+                type = "ollama",
+                settings = new { base_url = "http://192.168.1.24:8199" },
+                confirmedTarget = new { host = "192.168.1.24", port = 8199 }
+            }, token, cancellation.Token);
+        await validation.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        await cancellation.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+        await fixture.TestGrantEnded.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        Assert.True(fixture.TemporaryTestEnded);
+    }
+
+    private sealed class PausedProviderValidation : IProviderValidationService
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<GatewayProviderTestResult> TestProviderAsync(ProviderTestDefinition definition, CancellationToken cancellationToken = default)
+        {
+            Started.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("Expected discovery to be cancelled.");
+        }
+    }
+
+    [Fact]
+    public async Task ProviderTestChecksEffectiveRulesAndUsesCatalogOrCustomTarget()
+    {
+        await using var fixture = await ProviderModelFixture.CreateAsync(useControlledValidation: true);
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        const string path = "/api/settings/providers/test";
+        var admin = new NetworkAccessActor("admin", true);
+        using JsonDocument alias = await fixture.SendJsonAsync(HttpMethod.Post, path,
+            new { id = "my-groq", type = "groq" }, token);
+        Assert.Equal("api.groq.com", alias.RootElement.GetProperty("confirmationTarget").GetProperty("host").GetString());
+        var local = new { id = "my-lan", type = "ollama", settings = new { base_url = "http://192.168.1.24:8199/custom" } };
+        using JsonDocument localPrompt = await fixture.SendJsonAsync(HttpMethod.Post, path, local, token);
+        Assert.Equal("192.168.1.24", localPrompt.RootElement.GetProperty("confirmationTarget").GetProperty("host").GetString());
+        Assert.Equal(8199, localPrompt.RootElement.GetProperty("confirmationTarget").GetProperty("port").GetInt32());
+        Assert.Empty(fixture.ProviderRules.ListRequests(admin).Requests);
+
+        fixture.ProviderRules.SetRule(admin, new RuleWriteSpec("system", null, null, null, "192.168.1.24", "ip", 8199,
+            true, AllowLan: true), fixture.ProviderRules.Revision);
+        using HttpResponseMessage stale = await fixture.SendAsync(HttpMethod.Post, path,
+            new { local.id, local.type, local.settings, confirmedTarget = new { host = "previous.example", port = 443 } }, token);
+        Assert.Equal(HttpStatusCode.Conflict, stale.StatusCode);
+        Assert.False(fixture.TemporaryTestAllowed);
+        using JsonDocument allowed = await fixture.SendJsonAsync(HttpMethod.Post, path, local, token);
+        Assert.True(allowed.RootElement.GetProperty("success").GetBoolean());
+        Assert.False(fixture.TemporaryTestEnded);
+
+        fixture.ProviderRules.SetRule(admin, new RuleWriteSpec("system", null, null, null, "192.168.1.24", "ip", 8199,
+            false), fixture.ProviderRules.Revision);
+        using HttpResponseMessage blocked = await fixture.SendAsync(HttpMethod.Post, path,
+            new { local.id, local.type, local.settings, confirmedTarget = new { host = "192.168.1.24", port = 8199 } }, token);
+        Assert.Equal(HttpStatusCode.Forbidden, blocked.StatusCode);
+        Assert.False(fixture.TemporaryTestEnded);
     }
 
     [Fact]
@@ -95,23 +258,168 @@ public sealed class ProviderSettingsEndpointTests
     }
 
     [Fact]
-    public async Task SavingProviderReplacesMatchingSystemBlockWithAllowRule()
+    public async Task SavingProviderPreservesMatchingSystemBlock()
     {
         await using var fixture = await ProviderModelFixture.CreateAsync();
         string token = await fixture.LoginAsBootstrapAdminAsync();
         var admin = new NetworkAccessActor("admin", true);
         var (revision, _) = fixture.ProviderRules.ListRules(admin);
         fixture.ProviderRules.SetRule(admin, new RuleWriteSpec("system", null, null, null, "provider.example", "host", 443, false), revision);
-        using JsonDocument _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/settings/providers/save",
+        using HttpResponseMessage response = await fixture.SendAsync(HttpMethod.Post, "/api/settings/providers/save",
             new { id = "openai-test", type = "openai", settings = new { base_url = "https://provider.example/v1", api_key = "test" } }, token);
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Null(fixture.GetConfiguredProviderType("openai-test"));
         NetworkAccessRule rule = Assert.Single(fixture.ProviderRules.ListRules(admin).Rules, view => view.Rule.Destination == "provider.example").Rule;
-        Assert.True(rule.Allowed);
+        Assert.False(rule.Allowed);
         Assert.False(rule.AllowLan);
         Assert.Equal("system", rule.ScopeKind);
     }
 
     [Fact]
-    public async Task TestConnectionCreatesAdminApprovalBeforeSystemwideProviderRule_WithNegativeControl()
+    public async Task FailedCredentialWritePublishesNeitherProviderSettingsNorTheConfirmedAllow()
+    {
+        var credentials = new FakeCredentialsServiceClient { FailSystemWrites = true };
+        await using var fixture = await ProviderModelFixture.CreateAsync(configureServices: services =>
+        {
+            services.RemoveAll<CredentialResolverService>();
+            services.AddSingleton(new CredentialResolverService(
+                new Lazy<CredentialsService.CredentialsServiceClient>(credentials)));
+        });
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        using HttpResponseMessage response = await fixture.SendAsync(HttpMethod.Post, "/api/settings/providers/save",
+            new
+            {
+                id = "credential-write-failed",
+                type = "openai",
+                settings = new { base_url = "https://provider.example/v1", api_key = "fixture-key" },
+                networkPermission = new
+                {
+                    destination = "provider.example",
+                    port = 443,
+                    allowLan = false,
+                    revision = fixture.ProviderRules.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                },
+            }, token);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Null(fixture.GetConfiguredProviderType("credential-write-failed"));
+        var admin = new NetworkAccessActor("admin", true);
+        Assert.DoesNotContain(fixture.ProviderRules.ListRules(admin).Rules, view => view.Rule.Destination == "provider.example");
+    }
+
+    [Fact]
+    public async Task FailedCatalogWriteDoesNotPublishTheConfirmedAllow()
+    {
+        await using var fixture = await ProviderModelFixture.CreateAsync();
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        await fixture.SetCatalogWriteFailureAsync(fail: true);
+        using HttpResponseMessage response = await fixture.SendAsync(HttpMethod.Post, "/api/settings/providers/save",
+            new
+            {
+                id = "failed-catalog",
+                type = "ollama",
+                settings = new { base_url = "http://192.168.1.12:11434" },
+                networkPermission = new { destination = "192.168.1.12", port = 11434, allowLan = true, revision = fixture.ProviderRules.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture) }
+            }, token);
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        await fixture.SetCatalogWriteFailureAsync(fail: false);
+        Assert.Null(fixture.GetConfiguredProviderType("failed-catalog"));
+        Assert.DoesNotContain(fixture.ProviderRules.ListRules(new NetworkAccessActor("admin", true)).Rules,
+            view => view.Rule.Destination == "192.168.1.12");
+    }
+
+    [Fact]
+    public async Task FinalProviderPermissionWriteRespectsABlockAddedAfterConfirmation()
+    {
+        await using var fixture = await ProviderModelFixture.CreateAsync();
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        var admin = new NetworkAccessActor("admin", true);
+        fixture.BeforeRuleWrite = () => fixture.ProviderRules.SetRule(admin,
+            new RuleWriteSpec("system", null, null, null, "provider.example", "host", 443, false), fixture.ProviderRules.Revision);
+        using HttpResponseMessage response = await fixture.SendAsync(HttpMethod.Post, "/api/settings/providers/save",
+            new
+            {
+                id = "concurrent-block",
+                type = "openai",
+                settings = new { base_url = "https://provider.example/v1", api_key = "fixture-key" },
+                networkPermission = new { destination = "provider.example", port = 443, allowLan = false, revision = fixture.ProviderRules.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture) }
+            }, token);
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("openai", fixture.GetConfiguredProviderType("concurrent-block"));
+        Assert.False(Assert.Single(fixture.ProviderRules.ListRules(admin).Rules,
+            view => view.Rule.Destination == "provider.example").Rule.Allowed);
+    }
+
+    [Fact]
+    public async Task LostCredentialAcknowledgementReservesTheIdAndAllowsAFreshIdRetry()
+    {
+        var credentials = new FakeCredentialsServiceClient { LoseSystemWriteAcknowledgement = true };
+        await using var fixture = await ProviderModelFixture.CreateAsync(configureServices: services =>
+        {
+            services.RemoveAll<CredentialResolverService>();
+            services.AddSingleton(new CredentialResolverService(
+                new Lazy<CredentialsService.CredentialsServiceClient>(credentials)));
+        });
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        const string path = "/api/settings/providers/save";
+        var body = new
+        {
+            id = "ambiguous-write",
+            type = "openai",
+            settings = new { base_url = "https://provider.example/v1", api_key = "fixture-key" },
+            networkPermission = new
+            {
+                destination = "provider.example",
+                port = 443,
+                allowLan = false,
+                revision = fixture.ProviderRules.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            },
+        };
+        using HttpResponseMessage interrupted = await fixture.SendAsync(HttpMethod.Post, path, body, token);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, interrupted.StatusCode);
+        Assert.Null(fixture.GetConfiguredProviderType(body.id));
+        Assert.DoesNotContain(fixture.ProviderRules.ListRules(new NetworkAccessActor("admin", true)).Rules,
+            view => view.Rule.Destination == "provider.example");
+
+        credentials.LoseSystemWriteAcknowledgement = false;
+        using HttpResponseMessage reserved = await fixture.SendAsync(HttpMethod.Post, path, body, token);
+        Assert.Equal(HttpStatusCode.Conflict, reserved.StatusCode);
+        using JsonDocument conflict = JsonDocument.Parse(await reserved.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+        Assert.Equal("provider_id_reserved", conflict.RootElement.GetProperty("code").GetString());
+        Assert.Null(fixture.GetConfiguredProviderType(body.id));
+
+        using HttpResponseMessage retried = await fixture.SendAsync(HttpMethod.Post, path, body with { id = "fresh-provider-id" }, token);
+        Assert.Equal(HttpStatusCode.OK, retried.StatusCode);
+        Assert.Equal("openai", fixture.GetConfiguredProviderType("fresh-provider-id"));
+    }
+
+    [Fact]
+    public async Task ProviderConfirmationCannotOverrideSystemPause()
+    {
+        await using var fixture = await ProviderModelFixture.CreateAsync();
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        var admin = new NetworkAccessActor("admin", true);
+        fixture.ProviderRules.SetBrake(admin, "system", null, on: true);
+        using HttpResponseMessage response = await fixture.SendAsync(HttpMethod.Post, "/api/settings/providers/save",
+            new
+            {
+                id = "paused-provider",
+                type = "ollama",
+                settings = new { base_url = "http://192.168.1.12:11434" },
+                networkPermission = new
+                {
+                    destination = "192.168.1.12",
+                    port = 11434,
+                    allowLan = true,
+                    revision = fixture.ProviderRules.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                },
+            }, token);
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Null(fixture.GetConfiguredProviderType("paused-provider"));
+        Assert.DoesNotContain(fixture.ProviderRules.ListRules(admin).Rules, view => view.Rule.Destination == "192.168.1.12");
+    }
+
+    [Fact]
+    public async Task TestConnectionRequestsConsentBeforeDiscoveryAndRechecksPolicyAtSendTime()
     {
         string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-v7-provider-test-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(stateDirectory);
@@ -126,49 +434,54 @@ public sealed class ProviderSettingsEndpointTests
                 new CredentialResolverService(new Lazy<CredentialsService.CredentialsServiceClient>(new FakeCredentialsServiceClient())),
                 providerTypeCatalog);
             var validation = new ProviderValidationService(
-                DispatchProxy.Create<IGatewayCatalogStore, EmptyProviderCatalogStoreProxy>(),
                 aiClientFactory,
-                providerTypeCatalog,
                 NullLogger<ProviderValidationService>.Instance);
-            var builder = WebApplication.CreateBuilder();
-            builder.WebHost.UseTestServer();
-            builder.Services.ConfigureHttpJsonOptions(options => options.SerializerOptions.TypeInfoResolver = new DefaultJsonTypeInfoResolver());
-            builder.Services.AddSingleton<IProviderValidationService>(validation);
-            builder.Services.AddSingleton<IGatewayAuthGuard, ProviderTestAdminAuthGuard>();
-            WebApplication app = builder.Build();
-            await using (app)
+            await using var fixture = await ProviderModelFixture.CreateAsync(configureServices: services =>
             {
-                app.MapGatewaySettingsEndpoints();
-                await app.StartAsync(TestContext.Current.CancellationToken);
-                using HttpClient client = app.GetTestClient();
-
-                using HttpResponseMessage response = await client.PostAsJsonAsync(
-                    "/api/settings/providers/test",
-                    new
+                services.AddSingleton<IProviderValidationService>(validation);
+                services.AddSingleton<IGatewayAuthGuard, ProviderTestAdminAuthGuard>();
+            });
+            string token = await fixture.LoginAsBootstrapAdminAsync();
+            using JsonDocument confirmation = await fixture.SendJsonAsync(HttpMethod.Post, "/api/settings/providers/test",
+                new
+                {
+                    provider_id = "custom-openai",
+                    type = "openai",
+                    settings = new { base_url = "https://api.provider.test/v1" },
+                    confirmedTarget = new { host = "previous.provider.test", port = 443 }
+                }, token);
+            Assert.Equal("api.provider.test", confirmation.RootElement.GetProperty("confirmationTarget").GetProperty("host").GetString());
+            Assert.Empty(checker.Targets);
+            using HttpResponseMessage response = await fixture.SendAsync(HttpMethod.Post,
+                "/api/settings/providers/test",
+                new
+                {
+                    confirmedTarget = new { host = "api.provider.test", port = 443 },
+                    provider_id = "custom-openai",
+                    type = "openai",
+                    settings = new
                     {
-                        provider_id = "custom-openai",
-                        type = "openai",
-                        settings = new
-                        {
-                            base_url = "https://api.provider.test/v1",
-                            api_key = "test-key",
-                        },
+                        base_url = "https://api.provider.test/v1",
+                        api_key = "test-key",
                     },
-                    cancellationToken: TestContext.Current.CancellationToken);
-                Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-                Assert.Equal("api.provider.test", Assert.Single(checker.Targets).Host);
-                Assert.Equal(new NetworkAccessScope("admin-1", "gateway", Purpose: "provider-test", Service: "ai-provider"), checker.Scope);
+                },
+                token);
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.True(fixture.TemporaryTestEnded);
+            Assert.Equal("api.provider.test", Assert.Single(checker.Targets).Host);
+            Assert.Equal("admin-1", checker.Scope?.UserId);
+            Assert.Equal("provider-test", checker.Scope?.Purpose);
+            Assert.False(string.IsNullOrWhiteSpace(checker.Scope?.CorrelationId));
 
-                var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
-                NetworkAccessRequest? pending = policyStore.ListRequests(admin).Requests
-                    .Select(static view => view.Request)
-                    .SingleOrDefault(request => request.Destination == "api.provider.test" && request.Port == 443 && request.UserId == "admin-1");
-                Assert.NotNull(pending);
-                Assert.Equal("gateway", pending.AgentId);
-                Assert.Equal("user-agent", pending.Attribution);
-                Assert.DoesNotContain(policyStore.ListRules(admin).Rules, view => view.Rule.Destination == "api.provider.test");
-                await policyStore.FlushPendingWritesAsync();
-            }
+            var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
+            NetworkAccessRequest? pending = policyStore.ListRequests(admin).Requests
+                .Select(static view => view.Request)
+                .SingleOrDefault(request => request.Destination == "api.provider.test" && request.Port == 443 && request.UserId == "admin-1");
+            Assert.NotNull(pending);
+            Assert.Equal("gateway", pending.AgentId);
+            Assert.Equal("user-agent", pending.Attribution);
+            Assert.DoesNotContain(policyStore.ListRules(admin).Rules, view => view.Rule.Destination == "api.provider.test");
+            await policyStore.FlushPendingWritesAsync();
         }
         finally
         {
@@ -199,28 +512,6 @@ public sealed class ProviderSettingsEndpointTests
                 decision.RequestId,
                 decision.OpenInternetBadge,
                 NetworkAccessDenialKind.Denied));
-        }
-    }
-
-    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1852", Justification = "DispatchProxy must derive from an unsealed proxy base.")]
-    private class EmptyProviderCatalogStoreProxy : DispatchProxy
-    {
-        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
-        {
-            if (targetMethod?.Name == nameof(IGatewayCatalogStore.TryGetProvider))
-            {
-                args![1] = null;
-                return false;
-            }
-
-            if (targetMethod is null || targetMethod.ReturnType == typeof(void))
-            {
-                return null;
-            }
-
-            return targetMethod.ReturnType.IsValueType
-                ? Activator.CreateInstance(targetMethod.ReturnType)
-                : null;
         }
     }
 
@@ -281,6 +572,27 @@ public sealed class ProviderSettingsEndpointTests
         Assert.False(
             settingsEl.TryGetProperty("apiKey", out _),
             "api_key must not be stored in the provider catalog settings.");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("fixture-replacement-key")]
+    public async Task SavedCredentialCannotMoveToADifferentProviderDestination(string? replacement)
+    {
+        await using var fixture = await ProviderModelFixture.CreateAsync();
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        const string path = "/api/settings/providers/save";
+        const string original = "https://api.openai.com/v1";
+        using JsonDocument saved = await fixture.SendJsonAsync(HttpMethod.Post, path,
+            new { id = "bound-provider", type = "openai", settings = new { base_url = original, api_key = "fixture-key" } }, token);
+
+        using HttpResponseMessage changed = await fixture.SendAsync(HttpMethod.Post, path,
+            new { id = "bound-provider", type = "openai", settings = new { base_url = "https://provider.example.test/v1", api_key = replacement } }, token);
+        Assert.Equal(HttpStatusCode.BadRequest, changed.StatusCode);
+
+        using JsonDocument same = await fixture.SendJsonAsync(HttpMethod.Post, path,
+            new { id = "bound-provider", type = "openai", settings = new { base_url = original, http_timeout_seconds = 40 } }, token);
+        Assert.True(same.RootElement.GetProperty("provider").GetProperty("hasApiKey").GetBoolean());
     }
 
     [Fact]
@@ -625,19 +937,12 @@ public sealed class ModelSettingsEndpointTests
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Minimal-pattern tests — model discovery endpoint
-// These use a hand-rolled WebApplication with only the required services,
-// avoiding the full GatewayAppBootstrap startup time.
+// Model discovery endpoint with production Gateway routing and a probe double.
 // ─────────────────────────────────────────────────────────────────────────────
 
 [Collection(ProcessEnvironmentTestGroup.Name)]
 public sealed class ModelDiscoveryEndpointTests
 {
-    private static readonly JsonSerializerOptions jsonOpts = new()
-    {
-        TypeInfoResolver = new DefaultJsonTypeInfoResolver(),
-    };
-
     [Fact]
     public async Task DiscoverModelsEndpointReturnsModelsFromService()
     {
@@ -646,18 +951,13 @@ public sealed class ModelDiscoveryEndpointTests
             new DiscoveredModelDefinition("llama3:8b", "Llama 3 8B"),
         ]);
 
-        using WebApplication app = await BuildMinimalAppAsync(fakeProbe);
-        using HttpClient client = app.GetTestClient();
-
-        using HttpResponseMessage response = await client.PostAsJsonAsync(
+        await using var fixture = await ProviderModelFixture.CreateAsync(configureServices: services => services.AddSingleton<IModelProbeService>(fakeProbe));
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        using JsonDocument doc = await fixture.SendJsonAsync(HttpMethod.Post,
             "/api/settings/models/discover",
             new { providerId = "ollama-local" },
-            jsonOpts,
-            TestContext.Current.CancellationToken);
+            token);
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-
-        using JsonDocument doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
         JsonElement models = doc.RootElement.GetProperty("models");
         Assert.Equal(2, models.GetArrayLength());
         Assert.Equal("gemma3:9b", models[0].GetProperty("id").GetString());
@@ -665,20 +965,22 @@ public sealed class ModelDiscoveryEndpointTests
     }
 
     [Fact]
-    public async Task DiscoverModelsEndpointPassesProviderIdToService()
+    public async Task DiscoverModelsEndpointPassesProviderIdAndCallerScopeToService()
     {
         var fakeProbe = new CapturingModelProbeService([]);
 
-        using WebApplication app = await BuildMinimalAppAsync(fakeProbe);
-        using HttpClient client = app.GetTestClient();
-
-        await client.PostAsJsonAsync(
+        await using var fixture = await ProviderModelFixture.CreateAsync(configureServices: services => services.AddSingleton<IModelProbeService>(fakeProbe));
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        using JsonDocument _ = await fixture.SendJsonAsync(HttpMethod.Post,
             "/api/settings/models/discover",
             new { providerId = "my-special-provider" },
-            jsonOpts,
-            TestContext.Current.CancellationToken);
+            token);
 
         Assert.Equal("my-special-provider", fakeProbe.LastProviderIdReceived);
+        NetworkAccessScope scope = Assert.IsType<NetworkAccessScope>(fakeProbe.LastCaller);
+        Assert.False(string.IsNullOrWhiteSpace(scope.UserId));
+        Assert.Equal("gateway", scope.AgentId);
+        Assert.Equal("ai-discovery", scope.Purpose);
     }
 
     [Fact]
@@ -687,43 +989,25 @@ public sealed class ModelDiscoveryEndpointTests
         // IModelProbeService returns empty for unknown provider — endpoint surfaces this as empty array.
         var fakeProbe = new CapturingModelProbeService([]);
 
-        using WebApplication app = await BuildMinimalAppAsync(fakeProbe);
-        using HttpClient client = app.GetTestClient();
-
-        using HttpResponseMessage response = await client.PostAsJsonAsync(
+        await using var fixture = await ProviderModelFixture.CreateAsync(configureServices: services => services.AddSingleton<IModelProbeService>(fakeProbe));
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        using JsonDocument doc = await fixture.SendJsonAsync(HttpMethod.Post,
             "/api/settings/models/discover",
             new { providerId = "nonexistent" },
-            jsonOpts,
-            TestContext.Current.CancellationToken);
-
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        using JsonDocument doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+            token);
         Assert.Equal(0, doc.RootElement.GetProperty("models").GetArrayLength());
-    }
-
-    private static async Task<WebApplication> BuildMinimalAppAsync(IModelProbeService modelProbeService)
-    {
-        var builder = WebApplication.CreateBuilder();
-        builder.WebHost.UseTestServer();
-        builder.Services.ConfigureHttpJsonOptions(o =>
-            o.SerializerOptions.TypeInfoResolver = new DefaultJsonTypeInfoResolver());
-        builder.Services.AddSingleton<IModelProbeService>(modelProbeService);
-        builder.Services.AddSingleton<IGatewayAuthGuard, AllowAllAuthGuard>();
-
-        WebApplication app = builder.Build();
-        app.MapGatewaySettingsEndpoints();
-        await app.StartAsync(TestContext.Current.CancellationToken);
-        return app;
     }
 
     private sealed class CapturingModelProbeService(IReadOnlyList<DiscoveredModelDefinition> models)
         : IModelProbeService
     {
         public string? LastProviderIdReceived { get; private set; }
+        public NetworkAccessScope? LastCaller { get; private set; }
 
         public Task<IReadOnlyList<DiscoveredModelDefinition>> DiscoverModelsAsync(string providerId)
         {
             LastProviderIdReceived = providerId;
+            LastCaller = NetworkAccessContext.Current;
             return Task.FromResult(models);
         }
 
@@ -734,35 +1018,6 @@ public sealed class ModelDiscoveryEndpointTests
             => Task.FromResult(new GatewayModelCapabilities(null, null, null, null, null, null, DateTimeOffset.UtcNow.ToString("O")));
     }
 
-    private sealed class AllowAllAuthGuard : IGatewayAuthGuard
-    {
-        public bool TryAuthorize(HttpContext context, out GatewayUser? user)
-        {
-            user = BuildUser();
-            return true;
-        }
-
-        public IResult? RequireAuthenticated(HttpContext context, out GatewayUser? user)
-        {
-            user = BuildUser();
-            return null;
-        }
-
-        public IResult? RequireAdmin(HttpContext context, out GatewayUser? user)
-        {
-            user = BuildUser();
-            return null;
-        }
-
-        private static GatewayUser BuildUser() => new(
-            Id: "user-1",
-            Username: "tester",
-            Password: "pwd",
-            Role: "admin",
-            IsActive: true,
-            Email: null,
-                DisplayName: null);
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -802,6 +1057,25 @@ public sealed class AiClientFactoryDiscoveryTests
 
         Assert.Equal(StatusCode.Unavailable, exception.StatusCode);
         Assert.Null(capturer.LastApiKeyReceived);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("fixture-explicit-key")]
+    public async Task UnboundProviderTestUsesOnlyAnExplicitKey(string? suppliedKey)
+    {
+        var capturer = new CapturingAiClientProvider("openai");
+        var client = new FakeCredentialsServiceClient();
+        var credentials = new CredentialResolverService(new Lazy<CredentialsService.CredentialsServiceClient>(() => client));
+        var factory = new KautukaAiClientFactory([capturer], credentials);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await credentials.SetSystemAsync(new Dictionary<string, string> { ["provider.fixture.api_key"] = "fixture-saved-key" },
+            cancellationToken);
+
+        await factory.DiscoverModelsAsync("fixture", "openai", new JsonObject { ["api_key"] = suppliedKey },
+            useStoredCredential: false, ct: cancellationToken);
+
+        Assert.Equal(suppliedKey, capturer.LastApiKeyReceived);
     }
 
     [Fact]
@@ -928,13 +1202,33 @@ internal sealed class ProviderModelFixture : IAsyncDisposable
     public NetworkAccessPolicyStore ProviderRules { get; private set; } = null!;
     public bool ManagerUnavailable { get => providerInvoker.Unavailable; set => providerInvoker.Unavailable = value; }
     public bool FailRuleWrite { get => providerInvoker.FailRuleWrite; set => providerInvoker.FailRuleWrite = value; }
+    public Action? BeforeRuleWrite { get => providerInvoker.BeforeRuleWrite; set => providerInvoker.BeforeRuleWrite = value; }
+
+    public async Task SetCatalogWriteFailureAsync(bool fail)
+    {
+        CancellationToken token = TestContext.Current.CancellationToken;
+        await using var connection = new SqliteConnection(app.Services.GetRequiredService<KautukaDatabase>().ConnectionString);
+        await connection.OpenAsync(token);
+        await using var command = connection.CreateCommand();
+        if (fail)
+            command.CommandText = """
+                CREATE TRIGGER fail_provider_save BEFORE INSERT ON providers
+                WHEN NEW.id = 'failed-catalog'
+                BEGIN SELECT RAISE(ABORT, 'fixture catalog write failed'); END;
+                """;
+        else
+            command.CommandText = "DROP TRIGGER fail_provider_save;";
+        _ = await command.ExecuteNonQueryAsync(token);
+    }
+    public bool FailTestCleanup { set => providerInvoker.FailTestCleanup = value; }
     public bool TemporaryTestAllowed => providerInvoker.TemporaryTestAllowed;
     public bool TemporaryTestEnded => providerInvoker.TemporaryTestEnded;
+    public Task TestGrantEnded => providerInvoker.GrantEnded.Task;
     private ProviderRulesCallInvoker providerInvoker = null!;
     internal static IManagerGrpcService CreateTestManager(NetworkAccessPolicyStore rules)
         => new ManagerGrpcServiceClient(new ProviderRulesCallInvoker(rules), "http://localhost");
 
-    public static async Task<ProviderModelFixture> CreateAsync(bool useControlledValidation = false)
+    public static async Task<ProviderModelFixture> CreateAsync(bool useControlledValidation = false, Action<IServiceCollection>? configureServices = null)
     {
         string root = Path.Combine(
             Path.GetTempPath(), "kautuka-provider-model-tests", Guid.NewGuid().ToString("N"));
@@ -982,6 +1276,7 @@ internal sealed class ProviderModelFixture : IAsyncDisposable
 
         builder.Services.Configure<HostOptions>(o =>
             o.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
+        configureServices?.Invoke(builder.Services);
 
         WebApplication app = builder.Build();
         var database = app.Services.GetRequiredService<KautukaDatabase>();
@@ -1028,17 +1323,34 @@ internal sealed class ProviderModelFixture : IAsyncDisposable
 
         using HttpResponseMessage response = await Client.SendAsync(request).ConfigureAwait(true);
         string content = await response.Content.ReadAsStringAsync().ConfigureAwait(true);
+        if (response.StatusCode == HttpStatusCode.Conflict && path == "/api/settings/providers/save" && body is not null)
+        {
+            using JsonDocument challenge = JsonDocument.Parse(content);
+            if (challenge.RootElement.TryGetProperty("revision", out _))
+            {
+                var confirmed = JsonSerializer.SerializeToNode(body, jsonOpts)!.AsObject();
+                confirmed["networkPermission"] = JsonNode.Parse(content);
+                using HttpResponseMessage afterConfirmation = await SendAsync(method, path, confirmed, accessToken!).ConfigureAwait(true);
+                string confirmedContent = await afterConfirmation.Content.ReadAsStringAsync().ConfigureAwait(true);
+                if (!afterConfirmation.IsSuccessStatusCode)
+                    throw new XunitException($"Confirmed provider save failed with {(int)afterConfirmation.StatusCode}: {confirmedContent}");
+                return JsonDocument.Parse(confirmedContent);
+            }
+        }
         if (!response.IsSuccessStatusCode)
             throw new XunitException($"Request to '{path}' failed with {(int)response.StatusCode}: {content}");
 
         return JsonDocument.Parse(content);
     }
 
-    public async Task<HttpResponseMessage> SendAsync(
+    public Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, object? body, string accessToken)
+        => SendCancellableAsync(method, path, body, accessToken, TestContext.Current.CancellationToken);
+
+    public async Task<HttpResponseMessage> SendCancellableAsync(
         HttpMethod method,
         string path,
         object? body,
-        string accessToken)
+        string accessToken, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(method, path);
         if (body is not null)
@@ -1047,7 +1359,7 @@ internal sealed class ProviderModelFixture : IAsyncDisposable
         }
 
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-        return await Client.SendAsync(request).ConfigureAwait(true);
+        return await Client.SendAsync(request, cancellationToken).ConfigureAwait(true);
     }
 
     public string? GetConfiguredProviderType(string providerId)
@@ -1074,17 +1386,21 @@ internal sealed class ProviderModelFixture : IAsyncDisposable
         private readonly NetworkAccessController.NetworkAccessController controller = new(store, new WorkloadRegistry());
         public bool Unavailable { get; set; }
         public bool FailRuleWrite { get; set; }
+        public Action? BeforeRuleWrite { get; set; }
+        public bool FailTestCleanup { get; set; }
         public bool TemporaryTestAllowed { get; private set; }
         public bool TemporaryTestEnded { get; private set; }
+        public TaskCompletionSource GrantEnded { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private string? testUser;
         private string? testToken;
+        private string? testHost;
+        private int testPort;
         public override AsyncUnaryCall<TResponse> AsyncUnaryCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options, TRequest request)
         {
             if (Unavailable) throw new RpcException(new Status(StatusCode.Unavailable, "Manager unavailable."));
             object response = request switch
             {
-                NetworkAccessListRulesRequest list => List(list),
-                NetworkAccessSetRuleRequest set => Set(set),
+                NetworkAccessProviderPermissionRequest permission => EnsurePermission(permission),
                 NetworkAccessProviderTestRequest begin => Begin(begin),
                 NetworkAccessProviderTestEndRequest end => End(end),
                 _ => throw new RpcException(new Status(StatusCode.Unavailable, "No test manager implementation.")),
@@ -1094,13 +1410,18 @@ internal sealed class ProviderModelFixture : IAsyncDisposable
         private NetworkAccessProviderTestResponse Begin(NetworkAccessProviderTestRequest request)
         {
             testUser = request.Actor.UserId;
-            testToken = controller.BeginProviderTest(new(testUser, true), request.Host, request.Port, request.AllowLan);
-            return new NetworkAccessProviderTestResponse { Token = testToken };
+            testHost = request.Host;
+            testPort = request.Port;
+            var decision = controller.PrepareProviderTest(new(testUser, true), request.Host, request.Port, request.AllowLan, request.Confirmed);
+            testToken = decision.Token;
+            return new NetworkAccessProviderTestResponse { Token = testToken, Status = decision.Status, Reason = decision.Reason };
         }
         private WorkspaceBoolResponse End(NetworkAccessProviderTestEndRequest request)
         {
+            if (FailTestCleanup) throw new RpcException(new Status(StatusCode.Unavailable, "Manager unavailable."));
             controller.EndProviderTest(new(request.Actor.UserId, true), request.Token);
-            TemporaryTestEnded = !controller.EvaluateOutboundCheck(new(testUser!, "gateway", null, "provider.example", 443, "provider-test", testToken)).Allowed;
+            TemporaryTestEnded = !controller.EvaluateOutboundCheck(new(testUser!, "gateway", null, testHost!, testPort, "provider-test", testToken), recordPendingRequest: false).Allowed;
+            GrantEnded.TrySetResult();
             return new WorkspaceBoolResponse { Ok = true };
         }
         public NetworkAccessCheckResult CheckTemporaryTest(OutboundTarget target)
@@ -1109,30 +1430,15 @@ internal sealed class ProviderModelFixture : IAsyncDisposable
             TemporaryTestAllowed = decision.Allowed;
             return new NetworkAccessCheckResult(decision.Allowed, decision.Reason, decision.RequestId, decision.OpenInternetBadge, NetworkAccessDenialKind.Denied);
         }
-        private NetworkAccessListRulesResponse List(NetworkAccessListRulesRequest request)
+        private NetworkAccessProviderPermissionResponse EnsurePermission(NetworkAccessProviderPermissionRequest request)
         {
-            var (revision, rules) = store.ListRules(new NetworkAccessActor(request.Actor.UserId, request.Actor.IsAdmin));
-            var result = new NetworkAccessListRulesResponse { Revision = revision };
-            result.Rules.AddRange(rules.Select(view => Map(view.Rule, view.Paused)));
-            return result;
+            if (FailRuleWrite && !request.CheckOnly) throw new RpcException(new Status(StatusCode.Unavailable, "Rule write failed."));
+            if (!request.CheckOnly) BeforeRuleWrite?.Invoke();
+            (long revision, string status) = store.EnsureProviderPermission(new NetworkAccessActor(request.Actor.UserId, request.Actor.IsAdmin),
+                request.Destination, request.DestKind, request.Port, request.AllowLan,
+                request.HasConfirmedRevision ? request.ConfirmedRevision : null, request.CheckOnly);
+            return new NetworkAccessProviderPermissionResponse { Revision = revision, Status = status };
         }
-        private NetworkAccessSetRuleResponse Set(NetworkAccessSetRuleRequest request)
-        {
-            if (FailRuleWrite) throw new RpcException(new Status(StatusCode.Unavailable, "Rule write failed."));
-            var (revision, rule) = store.SetRule(new NetworkAccessActor(request.Actor.UserId, request.Actor.IsAdmin),
-                new RuleWriteSpec(request.ScopeKind, null, null, null, request.Destination, request.DestKind, request.Port, request.Allowed, request.AllowLan), request.ExpectedRevision);
-            return new NetworkAccessSetRuleResponse { Revision = revision, Rule = Map(rule.Rule, rule.Paused) };
-        }
-        private static NetworkAccessRuleMessage Map(NetworkAccessRule rule, bool paused) => new()
-        {
-            ScopeKind = rule.ScopeKind,
-            Destination = rule.Destination,
-            DestKind = rule.DestKind,
-            Port = rule.Port,
-            Allowed = rule.Allowed,
-            AllowLan = rule.AllowLan,
-            Paused = paused,
-        };
         public override AsyncServerStreamingCall<TResponse> AsyncServerStreamingCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options, TRequest request) => throw new NotSupportedException();
         public override AsyncClientStreamingCall<TRequest, TResponse> AsyncClientStreamingCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options) => throw new NotSupportedException();
         public override AsyncDuplexStreamingCall<TRequest, TResponse> AsyncDuplexStreamingCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options) => throw new NotSupportedException();
@@ -1140,10 +1446,10 @@ internal sealed class ProviderModelFixture : IAsyncDisposable
     }
     private sealed class ControlledProviderValidation(ProviderRulesCallInvoker invoker) : IProviderValidationService
     {
-        public async Task<GatewayProviderTestResult> TestProviderAsync(JsonElement body, CancellationToken cancellationToken = default)
+        public async Task<GatewayProviderTestResult> TestProviderAsync(ProviderTestDefinition definition, CancellationToken cancellationToken = default)
         {
             using var client = new HttpClient(new NetworkAccessCheckHandler(new ControlledChecker(invoker), new ControlledTransport()));
-            using HttpResponseMessage response = await client.GetAsync(new Uri("https://provider.example/v1"), cancellationToken);
+            using HttpResponseMessage response = await client.GetAsync(new Uri(definition.Settings["base_url"]!.GetValue<string>()), cancellationToken);
             return new GatewayProviderTestResult(response.IsSuccessStatusCode, "controlled test");
         }
     }
@@ -1176,6 +1482,8 @@ internal sealed class ProviderModelFixture : IAsyncDisposable
 internal sealed class FakeCredentialsServiceClient : CredentialsService.CredentialsServiceClient
 {
     private readonly Dictionary<string, string> systemStore = new(StringComparer.Ordinal);
+    internal bool FailSystemWrites { get; init; }
+    internal bool LoseSystemWriteAcknowledgement { get; set; }
 
     public override AsyncUnaryCall<CredentialKeyListResponse> ListSystemCredentialKeysAsync(
         ListSystemCredentialKeysRequest request, CallOptions options)
@@ -1188,9 +1496,11 @@ internal sealed class FakeCredentialsServiceClient : CredentialsService.Credenti
     public override AsyncUnaryCall<SetCredentialsResponse> SetSystemCredentialsAsync(
         SetSystemCredentialsRequest request, CallOptions options)
     {
+        if (FailSystemWrites) throw new RpcException(new Status(StatusCode.Unavailable, "Fixture credential write failure."));
         foreach ((string key, string value) in request.Entries)
             systemStore[key] = value;
 
+        if (LoseSystemWriteAcknowledgement) throw new RpcException(new Status(StatusCode.Unavailable, "Fixture lost the write acknowledgement."));
         return Wrap(new SetCredentialsResponse { UpsertedCount = request.Entries.Count });
     }
 

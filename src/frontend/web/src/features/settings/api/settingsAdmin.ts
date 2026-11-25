@@ -85,6 +85,7 @@ interface ProbeModelCandidateResponse {
 }
 
 interface ProviderTestResponse {
+  confirmationTarget?: { host: string; port: number };
   success?: boolean;
   message?: string;
 }

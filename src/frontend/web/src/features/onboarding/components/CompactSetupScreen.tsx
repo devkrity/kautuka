@@ -40,6 +40,7 @@ type CompactSetupScreenProps = {
   providerBaseUrl: string;
   onProviderBaseUrlChange: (value: string) => void;
   providerApiCredential: string;
+  hasSavedProviderCredential?: boolean;
   onProviderApiCredentialChange: (value: string) => void;
   modelName: string;
   onModelNameChange: (value: string) => void;
@@ -78,6 +79,7 @@ export const CompactSetupScreen: React.FC<CompactSetupScreenProps> = ({
   providerBaseUrl,
   onProviderBaseUrlChange,
   providerApiCredential,
+  hasSavedProviderCredential,
   onProviderApiCredentialChange,
   modelName,
   onModelNameChange,
@@ -98,15 +100,15 @@ export const CompactSetupScreen: React.FC<CompactSetupScreenProps> = ({
       <div>
         <h2 className="text-2xl font-bold">Create your helper</h2>
         <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-          Shape the helper first, then choose its AI brain.
+          Choose a name and connect an AI model.
         </p>
       </div>
 
       <div className="rounded-xl border border-border bg-card p-6 shadow-sm">
         <div className="border-b border-border pb-4">
-          <div className="text-sm font-medium text-foreground">Agent</div>
+          <div className="text-sm font-medium text-foreground">Helper</div>
           <p className="mt-1 text-sm text-muted-foreground">
-            You can adjust the name, prompt, and personality now.
+            You can change how your helper responds later.
           </p>
         </div>
 
@@ -120,48 +122,53 @@ export const CompactSetupScreen: React.FC<CompactSetupScreenProps> = ({
             />
           </div>
 
-          <div>
-            <Label className="mb-2 block">Instructions</Label>
-            <Textarea
-              value={systemPrompt}
-              onChange={(event) => onSystemPromptChange(event.target.value)}
-              placeholder="Tell the helper what it should focus on first."
-              rows={5}
-            />
-          </div>
+          <details className="rounded-lg border border-border px-4 py-3">
+            <summary className="cursor-pointer text-sm font-medium">Customize helper</summary>
+            <div className="mt-4 grid gap-5">
+              <div>
+                <Label className="mb-2 block">Instructions</Label>
+                <Textarea
+                  value={systemPrompt}
+                  onChange={(event) => onSystemPromptChange(event.target.value)}
+                  placeholder="Tell the helper what it should focus on first."
+                  rows={5}
+                />
+              </div>
 
-          <div className="grid gap-4 md:grid-cols-3">
-            <div>
-              <Label className="mb-2 block">Verbosity</Label>
-              <Select value={verbosity} onChange={(event) => onVerbosityChange(event.target.value)}>
-                {verbosityOptions.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </Select>
+              <div className="grid gap-4 md:grid-cols-3">
+                <div>
+                  <Label className="mb-2 block">Verbosity</Label>
+                  <Select value={verbosity} onChange={(event) => onVerbosityChange(event.target.value)}>
+                    {verbosityOptions.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+                <div>
+                  <Label className="mb-2 block">Style</Label>
+                  <Select value={style} onChange={(event) => onStyleChange(event.target.value)}>
+                    {styleOptions.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+                <div>
+                  <Label className="mb-2 block">Tone</Label>
+                  <Select value={tone} onChange={(event) => onToneChange(event.target.value)}>
+                    {toneOptions.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              </div>
             </div>
-            <div>
-              <Label className="mb-2 block">Style</Label>
-              <Select value={style} onChange={(event) => onStyleChange(event.target.value)}>
-                {styleOptions.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </Select>
-            </div>
-            <div>
-              <Label className="mb-2 block">Tone</Label>
-              <Select value={tone} onChange={(event) => onToneChange(event.target.value)}>
-                {toneOptions.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </Select>
-            </div>
-          </div>
+          </details>
         </div>
       </div>
 
@@ -265,7 +272,7 @@ export const CompactSetupScreen: React.FC<CompactSetupScreenProps> = ({
                     type={['pass', 'word'].join('')}
                     value={providerApiCredential}
                     onChange={(event) => onProviderApiCredentialChange(event.target.value)}
-                    placeholder="Paste your provider key"
+                    placeholder={hasSavedProviderCredential ? "Key already saved. Paste a replacement to change it." : "Paste your provider key"}
                   />
                 </div>
               )}

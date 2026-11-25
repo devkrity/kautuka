@@ -66,6 +66,27 @@ public sealed class EgressArchivedImageStartupTests
     }
 
     [Fact]
+    public async Task ApplianceStartupRejectsMissingBoundaryImageWithoutPulling()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-appliance-image-" + Guid.NewGuid().ToString("N"));
+        var calls = new List<string>();
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add(string.Join(" ", args));
+            return Task.FromResult(new PodmanCommandResult(1, string.Empty, string.Empty));
+        });
+        await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(root, "ip.json")),
+            new WorkloadPostStartVerifier(podman), new WorkloadRegistry(), root,
+            gatewayConnectEnvoyDirectory: Path.Combine(root, "connect"));
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => manager.EnsureBoundaryImageAsync(TestContext.Current.CancellationToken));
+
+        Assert.Contains("verified release image archive", error.Message, StringComparison.Ordinal);
+        Assert.Equal($"image exists {EgressTopologyManager.BoundaryInitImage}", Assert.Single(calls));
+    }
+
+    [Fact]
     public async Task ProductionInitializationLoadsArchivedEgressImagesBeforeCreatingNetworks()
     {
         string root = Path.Combine(Path.GetTempPath(), "nac-archived-egress-" + Guid.NewGuid().ToString("N"));

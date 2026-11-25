@@ -220,16 +220,18 @@ public sealed class AgentExecutionReadinessTests
         Assert.DoesNotContain(events, static item => item.EventType == NaradEventTypes.RunError);
     }
 
-    [Fact]
-    public async Task V7_35_G2_NetworkDenialFromAgentChatServiceEmitsAdminApprovalRunError()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AgentChatOnlyOffersNetworkApprovalForAPermissionDenial(bool topologyClosed)
     {
         var denial = new NetworkAccessDeniedException(
             "api.custom-ai-models.com",
             443,
             "https",
-            NetworkAccessDenialKind.Denied,
-            "no_rule",
-            requestId: "request-provider-denied",
+            topologyClosed ? NetworkAccessDenialKind.Unavailable : NetworkAccessDenialKind.Denied,
+            topologyClosed ? "topology_closed" : "no_rule",
+            requestId: topologyClosed ? null : "request-provider-denied",
             userId: "user-alpha",
             service: "ai-provider",
             purpose: "provider-test");
@@ -277,11 +279,19 @@ public sealed class AgentExecutionReadinessTests
         Assert.Equal("user-alpha", runtimeFactory.BuildNetworkScope?.UserId);
         Assert.Equal("agent-007", runtimeFactory.BuildNetworkScope?.AgentId);
         JsonElement body = NaradPersistedEventReader.ParseBody(runError);
-        Assert.Equal("network_access_required", body.GetProperty("code").GetString());
+        Assert.Equal(topologyClosed ? "network_access_unavailable" : "network_access_required", body.GetProperty("code").GetString());
         Assert.Equal("api.custom-ai-models.com", body.GetProperty("destination").GetString());
         Assert.Equal(443, body.GetProperty("port").GetInt32());
-        Assert.Equal("request-provider-denied", body.GetProperty("requestId").GetString());
-        Assert.Equal("/network-access", body.GetProperty("approvalUrl").GetString());
+        if (topologyClosed)
+        {
+            Assert.False(body.TryGetProperty("requestId", out _));
+            Assert.False(body.TryGetProperty("approvalUrl", out _));
+        }
+        else
+        {
+            Assert.Equal("request-provider-denied", body.GetProperty("requestId").GetString());
+            Assert.Equal("/network-access", body.GetProperty("approvalUrl").GetString());
+        }
     }
 
     [Theory]

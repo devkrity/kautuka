@@ -1,5 +1,5 @@
 import React from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   login,
   setAccessToken,
@@ -24,6 +24,8 @@ export function LoginPage({ onLoginSuccess, initialNeedsSetup }: Readonly<LoginP
   const secretInputType: React.HTMLInputTypeAttribute = ['pass', 'word'].join('');
   const secretAutoComplete = ['current', 'pass', 'word'].join('-');
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const authMode = searchParams.get('join') === '1' ? 'signup' : 'login';
 
   // null = loading, true = needs setup, false = show login
   // Seed synchronously from the prop so the first render already shows the right form.
@@ -39,7 +41,6 @@ export function LoginPage({ onLoginSuccess, initialNeedsSetup }: Readonly<LoginP
   const [setupConfirm, setSetupConfirm] = React.useState('');
   const [setupToken, setSetupToken] = React.useState('');
   const [inviteCode, setInviteCode] = React.useState('');
-  const [authMode, setAuthMode] = React.useState<'login' | 'signup'>('login');
 
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -428,7 +429,10 @@ export function LoginPage({ onLoginSuccess, initialNeedsSetup }: Readonly<LoginP
               variant="link"
               onClick={() => {
                 const nextMode = authMode === 'signup' ? 'login' : 'signup';
-                setAuthMode(nextMode);
+                const nextParams = new URLSearchParams(searchParams);
+                if (nextMode === 'signup') nextParams.set('join', '1');
+                else nextParams.delete('join');
+                setSearchParams(nextParams);
                 if (nextMode === 'login') {
                   setInviteCode('');
                   globalThis.sessionStorage.removeItem('kautukaInviteCode');

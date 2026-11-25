@@ -8,6 +8,7 @@ using Microsoft.Extensions.Hosting;
 
 namespace Kautuka.IntegrationTests;
 
+[Collection(ProcessEnvironmentTestGroup.Name)]
 public sealed class KautukaMaintenanceModeTests
 {
     [Theory]
@@ -38,6 +39,39 @@ public sealed class KautukaMaintenanceModeTests
             await worker.StartAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
 
         Assert.Equal(expectedDeliveries, counter.Deliveries);
+    }
+
+    [Fact]
+    public async Task ApplianceVerificationAllowsHealthAndSuppressesOutboundWork()
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "Appliance verification requires Linux.");
+        string variable = KautukaMaintenanceMode.ApplianceVerificationEnvironmentVariable;
+        string? previous = Environment.GetEnvironmentVariable(variable);
+        Environment.SetEnvironmentVariable(variable, "1");
+        try
+        {
+            var counter = new DispatchCounter();
+            var builder = WebApplication.CreateBuilder();
+            builder.WebHost.UseTestServer();
+            builder.Services.AddSingleton(counter);
+            builder.Services.AddHostedService<QueuedOutboundWorker>();
+            KautukaMaintenanceMode.SuppressApplicationHostedServices(builder.Services);
+            await using WebApplication app = builder.Build();
+            app.UseAdmissionFence();
+            app.Run(context => context.Response.WriteAsync("reached", TestContext.Current.CancellationToken));
+            await app.StartAsync(TestContext.Current.CancellationToken);
+
+            using HttpClient client = app.GetTestClient();
+            using HttpResponseMessage health = await client.GetAsync(new Uri("/health", UriKind.Relative), TestContext.Current.CancellationToken);
+            using HttpResponseMessage outbound = await client.PostAsync(new Uri("/api/channels/send", UriKind.Relative), null, TestContext.Current.CancellationToken);
+            Assert.Equal(StatusCodes.Status200OK, (int)health.StatusCode);
+            Assert.Equal(StatusCodes.Status503ServiceUnavailable, (int)outbound.StatusCode);
+            Assert.Equal(0, counter.Deliveries);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, previous);
+        }
     }
 
     [Fact]

@@ -133,7 +133,7 @@ public sealed class WorkloadPostStartVerifierCleanupTests
                 .GetMethod("CompleteEphemeralWorkloadAsync", BindingFlags.Instance | BindingFlags.NonPublic)
                 ?? throw new InvalidOperationException("CompleteEphemeralWorkloadAsync was not found.");
 
-            Assert.True(await ((Task<bool>)complete.Invoke(service, [workload])!).ConfigureAwait(false));
+            await ((Task)complete.Invoke(service, [workload])!).ConfigureAwait(false);
             RegistryEntry quarantined = Assert.Single(registry.GetAll());
             Assert.Equal(ContainerId, quarantined.ContainerId);
             Assert.Equal("deny-all", quarantined.Egress);

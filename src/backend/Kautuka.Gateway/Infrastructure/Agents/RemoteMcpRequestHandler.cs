@@ -41,6 +41,25 @@ internal sealed class RemoteMcpRequestHandler(
     {
     }
 
+    internal static async Task RequireNetworkAccessAsync(RemoteMcpRequestContext context, Uri destination,
+        INetworkAccessChecker checker, CancellationToken cancellationToken)
+    {
+        RemoteMcpConfigurationValidator.ValidateEndpoint(destination);
+        var target = new OutboundTarget(
+            Host: destination.IdnHost,
+            Port: destination.Port > 0 ? destination.Port : (string.Equals(destination.Scheme, "https", StringComparison.OrdinalIgnoreCase) ? 443 : 80),
+            Scheme: destination.Scheme,
+            Service: "remote-mcp",
+            Purpose: "remote-mcp",
+            UserId: context.UserId,
+            AgentId: NetworkAccessContext.Current?.AgentId,
+            ConnectorId: context.ConnectorId,
+            ExecutionContext: "app");
+
+        NetworkAccessCheckResult checkResult = await checker.CheckAsync(target, cancellationToken).ConfigureAwait(false);
+        if (!checkResult.Allowed) checkResult.ThrowIfDenied(target);
+    }
+
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         using var linked = lease is null ? null : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.Token);
@@ -56,23 +75,7 @@ internal sealed class RemoteMcpRequestHandler(
             || destination.Port != context.Endpoint.Port)
             throw new HttpRequestException("Remote MCP destination is outside the authorized origin.");
 
-        INetworkAccessChecker effectiveChecker = checker ?? FailClosedNetworkAccessChecker.Instance;
-        var target = new OutboundTarget(
-            Host: destination.IdnHost,
-            Port: destination.Port > 0 ? destination.Port : (string.Equals(destination.Scheme, "https", StringComparison.OrdinalIgnoreCase) ? 443 : 80),
-            Scheme: destination.Scheme,
-            Service: "remote-mcp",
-            Purpose: "remote-mcp",
-            UserId: context.UserId,
-            AgentId: NetworkAccessContext.Current?.AgentId,
-            ConnectorId: context.ConnectorId,
-            ExecutionContext: "app");
-
-        NetworkAccessCheckResult checkResult = await effectiveChecker.CheckAsync(target, cancellationToken).ConfigureAwait(false);
-        if (!checkResult.Allowed)
-        {
-            checkResult.ThrowIfDenied(target);
-        }
+        await RequireNetworkAccessAsync(context, destination, checker ?? FailClosedNetworkAccessChecker.Instance, cancellationToken).ConfigureAwait(false);
 
         RemoteMcpConfigurationValidator.Validate("http", context.Credentials, context.Headers);
         var needed = context.Headers.Where(h => h.CredentialKey is not null).Select(h => h.CredentialKey!).ToHashSet(StringComparer.Ordinal);

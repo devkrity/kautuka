@@ -5,12 +5,8 @@ import type { Connector } from '@/features/connectors';
 import type { AgentToolMode } from '../hooks/useAgentsTab';
 import type { AgentSettingsEntry } from '../types/settingsTypes';
 import { McpPanel } from './shared/McpPanel';
+import { executionContextOptions } from './shared/executionContextOptions';
 
-const bundleExecutionContextOptions = [
-  { value: 'OwnContext', label: 'Isolated' },
-  { value: 'OwnContextWithAgentFiles', label: 'Isolated with access to Agent Files' },
-  { value: 'AgentContext', label: 'Within Agent Sandbox' },
-] as const;
 const agentSandboxExecutionContext = 'AgentContext';
 const defaultBundleExecutionContext = 'OwnContext';
 
@@ -192,7 +188,7 @@ export function AgentConnectorsEditor({
                   <SegmentedControl
                     value={selectedContext}
                     onChange={(next) => upsertBinding(connectorId, next)}
-                    options={bundleExecutionContextOptions.map((option) => ({
+                    options={executionContextOptions.map((option) => ({
                       value: option.value,
                       label: option.label,
                       disabled:

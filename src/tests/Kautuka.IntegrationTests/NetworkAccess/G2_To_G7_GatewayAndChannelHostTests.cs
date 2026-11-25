@@ -189,7 +189,7 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
             Resolve: (_, _) => Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>()));
 
         using var requestHandler = new RemoteMcpRequestHandler(context, checker, mockTransport);
-        using var client = new HttpClient(requestHandler);
+        using var client = new HttpClient(requestHandler) { Timeout = TimeSpan.FromSeconds(2) };
 
         // 1. Outbound call is denied BEFORE inner transport receives the request
         using (NetworkAccessContext.BeginScope(userId: "user-beta", agentId: "agent-beta", connectorId: "conn-unapproved-1"))
@@ -232,7 +232,16 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
             Assert.Equal("agent-beta", pending.AgentId);
             Assert.Equal("conn-unapproved-1", pending.ConnectorId);
 
-            // G3.NC (Negative Control): Approve the host -> call connects to mock server
+            using var secondDeniedRequest = new HttpRequestMessage(HttpMethod.Post, unapprovedUri);
+            var secondDenial = await Assert.ThrowsAsync<NetworkAccessDeniedException>(() => client.SendAsync(secondDeniedRequest));
+            Assert.Equal(pending.Id, secondDenial.RequestId);
+            Assert.Equal(0, mockTransport.CallCount);
+
+            listResp = await grpcService.ListRequests(new NetworkAccessListRequestsRequest
+            {
+                Actor = new NetworkAccessActorMessage { UserId = "admin", IsAdmin = true },
+            }, adminCtx);
+            Assert.Single(listResp.Requests, r => r.Destination == "mcp.unapproved-tools.org");
             var decideResp = await grpcService.DecideRequest(new NetworkAccessDecideRequest
             {
                 Actor = new NetworkAccessActorMessage { UserId = "admin", IsAdmin = true },
@@ -243,6 +252,7 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
             }, adminCtx);
 
             Assert.True(decideResp.Revision > listResp.Revision);
+            Assert.Equal(0, mockTransport.CallCount);
 
             mockTransport.ResponseFactory = _ => new HttpResponseMessage(HttpStatusCode.OK);
             using var approvedReq = new HttpRequestMessage(HttpMethod.Post, unapprovedUri);
@@ -916,6 +926,30 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
             targetListener.Stop();
             await Task.WhenAll(serveAllowed, serveTarget);
         }
+    }
+
+    [Fact]
+    public async Task GatewayAdapterPreservesUserConnectorScopeWithoutAnAgent()
+    {
+        const string connector = "user-a::review-connector";
+        const string host = "review-connector.example";
+        NetworkAccessDecisionResult direct = nacController.EvaluateOutboundCheck(
+            new OutboundCheckInput("user-a", string.Empty, connector, host, 443, "remote-mcp", null, "gateway"));
+        NetworkAccessCheckOutboundResponse response = await grpcService.CheckOutbound(
+            new NetworkAccessCheckOutboundRequest
+            {
+                Host = host,
+                Port = 443,
+                UserId = "user-a",
+                ConnectorId = connector,
+                Purpose = "remote-mcp",
+            },
+            new TestServerCallContextWithCert(ManagerClientIdentities.GatewayCommonName));
+
+        Assert.False(response.Allowed);
+        Assert.NotNull(direct.RequestId);
+        Assert.Equal(direct.Reason, response.Reason);
+        Assert.Equal(direct.RequestId, response.RequestId);
     }
 
     [Fact]

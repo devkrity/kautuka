@@ -9,6 +9,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 MODULE_PATH = Path(__file__).with_name("kautuka-update-recovery.py")
 SPEC = importlib.util.spec_from_file_location("update_recovery", MODULE_PATH)
@@ -62,6 +63,122 @@ class RecoverySnapshotTests(unittest.TestCase):
                       source="0.1.0", target="0.2.0")
         values.update(kwargs)
         return type("Args", (), values)()
+
+    @unittest.skipUnless(hasattr(os, "geteuid"), "Unix recovery ownership")
+    def test_appliance_retention_preserves_verified_point_candidates_and_unrelated_data(self):
+        backups = self.backups
+        backups.mkdir()
+
+        def snapshot(name, layout="appliance", operation=None):
+            path = backups / name
+            path.mkdir()
+            (path / "manifest.json").write_text(json.dumps({
+                "format": recovery.FORMAT, "layout": layout,
+                "operationId": operation or name, "entries": [],
+            }), encoding="utf-8")
+            return path
+
+        old = snapshot("a" * 32)
+        current = backups / ("b" * 32)
+        self._make_database(self.root / "gateway/kautuka.db", "registry", "current")
+        recovery.capture(self._args(layout="appliance", destination=str(current), operation=current.name))
+        pending = snapshot(".candidate-" + "c" * 32)
+        unrelated = snapshot("d" * 32, operation="another-owner")
+        legacy = snapshot("e" * 32, layout="host-service")
+        pointer = backups / "last-known-good"
+        pointer.symlink_to(old, target_is_directory=True)
+        args = self._args(backups=str(backups), operation=current.name,
+                          manifest_sha256=recovery.digest(current / "manifest.json"), layout="appliance")
+        with self.assertRaisesRegex(RuntimeError, "does not match"):
+            recovery.prune_appliance_snapshots(args)
+        self.assertTrue(old.exists())
+
+        pointer.unlink()
+        pointer.symlink_to(current, target_is_directory=True)
+        payload = current / "state/gateway/kautuka.db"
+        valid_payload = payload.read_bytes()
+        payload.write_bytes(b"invalid")
+        with self.assertRaises(RuntimeError):
+            recovery.prune_appliance_snapshots(args)
+        self.assertTrue(old.exists())
+        payload.write_bytes(valid_payload)
+
+        deleting = backups / f".pruning-{old.name}"
+        with mock.patch.object(recovery.shutil, "rmtree") as remove:
+            def interrupt(directory):
+                self.assertEqual(directory, deleting)
+                (deleting / "manifest.json").unlink()
+                raise OSError("interrupted prune")
+
+            remove.side_effect = interrupt
+            with self.assertRaisesRegex(OSError, "interrupted prune"):
+                recovery.prune_appliance_snapshots(args)
+        self.assertTrue(deleting.is_dir())
+        self.assertFalse(old.exists())
+        recovery.prune_appliance_snapshots(args)
+        recovery.prune_appliance_snapshots(args)
+        self.assertFalse(deleting.exists())
+        for preserved in (current, pending, unrelated, legacy):
+            self.assertTrue(preserved.is_dir())
+        self.assertEqual(pointer.resolve(), current)
+
+    def test_appliance_restores_gateway_data_under_its_container_state_directory(self):
+        args = self._args(layout="appliance")
+        gateway_root = self.root / "gateway"
+        self._make_database(gateway_root / "kautuka.db", "registry", "gateway-source")
+        self._make_database(gateway_root / "agents/a1/agent.db", "agent", "agent-source")
+        deletion_staging = gateway_root / "agents/.deleting"
+        deletion_staging.mkdir()
+        (gateway_root / "gateway-auth.key").write_bytes(b"source-key")
+        recovery.capture(args)
+        recovery.verify(args)
+        self.assertFalse((self.backups / "state/gateway/agents/.deleting").exists())
+        with self.assertRaisesRegex(RuntimeError, "layout does not match"):
+            recovery.verify(self._args())
+
+        self._make_database(self.root / "kautuka.db", "registry", "host-layout")
+        self._make_database(gateway_root / "kautuka.db", "registry", "gateway-target")
+        self._make_database(gateway_root / "agents/a1/agent.db", "agent", "agent-target")
+        introduced = gateway_root / "agents/a2/agent.db"
+        self._make_database(introduced, "agent", "target-only")
+        user_file = introduced.parent / "notes.txt"
+        user_file.write_text("untouched", encoding="utf-8")
+        (gateway_root / "gateway-auth.key").write_bytes(b"target-key")
+        recovery.restore(args)
+
+        for path, table, expected in (
+            (gateway_root / "kautuka.db", "registry", "gateway-source"),
+            (gateway_root / "agents/a1/agent.db", "agent", "agent-source"),
+            (self.root / "kautuka.db", "registry", "host-layout"),
+        ):
+            db = sqlite3.connect(path)
+            try:
+                self.assertEqual([(expected,)], db.execute(f"SELECT value FROM {table}").fetchall())
+            finally:
+                db.close()
+        self.assertEqual(b"source-key", (gateway_root / "gateway-auth.key").read_bytes())
+        self.assertFalse(introduced.exists())
+        self.assertEqual("untouched", user_file.read_text(encoding="utf-8"))
+        self.assertTrue(deletion_staging.is_dir())
+
+    def test_appliance_refuses_to_skip_an_unfinished_helper_deletion(self):
+        pending_db = self.root / "gateway/agents/.deleting/a1-pending/agent.db"
+        self._make_database(pending_db, "agent", "pending-agent")
+
+        with self.assertRaisesRegex(RuntimeError, "unfinished agent deletion"):
+            recovery.capture(self._args(layout="appliance"))
+
+        self.assertTrue(pending_db.is_file())
+
+    def test_existing_host_service_snapshot_without_layout_is_still_valid(self):
+        args = self._args()
+        recovery.capture(args)
+        path = self.backups / "manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        del manifest["layout"]
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        recovery.verify(args)
+        recovery.restore(args)
 
     def test_uninitialized_empty_vault_can_be_backed_up(self):
         db = sqlite3.connect(self.root / "credentialsHost/vault/kautuka.credentials.db")

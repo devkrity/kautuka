@@ -12,6 +12,7 @@ export * from './types/settingsTypes';
 
 // Utils
 export * from './utils/settingsUtils';
+export { confirmProviderSave, isProviderIdReserved } from './utils/confirmProviderSave';
 
 // Shared Components
 export * from './components/SettingsShared';
@@ -42,6 +43,7 @@ export { ProviderCard } from './components/ProviderCard';
 export { WorkspaceAndSandboxSection } from './components/WorkspaceAndSandboxSection';
 export { PackageCacheStatsSection } from './components/PackageCacheStatsSection';
 export { ObservabilitySection } from './components/ObservabilitySection';
+export { ChannelSettingsSection } from './components/ChannelSettingsSection';
 export { ModelForm } from './components/ModelForm';
 export { ModelCard } from './components/ModelCard';
 export { ModelDiscoverySelect } from './components/ModelDiscoverySelect';

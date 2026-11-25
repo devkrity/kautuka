@@ -1,4 +1,3 @@
-import React, { useState } from 'react';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 
@@ -7,6 +6,7 @@ interface SuccessMilestoneProps {
   onReviewAbilities: () => void;
   onOpenSettings: () => void;
   telegramConfigured?: boolean;
+  startingChat?: boolean;
 }
 
 export function SuccessMilestone({
@@ -14,6 +14,7 @@ export function SuccessMilestone({
   onReviewAbilities,
   onOpenSettings,
   telegramConfigured = false,
+  startingChat = false,
 }: Readonly<SuccessMilestoneProps>) {
   return (
     <div className="flex flex-col items-center justify-center space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -25,11 +26,7 @@ export function SuccessMilestone({
           Your helper is ready
         </h1>
         <p className="text-xl text-muted-foreground">
-          Kautuka is set up on this installation, your AI connection is ready, and your helper can
-          start working now.
-        </p>
-        <p className="text-sm text-muted-foreground">
-          Your AI model can run locally or in the cloud, but Kautuka runs here and performs tool work here.
+          Send a first message to try it out.
         </p>
         {telegramConfigured && (
           <Alert variant="info" className="text-left">
@@ -45,22 +42,25 @@ export function SuccessMilestone({
         <Button
           size="lg"
           onClick={onContinue}
+          disabled={startingChat}
           className="flex-1 font-semibold whitespace-normal md:whitespace-nowrap"
         >
-          Start chatting
+          {startingChat ? 'Starting chat…' : 'Chat with my helper'}
         </Button>
         <Button
           size="lg"
           variant="secondary"
           onClick={onReviewAbilities}
+          disabled={startingChat}
           className="flex-1 whitespace-normal md:whitespace-nowrap"
         >
-          Review abilities
+          Explore optional setup
         </Button>
         <Button
           size="lg"
           variant="secondary"
           onClick={onOpenSettings}
+          disabled={startingChat}
           className="flex-1 whitespace-normal md:whitespace-nowrap"
         >
           Open settings

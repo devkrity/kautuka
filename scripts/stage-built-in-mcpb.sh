@@ -38,6 +38,10 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 package_dir="$repo_root/mcps/kautuka-web-tools"
 
+if ! command -v python3 >/dev/null 2>&1; then
+  echo 'error: python3 is required to normalize the built-in MCPB archive.' >&2
+  exit 1
+fi
 if ! command -v uv >/dev/null 2>&1; then
   echo 'error: uv is required to verify the locked kautuka-web-tools Python dependencies.' >&2
   exit 1
@@ -59,5 +63,41 @@ if [[ ! -f "$output_file" ]]; then
   echo "error: failed to create MCPB archive at $output_file" >&2
   exit 1
 fi
+
+# mcpb pack writes the current time into every ZIP entry. Normalize the
+# generated unsigned archive so identical tools retain their digest. Signing,
+# if ever added, must happen after this rewrite.
+python3 - "$output_file" <<'PY'
+import copy
+import os
+import stat
+import sys
+import tempfile
+import zipfile
+
+path = sys.argv[1]
+with open(path, 'rb') as stream:
+    stream.seek(0, os.SEEK_END)
+    stream.seek(max(0, stream.tell() - len(b'MCPB_SIG_END')))
+    if stream.read() == b'MCPB_SIG_END':
+        raise SystemExit('error: refusing to rewrite a signed MCPB archive')
+fd, temporary = tempfile.mkstemp(prefix='.mcpb-normalize-', dir=os.path.dirname(os.path.abspath(path)))
+os.close(fd)
+try:
+    with zipfile.ZipFile(path, 'r') as source, zipfile.ZipFile(temporary, 'w') as target:
+        target.comment = source.comment
+        entries = source.infolist()
+        if len({entry.filename for entry in entries}) != len(entries):
+            raise ValueError('duplicate MCPB archive entry')
+        for entry in sorted(entries, key=lambda item: item.filename):
+            normalized = copy.copy(entry)
+            normalized.date_time = (2000, 1, 1, 0, 0, 0)
+            target.writestr(normalized, source.read(entry))
+    os.chmod(temporary, stat.S_IMODE(os.stat(path).st_mode))
+    os.replace(temporary, path)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+PY
 
 printf '%s\n' "$output_file"

@@ -1945,6 +1945,60 @@ public sealed class WorkspaceDesiredStatePublicationTests
     }
 
     [Fact]
+    public void SkillScopesUseSeparateWorkspacesOrTheSameUsersAgentFiles()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        IConfiguration configuration = CreateConfiguration(temp.SqlitePath);
+        var database = new KautukaDatabase(configuration);
+        database.EnsureReady();
+        var platform = new PlatformConfiguration
+        {
+            Kautuka = new InfrastructureDefinition
+            {
+                Workspace = new WorkspaceDefinition { BaseRoot = Path.Combine(temp.Root, "workspaces") },
+                Sandbox = new SandboxRuntimeDefinition { Image = "kautuka-base:latest", DefaultCpus = 2, DefaultMemory = "2g" },
+            },
+            Agents =
+            [
+                new AgentDefinition
+                {
+                    Id = "notes",
+                    OwnerUserId = "user-a",
+                    Scope = "user",
+                    Sandbox = new AgentSandboxDefinition { Enabled = true },
+                    SkillAttachments =
+                    [
+                        new AgentSkillAttachmentDefinition { SkillId = "legacy", Mode = SkillAttachmentMode.Trusted },
+                        new AgentSkillAttachmentDefinition { SkillId = "own", Mode = SkillAttachmentMode.Trusted, Context = SkillExecutionContext.Isolated },
+                        new AgentSkillAttachmentDefinition { SkillId = "files", Mode = SkillAttachmentMode.Trusted, Context = SkillExecutionContext.WithAgentFiles },
+                        new AgentSkillAttachmentDefinition { SkillId = "private", Mode = SkillAttachmentMode.Trusted, Context = SkillExecutionContext.Isolated },
+                    ],
+                },
+            ],
+            Skills =
+            [
+                new SkillDefinition { SkillId = "legacy" },
+                new SkillDefinition { SkillId = "own" },
+                new SkillDefinition { SkillId = "files" },
+                new SkillDefinition { SkillId = "private", Scope = "user", OwnerUserId = "user-b" },
+            ],
+        };
+        var resolver = new WorkspaceRuntimeContextResolver(new StaticPlatformConfigurationProvider(platform), configuration, database);
+
+        WorkspaceDesiredStatePayload desired = resolver.ResolveDesiredState();
+        WorkspaceRuntimeContext agent = Assert.Single(desired.Workspaces, item => item.ScopeType == "agent");
+        WorkspaceRuntimeContext isolated = Assert.Single(desired.Workspaces, item => item.ScopeType == "skill");
+        WorkspaceRuntimeContext withFiles = Assert.Single(desired.Workspaces, item => item.ScopeType == "skill-with-agent-files");
+        Assert.Equal(3, desired.Workspaces.Count);
+        Assert.Equal(agent.HostWorkspacePath, withFiles.HostWorkspacePath);
+        Assert.NotEqual(agent.HostWorkspacePath, isolated.HostWorkspacePath);
+        Assert.Throws<InvalidOperationException>(() => resolver.ResolveSkillWorkspace("notes", "user-b", "own", SkillExecutionContext.Isolated));
+        Assert.Throws<InvalidOperationException>(() => resolver.ResolveSkillWorkspace("notes", "user-a", "own", SkillExecutionContext.AgentSandbox));
+        Assert.Equal(isolated.ScopeId, resolver.ResolveSkillWorkspace("notes", "user-a", "own", SkillExecutionContext.Isolated).ScopeId);
+        Assert.Equal(agent.ScopeId, resolver.ResolveSkillWorkspace("notes", "user-a", "legacy", SkillExecutionContext.AgentSandbox).ScopeId);
+    }
+
+    [Fact]
     public void ResolveDesiredStateKeepsALongAgentIdWithinTheWorkspaceIdLimit()
     {
         using var temp = new TemporaryGatewayStateDirectory();

@@ -1,4 +1,4 @@
-import { fetchConnectors, type Connector } from '@/features/connectors';
+import { useConnectors } from '@/features/connectors';
 import { settingsAdmin } from '@/features/settings';
 import { fetchSkills, normalizeAgentSkillAttachments, type Skill } from '@/features/skills';
 import { useQueryClient } from '@tanstack/react-query';
@@ -117,9 +117,13 @@ const setAgentConnectorIds = (
 
 export function useAgentsTab() {
   const queryClient = useQueryClient();
+  const { data: connectors, isLoading: connectorsLoading } = useConnectors({ staleTime: 0 });
+  const mcpServers = useMemo(
+    () => connectors?.filter((connector) => connector.enabled) ?? [],
+    [connectors]
+  );
   const [agents, setAgents] = useState<AgentSettingsEntry[]>([]);
   const [models, setModels] = useState<ModelEntry[]>([]);
-  const [mcpServers, setMcpServers] = useState<Connector[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -137,11 +141,10 @@ export function useAgentsTab() {
   const load = async () => {
     setLoading(true);
     try {
-      const [ar, mr, connectors, personaDefinitionsResponse, platformSkills, orgResponse, runtimeLimitsResponse] =
+      const [ar, mr, personaDefinitionsResponse, platformSkills, orgResponse, runtimeLimitsResponse] =
         await Promise.all([
           settingsAdmin.listAgents(),
           settingsAdmin.listModels(),
-          fetchConnectors(),
           settingsAdmin.getPersonaDefinitions(),
           fetchSkills(),
           settingsAdmin.getOrganization(),
@@ -191,7 +194,6 @@ export function useAgentsTab() {
         }))
       );
       setModels(mr.data.models);
-      setMcpServers(connectors.filter((c) => c.enabled));
       setSkills(platformSkills);
     } finally {
       setLoading(false);
@@ -496,7 +498,7 @@ export function useAgentsTab() {
     models,
     mcpServers,
     skills,
-    loading,
+    loading: loading || connectorsLoading,
     editingId,
     savingId,
     draftAgent,

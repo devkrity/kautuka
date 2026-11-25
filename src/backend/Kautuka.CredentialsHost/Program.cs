@@ -125,7 +125,7 @@ var app = builder.Build();
 
 app.GrantSocketGroupAccessWhenStarted(credentialsEndpoint);
 
-app.UseAdmissionFence();
+app.UseAdmissionFence(static path => path.Equals("/kautuka.credentials.v1.CredentialsService/GetHealth", StringComparison.Ordinal));
 
 // Schema initializer runs synchronously at startup — safe because nothing else is running yet.
 CredentialsSchemaInitializer.EnsureReady(app.Services.GetRequiredService<CredentialsDatabase>());

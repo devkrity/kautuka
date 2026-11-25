@@ -80,8 +80,16 @@ internal static class WorkspaceGrpcContractMapper
     public static WorkspaceMcpContainerConnectorDefinition FromProbe(WorkspaceMcpContainerProbeRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
+        string connectorId = string.IsNullOrWhiteSpace(request.ConnectorId) ? "probe-container" : request.ConnectorId.Trim();
+        if (request.SaveDiscovery && !string.IsNullOrWhiteSpace(request.UserId))
+        {
+            // Save discovery retains a container. Use the same caller-scoped ID that desired state uses to retire it.
+            string prefix = request.UserId.Trim() + "::";
+            if (!connectorId.StartsWith(prefix, StringComparison.Ordinal)) connectorId = prefix + connectorId;
+        }
+
         return new WorkspaceMcpContainerConnectorDefinition(
-            string.IsNullOrWhiteSpace(request.ConnectorId) ? "probe-container" : request.ConnectorId.Trim(),
+            connectorId,
             request.Image?.Trim() ?? string.Empty,
             request.Command?.Trim() ?? string.Empty,
             [.. request.Args.Where(static arg => !string.IsNullOrWhiteSpace(arg)).Select(static arg => arg.Trim())],

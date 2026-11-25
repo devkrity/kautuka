@@ -18,6 +18,32 @@ interface PendingApprovalCardProps {
   disabled?: boolean;
 }
 
+function describeInitiatingTask(request: NetworkAccessRequestDto): string | undefined {
+  if (request.origin !== 'gateway') return undefined;
+
+  switch (request.purpose) {
+    case 'agent-run':
+      return 'The helper was working on a task that needed its AI model.';
+    case 'remote-mcp':
+      return 'Kautuka was connecting to a remote connector to discover or use its tools.';
+    case 'provider-test':
+    case 'ai-probe':
+      return 'Kautuka was testing an AI provider connection.';
+    case 'ai-discovery':
+      return 'Kautuka was looking up the models available from an AI provider.';
+    case 'connector-oauth':
+    case 'connector-oauth-refresh':
+      return 'Kautuka was connecting an account or renewing access for a connector.';
+    case 'oidc-login':
+    case 'oidc-link':
+      return 'Kautuka was communicating with a sign-in provider.';
+    case 'catalog-install':
+      return 'Kautuka was downloading an item from the catalog.';
+    default:
+      return undefined;
+  }
+}
+
 export function PendingApprovalCard({
   request,
   currentUser,
@@ -34,10 +60,13 @@ export function PendingApprovalCard({
   const canAllowAllAgents = canApproveOwn;
   const defaultScope = request.userId === 'system' ? 'system' : request.agentId ? 'agent' : request.connectorId ? 'connector' : 'user';
   const [allowLan, setAllowLan] = React.useState(false);
-  const [confirmedAllScope, setConfirmedAllScope] = React.useState(false);
+  const [includeSubdomains, setIncludeSubdomains] = React.useState(false);
+  const [confirmedAllScope, setConfirmedAllScope] = React.useState<string>();
   const [submitting, setSubmitting] = React.useState(false);
 
   const isProbe = request.purpose === 'probe';
+  const baseDomain = request.destKind === 'host' && !isProbe ? request.baseDomain : null;
+  const coverage = includeSubdomains && baseDomain ? { includeSubdomains: true } : {};
   const isPrivate = destinationScope(request.destination) === 'private';
   const destFormatted = formatDestinationDisplay(request.destination, request.port);
 
@@ -60,6 +89,7 @@ export function PendingApprovalCard({
       await onDecide({
         allow: true,
         scope: defaultScope,
+        ...coverage,
         allowLan: isAdmin && allowLan ? true : undefined,
         expectedRevision,
       });
@@ -86,15 +116,17 @@ export function PendingApprovalCard({
   };
 
   const handleAllowAllAgents = async () => {
-    setConfirmedAllScope(true);
+    setConfirmedAllScope(undefined);
     setSubmitting(true);
     try {
       await onDecide({
         allow: true,
         scope: 'user',
+        ...coverage,
         allowLan: isAdmin && allowLan ? true : undefined,
         expectedRevision,
       });
+      setConfirmedAllScope(includeSubdomains && baseDomain ? `${baseDomain} and its subdomains` : destFormatted);
     } catch {
       // Handled by parent error state
     } finally {
@@ -105,7 +137,7 @@ export function PendingApprovalCard({
   const handleAllowConnector = async () => {
     setSubmitting(true);
     try {
-      await onDecide({ allow: true, scope: 'connector', allowLan: isAdmin && allowLan ? true : undefined, expectedRevision });
+      await onDecide({ allow: true, scope: 'connector', ...coverage, allowLan: isAdmin && allowLan ? true : undefined, expectedRevision });
     } catch {
       // Handled by parent error state
     } finally {
@@ -147,15 +179,26 @@ export function PendingApprovalCard({
       <p className="text-sm text-muted-foreground">
         {isProbe
           ? 'This temporary connector probe tried to connect while discovering tools. Any approval applies only until the probe exits.'
-          : "This agent or connector tried to connect to a website it hasn't been allowed to use."}
+          : describeInitiatingTask(request) ?? "This agent or connector tried to connect to a website it hasn't been allowed to use."}
       </p>
 
       {showWaitingNotice ? (
         <p className="text-sm font-medium text-amber-600 dark:text-amber-400">
-          Waiting for an administrator to approve
+          {isOwner
+            ? 'You need permission to manage your own network access. Ask an administrator to approve this request or grant that permission to your account.'
+            : 'Waiting for an administrator to approve'}
         </p>
       ) : canApproveOwn ? (
         <div className="space-y-3 pt-1">
+          {baseDomain && (
+            <div className="flex items-center space-x-2">
+              <Checkbox id={`domain-${request.id}`} checked={includeSubdomains} disabled={disabled || submitting}
+                onChange={(event) => setIncludeSubdomains(event.target.checked)} />
+              <label htmlFor={`domain-${request.id}`} className="text-sm cursor-pointer">
+                Allow all of {baseDomain}, including its subdomains
+              </label>
+            </div>
+          )}
           {isAdmin && isPrivate && (
             <div className="flex items-center space-x-2">
               <Checkbox
@@ -217,9 +260,9 @@ export function PendingApprovalCard({
                   : `Allow this site for everything ${userLabel} uses`}
               </button>
               {confirmedAllScope && (
-                <p className="text-xs text-muted-foreground mt-1">
+                <p role="status" className="text-xs text-muted-foreground mt-1">
                   {isOwner ? 'All your activity' : `All of ${userLabel}'s activity`} can now reach{' '}
-                  {destFormatted}.
+                  {confirmedAllScope}.
                 </p>
               )}
             </div>

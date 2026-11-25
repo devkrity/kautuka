@@ -23,6 +23,66 @@ public static class ChannelSecurityMaterialProvisioner
     public const string RotationManifest = "channel-security-rotation.json";
     public const string AuthorityKey = "channel-ca.key";
     public static readonly TimeSpan MaximumRotationOverlap = TimeSpan.FromHours(24);
+    private static readonly Uri delegationIdentity = new("spiffe://kautuka.local/delegation/gateway/channel");
+
+    public enum ApplianceRenewalState { Healthy, Routine, FinalDay, ExpiredOrInvalid }
+
+    public static bool ApplianceLeavesNeedRenewal(ChannelSecurityMaterialDirectories directories, DateTimeOffset now)
+        => GetApplianceRenewalState(directories, now) != ApplianceRenewalState.Healthy;
+
+    public static ApplianceRenewalState GetApplianceRenewalState(ChannelSecurityMaterialDirectories directories, DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(directories);
+        DateTime earliest = DateTime.MaxValue;
+        foreach (string path in new[] {
+            Path.Combine(directories.ChannelPrivateRoot, ServerPfx),
+            Path.Combine(directories.GatewayPrivateRoot, GatewayClientPfx),
+            Path.Combine(directories.GatewayPrivateRoot, GatewayDelegationPfx) })
+        {
+            using X509Certificate2 certificate = X509CertificateLoader.LoadPkcs12FromFile(path, null, X509KeyStorageFlags.EphemeralKeySet);
+            if (!certificate.HasPrivateKey || certificate.NotBefore.ToUniversalTime() > now.UtcDateTime)
+                return ApplianceRenewalState.ExpiredOrInvalid;
+            earliest = DateTime.Compare(earliest, certificate.NotAfter.ToUniversalTime()) < 0 ? earliest : certificate.NotAfter.ToUniversalTime();
+        }
+        if (earliest <= now.UtcDateTime) return ApplianceRenewalState.ExpiredOrInvalid;
+        if (earliest <= now.UtcDateTime.AddDays(1)) return ApplianceRenewalState.FinalDay;
+        if (earliest <= now.UtcDateTime.AddDays(7)) return ApplianceRenewalState.Routine;
+        return ApplianceRenewalState.Healthy;
+    }
+
+    public static void StageApplianceLeaves(
+        string authorityRoot, ChannelSecurityMaterialDirectories staging, DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(staging);
+        if (staging.AuthorityRoot is not null)
+            throw new ArgumentException("Stage only the runtime certificates.", nameof(staging));
+        ValidateDistinctRoots(staging);
+        RequirePrivateDirectoryPermissions(authorityRoot);
+        string keyPath = Path.Combine(authorityRoot, AuthorityKey);
+        string caPath = Path.Combine(authorityRoot, CaCertificate);
+        RequirePrivateFilePermissions(keyPath);
+        using X509Certificate2 ca = LocalCaMtlsBootstrap.LoadCertificateAuthority(keyPath, caPath);
+        using X509Certificate2 server = LocalCaMtlsBootstrap.IssueServerCertificate(ca, "Channel", now);
+        using X509Certificate2 client = LocalCaMtlsBootstrap.IssueClientCertificate(
+            ca, "Kautuka Gateway Client", LocalCaMtlsBootstrap.GatewayChannelWorkloadIdentity, now);
+        using X509Certificate2 delegation = LocalCaMtlsBootstrap.IssueClientCertificate(
+            ca, "Kautuka Gateway Channel Delegation", delegationIdentity, now);
+
+        foreach (string directory in new[] { staging.GatewayPrivateRoot, staging.GatewayTrustRoot, staging.ChannelPrivateRoot, staging.ChannelTrustRoot })
+        {
+            Directory.CreateDirectory(directory);
+            RestrictDirectory(directory);
+        }
+        WritePrivate(Path.Combine(staging.ChannelPrivateRoot, ServerPfx), server.Export(X509ContentType.Pkcs12));
+        WritePrivate(Path.Combine(staging.GatewayPrivateRoot, GatewayClientPfx), client.Export(X509ContentType.Pkcs12));
+        WritePrivate(Path.Combine(staging.GatewayPrivateRoot, GatewayDelegationPfx), delegation.Export(X509ContentType.Pkcs12));
+        byte[] publicCa = ca.Export(X509ContentType.Cert);
+        WritePublic(Path.Combine(staging.GatewayTrustRoot, CaCertificate), publicCa);
+        WritePublic(Path.Combine(staging.ChannelTrustRoot, CaCertificate), publicCa);
+        WritePublic(Path.Combine(staging.ChannelTrustRoot, GatewayClientCertificate), client.Export(X509ContentType.Cert));
+        WritePublic(Path.Combine(staging.ChannelTrustRoot, GatewayDelegationCertificate), delegation.Export(X509ContentType.Cert));
+        ValidateRuntimeInventories(staging);
+    }
 
     public static void Provision(ChannelSecurityMaterialDirectories directories)
     {
@@ -165,7 +225,7 @@ public static class ChannelSecurityMaterialProvisioner
         using X509Certificate2 client = X509CertificateLoader.LoadPkcs12FromFile(nextClientPfx, null, X509KeyStorageFlags.Exportable | X509KeyStorageFlags.EphemeralKeySet);
         using X509Certificate2 delegation = X509CertificateLoader.LoadPkcs12FromFile(nextDelegationPfx, null, X509KeyStorageFlags.Exportable | X509KeyStorageFlags.EphemeralKeySet);
         RequireRotationCertificate(client, ca, "Kautuka Gateway Client", LocalCaMtlsBootstrap.GatewayChannelWorkloadIdentity);
-        RequireRotationCertificate(delegation, ca, "Kautuka Gateway Channel Delegation", new Uri("spiffe://kautuka.local/delegation/gateway/channel"));
+        RequireRotationCertificate(delegation, ca, "Kautuka Gateway Channel Delegation", delegationIdentity);
         EnsureDistinctFromCurrent(directories, client, delegation);
         WritePrivateAtomic(Path.Combine(directories.GatewayPrivateRoot, GatewayClientPfx + NextSuffix), File.ReadAllBytes(nextClientPfx));
         WritePrivateAtomic(Path.Combine(directories.GatewayPrivateRoot, GatewayDelegationPfx + NextSuffix), File.ReadAllBytes(nextDelegationPfx));

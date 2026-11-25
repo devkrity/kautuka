@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { fetchProviders } from '@/features/settings';
+import { fetchProviders, settingsAdmin } from '@/features/settings';
 import { apiClient } from '@/lib/apiClient';
 import { readApiBoolean, readApiString, readApiStringArray } from '@/lib/apiResponse';
 
@@ -15,9 +15,9 @@ export function useSettingsStatus(enabled: boolean) {
   const query = useQuery({
     queryKey: ['system-setup-status'],
     queryFn: async () => {
-      // Fetching providers is the key indicator of first-run empty state
-      const [providers, systemHealthResponse] = await Promise.all([
+      const [providers, agents, systemHealthResponse] = await Promise.all([
         fetchProviders(),
+        settingsAdmin.listAgents(),
         apiClient.get('/runtime/system-health').catch(() => null),
       ]);
 
@@ -39,6 +39,7 @@ export function useSettingsStatus(enabled: boolean) {
       return {
         providersCount: providers.length,
         hasProviders: providers.length > 0,
+        hasConfiguredHelper: agents.data.agents.some((agent) => agent.modelId.trim().length > 0),
         health,
       };
     },

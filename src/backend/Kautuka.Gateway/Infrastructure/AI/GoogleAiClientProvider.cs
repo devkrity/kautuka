@@ -13,7 +13,8 @@ namespace Kautuka.Gateway.Infrastructure.AI;
 
 internal sealed class GoogleAiClientProvider(
     IRunLimitResolver? runLimitResolver = null,
-    INetworkAccessChecker? checker = null) : IAiClientProvider
+    INetworkAccessChecker? checker = null,
+    Func<INetworkAccessChecker?, HttpMessageHandler>? transportFactory = null) : IAiClientProvider
 {
     private const string httpTimeoutSettingKey = "http_timeout_seconds";
     private const string openaiCompatPathSuffix = "/v1beta/openai";
@@ -131,7 +132,14 @@ internal sealed class GoogleAiClientProvider(
     }
 
     internal static bool IsOpenAiCompatibleGeminiUrl(string url)
-        => url.EndsWith(openaiCompatPathSuffix, StringComparison.OrdinalIgnoreCase);
+        => Uri.TryCreate(url, UriKind.Absolute, out Uri? target)
+            && target.Scheme == Uri.UriSchemeHttps
+            && target.IsDefaultPort
+            && target.UserInfo.Length == 0
+            && target.Query.Length == 0
+            && target.Fragment.Length == 0
+            && string.Equals(target.IdnHost, "generativelanguage.googleapis.com", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(target.AbsolutePath, openaiCompatPathSuffix, StringComparison.OrdinalIgnoreCase);
 
     private Client CreateClient(JsonObject settings, string apiKey)
     {
@@ -154,7 +162,9 @@ internal sealed class GoogleAiClientProvider(
         var clientOptions = new ClientOptions
         {
             HttpClientFactory = () => new HttpClient(
-                new NetworkAccessCheckHandler(effectiveChecker, new SocketsHttpHandler { AllowAutoRedirect = false }),
+                transportFactory is null
+                    ? new NetworkAccessCheckHandler(effectiveChecker, new SocketsHttpHandler { AllowAutoRedirect = false })
+                    : transportFactory(checker) ?? throw new InvalidOperationException("Configured model transport returned no handler."),
                 disposeHandler: true),
         };
 

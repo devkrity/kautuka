@@ -26,10 +26,12 @@ public sealed partial class WorkspaceGrpcService
     private static NetworkAccessApprovalLimitsMessage ToLimitsMessage(NetworkAccessApprovalLimits limits)
         => new() { Global = limits.Global, PerUser = limits.PerUser };
 
-    public override Task<NetworkAccessProviderTestResponse> BeginProviderTest(NetworkAccessProviderTestRequest request, ServerCallContext context)
-        => ExecuteNacRpc(() => new NetworkAccessProviderTestResponse
+    public override Task<NetworkAccessProviderTestResponse> PrepareProviderTest(NetworkAccessProviderTestRequest request, ServerCallContext context)
+        => ExecuteNacRpc(() =>
         {
-            Token = Nac.BeginProviderTest(ToActor(request.Actor), request.Host, request.Port, request.AllowLan),
+            var (status, reason, token) = Nac.PrepareProviderTest(ToActor(request.Actor), request.Host, request.Port,
+                request.AllowLan, request.Confirmed);
+            return new NetworkAccessProviderTestResponse { Status = status, Reason = reason, Token = token };
         });
 
     public override Task<WorkspaceBoolResponse> EndProviderTest(NetworkAccessProviderTestEndRequest request, ServerCallContext context)
@@ -39,7 +41,7 @@ public sealed partial class WorkspaceGrpcService
             return new WorkspaceBoolResponse { Ok = true };
         });
 
-    public override Task<NetworkAccessCheckOutboundResponse> CheckOutbound(
+    public override async Task<NetworkAccessCheckOutboundResponse> CheckOutbound(
         NetworkAccessCheckOutboundRequest request,
         ServerCallContext context)
     {
@@ -48,7 +50,7 @@ public sealed partial class WorkspaceGrpcService
         using IDisposable scope = BeginGrpcScope(context, "CheckOutbound", ("Host", request.Host), ("Port", request.Port));
         TagCurrentActivity(("rpc.method", "CheckOutbound"));
 
-        return ExecuteNacRpc(() =>
+        OutboundCheckInput input = await ExecuteNacRpc(() =>
         {
             string origin = ResolveClientOrigin(context);
             string effectiveUserId;
@@ -72,10 +74,10 @@ public sealed partial class WorkspaceGrpcService
                 }
 
                 effectiveUserId = request.UserId.Trim();
-                effectiveAgentId = string.IsNullOrWhiteSpace(request.AgentId) ? "gateway" : request.AgentId.Trim();
+                effectiveAgentId = request.AgentId.Trim();
             }
 
-            NetworkAccessDecisionResult decision = Nac.EvaluateOutboundCheck(new OutboundCheckInput(
+            return new OutboundCheckInput(
                 effectiveUserId,
                 effectiveAgentId,
                 string.IsNullOrWhiteSpace(request.ConnectorId) ? null : request.ConnectorId.Trim(),
@@ -83,16 +85,18 @@ public sealed partial class WorkspaceGrpcService
                 request.Port,
                 string.IsNullOrWhiteSpace(request.Purpose) ? null : request.Purpose,
                 string.IsNullOrWhiteSpace(request.CorrelationId) ? null : request.CorrelationId,
-                origin));
-
-            return new NetworkAccessCheckOutboundResponse
-            {
-                Allowed = decision.Allowed,
-                Reason = decision.Reason,
-                RequestId = decision.RequestId ?? string.Empty,
-                OpenInternetBadge = decision.OpenInternetBadge,
-            };
-        });
+                origin);
+        }).ConfigureAwait(false);
+        bool applianceGateway = input.Origin == "gateway" && Nac.ApplianceMode;
+        NetworkAccessDecisionResult decision = await ExecuteNacRpc(() => applianceGateway
+            ? Nac.EvaluateGatewayConnect(input, publicOnly: false) : Nac.EvaluateOutboundCheck(input)).ConfigureAwait(false);
+        return new NetworkAccessCheckOutboundResponse
+        {
+            Allowed = decision.Allowed,
+            Reason = decision.Reason,
+            RequestId = decision.RequestId ?? string.Empty,
+            OpenInternetBadge = decision.OpenInternetBadge,
+        };
     }
 
     public override Task<NetworkAccessListRequestsResponse> ListRequests(
@@ -137,7 +141,8 @@ public sealed partial class WorkspaceGrpcService
                 request.Allow,
                 string.IsNullOrWhiteSpace(request.Scope) ? null : request.Scope,
                 request.ExpectedRevision,
-                request.AllowLan);
+                request.AllowLan,
+                request.IncludeSubdomains);
 
             return new NetworkAccessDecideResponse
             {
@@ -163,7 +168,7 @@ public sealed partial class WorkspaceGrpcService
 
         return ExecuteNacRpc(() =>
         {
-            (long revision, IReadOnlyList<NetworkAccessRuleView> rules) = Nac.PolicyStore.ListRules(
+            (long revision, IReadOnlyList<NetworkAccessRuleView> rules, IReadOnlyList<ServicePermissionView> services) = Nac.PolicyStore.ListRulesWithServices(
                 ToActor(request.Actor),
                 string.IsNullOrWhiteSpace(request.FilterUserId) ? null : request.FilterUserId);
 
@@ -172,6 +177,13 @@ public sealed partial class WorkspaceGrpcService
                 Revision = revision,
             };
             response.Rules.AddRange(rules.Select(ToMessage));
+            response.Services.AddRange(services.Select(service => new NetworkAccessServicePermissionView
+            {
+                ServiceId = service.ServiceId,
+                Total = service.Total,
+                Granted = service.Granted,
+                Effective = service.Effective,
+            }));
             return response;
         });
     }
@@ -222,6 +234,37 @@ public sealed partial class WorkspaceGrpcService
                 Revision = revision,
                 Rule = ToMessage(rule),
             };
+        });
+    }
+
+    public override Task<NetworkAccessProviderPermissionResponse> SetServicePermission(
+        NetworkAccessServicePermissionRequest request, ServerCallContext context)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(context);
+        using IDisposable scope = BeginGrpcScope(context, "SetServicePermission");
+        return ExecuteNacRpc(() =>
+        {
+            if (!request.HasAllowed || !request.HasExpectedRevision)
+                throw new ArgumentException("Service state and expected revision are required.");
+            (long revision, string status) = Nac.PolicyStore.SetServicePermission(
+                ToActor(request.Actor), request.ServiceId, request.Allowed, request.ExpectedRevision);
+            return new NetworkAccessProviderPermissionResponse { Revision = revision, Status = status };
+        });
+    }
+
+    public override Task<NetworkAccessProviderPermissionResponse> EnsureProviderPermission(
+        NetworkAccessProviderPermissionRequest request, ServerCallContext context)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(context);
+        using IDisposable scope = BeginGrpcScope(context, "EnsureProviderPermission");
+        return ExecuteNacRpc(() =>
+        {
+            (long revision, string status) = Nac.PolicyStore.EnsureProviderPermission(
+                ToActor(request.Actor), request.Destination, request.DestKind, request.Port, request.AllowLan,
+                request.HasConfirmedRevision ? request.ConfirmedRevision : null, request.CheckOnly);
+            return new NetworkAccessProviderPermissionResponse { Revision = revision, Status = status };
         });
     }
 
@@ -562,7 +605,7 @@ public sealed partial class WorkspaceGrpcService
             ? throw new ArgumentException("Authenticated actor userId is required.")
             : new NetworkAccessActor(actor.UserId, actor.IsAdmin);
 
-    private static NetworkAccessRequestMessage ToMessage(NetworkAccessRequestView view)
+    private NetworkAccessRequestMessage ToMessage(NetworkAccessRequestView view)
         => new()
         {
             Id = view.Request.Id,
@@ -583,6 +626,8 @@ public sealed partial class WorkspaceGrpcService
             CompatProfile = view.Request.CompatProfile ?? string.Empty,
             WaitingForAdmin = view.WaitingForAdmin,
             CompatibilityMode = view.CompatibilityMode,
+            BaseDomain = view.Request.Status == "pending" && view.Request.DestKind == "host" && view.Request.Purpose != "probe"
+                && Nac.PolicyStore.RegistrableDomain.TryGet(view.Request.Destination, out string domain) ? domain : string.Empty,
         };
 
     private static NetworkAccessRuleMessage ToMessage(NetworkAccessRuleView view)
@@ -604,6 +649,7 @@ public sealed partial class WorkspaceGrpcService
             Paused = view.Paused,
             OpenInternetBadge = view.OpenInternetBadge,
             ProtectedFromUser = view.Rule.DecidedByAdmin,
+            SetupService = view.SetupService ?? string.Empty,
         };
 
     private static NetworkAccessUserPrivilegesMessage ToMessage(UserPrivileges privs, bool hasStoredRecord = true)

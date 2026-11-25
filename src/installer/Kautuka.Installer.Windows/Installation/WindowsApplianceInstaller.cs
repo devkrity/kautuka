@@ -70,9 +70,12 @@ internal static partial class WindowsApplianceInstaller
         await WaitForWebUiReadyAsync(name, _ => Task.CompletedTask, cancellationToken).ConfigureAwait(false);
     }
 
-    public static async Task InstallAsync(
+    internal enum InstallOutcome { Completed, RestartRequired }
+
+    public static async Task<InstallOutcome> InstallAsync(
         WindowsApplianceInstallRequest request,
         Func<string, Task> log,
+        bool express,
         CancellationToken cancellationToken)
     {
         if (!OperatingSystem.IsWindows())
@@ -101,7 +104,8 @@ internal static partial class WindowsApplianceInstaller
 
         WindowsApplianceStateStore.Save(state);
 
-        await EnsureWslPrerequisitesAsync(state, log, cancellationToken).ConfigureAwait(false);
+        if (!await EnableWslPrerequisitesAsync(state, log, express, cancellationToken).ConfigureAwait(false))
+            return InstallOutcome.RestartRequired;
 
         state = StageAssets(state);
         await log("Staged installer executable.").ConfigureAwait(false);
@@ -153,6 +157,7 @@ internal static partial class WindowsApplianceInstaller
         await log($"Kautuka appliance installed. Open {webUrl}.").ConfigureAwait(false);
         await log($"WSL distro: {state.DistroName}").ConfigureAwait(false);
         await log($"WSL install directory: {state.InstallDir}").ConfigureAwait(false);
+        return InstallOutcome.Completed;
     }
 
     public static async Task UninstallAsync(

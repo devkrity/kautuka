@@ -50,9 +50,9 @@ vi.mock('@/features/auth/api/auth', async (importOriginal) => {
 
 // ── helpers ────────────────────────────────────────────────────────────────────
 
-function renderLoginPage(props: { initialNeedsSetup?: boolean | null } = {}) {
+function renderLoginPage(props: { initialNeedsSetup?: boolean | null } = {}, location = '/login') {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[location]}>
       <LoginPage onLoginSuccess={vi.fn()} {...props} />
     </MemoryRouter>
   );
@@ -72,6 +72,20 @@ describe('LoginPage — first-run detection', () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it('opens an invitation link at Join your team and lets an existing user return to sign in', async () => {
+    const user = userEvent.setup();
+    renderLoginPage({ initialNeedsSetup: false }, '/login?join=1');
+
+    expect(await screen.findByText('Join your team')).toBeVisible();
+    const code = screen.getByLabelText('Invitation code');
+    expect(code).toHaveValue('');
+    await user.type(code, 'fixture-code');
+    await user.click(screen.getByRole('button', { name: /^Sign in$/ }));
+    expect(await screen.findByRole('heading', { name: 'Welcome to Kautuka', level: 1 })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: /^Sign up$/ }));
+    expect(screen.getByLabelText('Invitation code')).toHaveValue('');
   });
 
   // ── CRITICAL REGRESSION TESTS ─────────────────────────────────────────────

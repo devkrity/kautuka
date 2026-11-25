@@ -6,6 +6,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { settingsQueryKeys } from '@/features/settings/api/queryKeys';
 import { useAgentsTab } from '@/features/settings/hooks/useAgentsTab';
+import { connectorsQueryKeys } from '@/features/connectors/api/queryKeys';
+import { connectorSchema } from '@/features/connectors';
 
 const {
   listAgentsMock,
@@ -45,9 +47,10 @@ vi.mock('@/features/settings', () => ({
   },
 }));
 
-vi.mock('@/features/connectors', async () => {
-  const actual =
-    await vi.importActual<typeof import('@/features/connectors')>('@/features/connectors');
+vi.mock('@/features/connectors/api/connectors', async () => {
+  const actual = await vi.importActual<typeof import('@/features/connectors/api/connectors')>(
+    '@/features/connectors/api/connectors'
+  );
   return {
     ...actual,
     fetchConnectors: fetchConnectorsMock,
@@ -260,5 +263,34 @@ describe('useAgentsTab query cache sync', () => {
       'agent-1',
       expect.objectContaining({ name: 'Alpha Prime' })
     );
+  });
+
+  it('refreshes available connectors while the agent editor stays mounted', async () => {
+    const client = new QueryClient();
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    const connector = connectorSchema.parse({
+      id: 'kautuka-web-tools',
+      name: 'Kautuka Web Tools',
+      scope: 'system',
+      transport: 'container',
+      enabled: false,
+    });
+    fetchConnectorsMock.mockResolvedValue([connector]);
+    const { result } = renderHook(() => useAgentsTab(), { wrapper });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.mcpServers).toEqual([]);
+
+    fetchConnectorsMock.mockResolvedValue([{ ...connector, enabled: true }]);
+    await act(() => client.invalidateQueries({ queryKey: connectorsQueryKeys.list() }));
+    await waitFor(() =>
+      expect(result.current.mcpServers.map((entry) => entry.id)).toEqual([connector.id])
+    );
+
+    fetchConnectorsMock.mockResolvedValue([connector]);
+    await act(() => client.invalidateQueries({ queryKey: connectorsQueryKeys.list() }));
+    await waitFor(() => expect(result.current.mcpServers).toEqual([]));
+    expect(listAgentsMock).toHaveBeenCalledTimes(1);
   });
 });

@@ -15,10 +15,15 @@ internal static class WebHostEdgePolicy
 {
     public static WebHostEdgeBinding Resolve(
         IConfiguration configuration,
-        int port)
+        int port,
+        bool appliance = false)
     {
         ArgumentNullException.ThrowIfNull(configuration);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(port);
+
+        // The rootless host publish owns the loopback listener. Kestrel binds only
+        // inside the dedicated namespace whose firewall permits incoming HTTP.
+        if (appliance) return new WebHostEdgeBinding(IPAddress.Any, port, null);
 
         string configuredAddress = configuration["WebHost:ListenAddress"]?.Trim() ?? IPAddress.Loopback.ToString();
         if (!IPAddress.TryParse(configuredAddress, out IPAddress? address))

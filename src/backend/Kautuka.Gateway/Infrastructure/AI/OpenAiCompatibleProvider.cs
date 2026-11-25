@@ -14,7 +14,8 @@ internal sealed class OpenAiCompatibleProvider(
     string providerType,
     string? defaultBaseUrl = null,
     IRunLimitResolver? runLimitResolver = null,
-    INetworkAccessChecker? checker = null) : IAiClientProvider
+    INetworkAccessChecker? checker = null,
+    Func<INetworkAccessChecker?, HttpMessageHandler>? transportFactory = null) : IAiClientProvider
 {
     public string ProviderType { get; } = providerType;
 
@@ -32,9 +33,9 @@ internal sealed class OpenAiCompatibleProvider(
         }
 
 #pragma warning disable CA2000 // Owned by chat client
-        HttpMessageHandler transportHandler = new NetworkAccessCheckHandler(
-            checker ?? FailClosedNetworkAccessChecker.Instance,
-            new SocketsHttpHandler { AllowAutoRedirect = false });
+        HttpMessageHandler transportHandler = transportFactory is null
+            ? new NetworkAccessCheckHandler(checker ?? FailClosedNetworkAccessChecker.Instance, new SocketsHttpHandler { AllowAutoRedirect = false })
+            : transportFactory(checker) ?? throw new InvalidOperationException("Configured model transport returned no handler.");
 
         return new OpenAIClient(new ApiKeyCredential(apiKey), OpenAiCompatibleEndpoint.CreateClientOptions(baseUrl, transportHandler))
             .GetChatClient(modelName)
@@ -42,25 +43,25 @@ internal sealed class OpenAiCompatibleProvider(
 #pragma warning restore CA2000
     }
 
-    public Task<IReadOnlyList<DiscoveredModelDefinition>> DiscoverModelsAsync(
+    public async Task<IReadOnlyList<DiscoveredModelDefinition>> DiscoverModelsAsync(
         JsonObject settings,
         string? apiKey,
         bool throwOnFailure = false,
         CancellationToken cancellationToken = default)
     {
 #pragma warning disable CA2000 // Passed to DiscoverModelsAsync
-        HttpMessageHandler transportHandler = new NetworkAccessCheckHandler(
-            checker ?? FailClosedNetworkAccessChecker.Instance,
-            new SocketsHttpHandler { AllowAutoRedirect = false });
+        using HttpMessageHandler transportHandler = transportFactory is null
+            ? new NetworkAccessCheckHandler(checker ?? FailClosedNetworkAccessChecker.Instance, new SocketsHttpHandler { AllowAutoRedirect = false })
+            : transportFactory(checker) ?? throw new InvalidOperationException("Configured model transport returned no handler.");
 
-        return OpenAiCompatibleEndpoint.DiscoverModelsAsync(
+        return await OpenAiCompatibleEndpoint.DiscoverModelsAsync(
             settings,
             apiKey,
             defaultBaseUrl,
             runLimitResolver,
             throwOnFailure,
             cancellationToken,
-            transportHandler);
+            transportHandler).ConfigureAwait(false);
 #pragma warning restore CA2000
     }
 }
