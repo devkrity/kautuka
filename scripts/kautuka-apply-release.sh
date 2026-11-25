@@ -2049,7 +2049,7 @@ recover_appliance_operation() {
         fi
     fi
     if [[ "$phase" == committed && "$(read_journal_field snapshotPruneStatus 2>/dev/null || true)" == succeeded &&
-        -d "$appliance_xdg_runtime_dir" ]]; then
+        -d "${appliance_xdg_runtime_dir:-}" ]]; then
         source_release="$(read_journal_field sourceRelease)" || return 1
         retire_superseded_appliance_images "$source_release" "$expected" ||
             echo 'warning: Kautuka kept older appliance images because retirement could not be verified' >&2
