@@ -1313,7 +1313,7 @@ public sealed class UpdateServiceIntegrationTests
 
         UpdateReleaseReference candidateRelease = CreateRelease("1.3.0", "stable") with
         {
-            PlatformReleaseAssetUrl = "http://192.168.1.20:20300/kautuka-platform-release.json",
+            PlatformReleaseAssetUrl = "http://192.168.1.20:20300/kautuka-platform-release.json?token=fixture-only-value",
             PlatformReleaseSignatureAssetUrl = "http://192.168.1.20:20300/kautuka-platform-release.sig",
         };
 
@@ -1334,7 +1334,9 @@ public sealed class UpdateServiceIntegrationTests
         // Nothing to offer, but the reason has to reach the operator.
         Assert.Null(status.AvailableRelease);
         Assert.Contains("must be https or loopback http", status.LastError, StringComparison.Ordinal);
-        Assert.Contains("192.168.1.20", status.LastError, StringComparison.Ordinal);
+        Assert.DoesNotContain("fixture-only-value", status.LastError, StringComparison.Ordinal);
+        Assert.DoesNotContain("fixture-only-value",
+            (await stateStore.GetAsync(TestContext.Current.CancellationToken)).LastError, StringComparison.Ordinal);
     }
 
     /// <summary>

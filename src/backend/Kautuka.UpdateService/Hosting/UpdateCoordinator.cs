@@ -484,15 +484,15 @@ internal sealed class UpdateCoordinator(
         // the error, which keeps it visible without presenting an apply that is certain to
         // fail. Only reached when the release is otherwise eligible, so an already-current
         // appliance still reports AlreadyCurrent rather than a URL complaint.
-        string? untrustedSourceUrl = null;
+        string? sourceRejection = null;
         if (eligibilityState is UpdateEligibilityState.Available
             && availableRelease is not null
-            && ReleaseTrustPolicy.TryFindUnapprovedSourceUrl(availableRelease, options, out untrustedSourceUrl))
+            && ReleaseTrustPolicy.TryFindUnapprovedSourceUrl(availableRelease, options, out sourceRejection))
         {
             logger.LogWarning(
                 "Discovered release {ReleaseId} cannot be applied: {Rejection}",
                 availableRelease.ReleaseId,
-                untrustedSourceUrl);
+                sourceRejection);
 
             availableRelease = null;
             eligibilityState = UpdateEligibilityState.Blocked;
@@ -517,7 +517,7 @@ internal sealed class UpdateCoordinator(
             StagedRelease = stagedRelease,
             PreparedArtifacts = preparedArtifacts,
             LastError = (availableRelease is null && state.LastError == snapshotPruneFailure ? state.LastError : null)
-                ?? result.FailureReason ?? untrustedSourceUrl
+                ?? result.FailureReason ?? sourceRejection
                 ?? (state.State == UpdateWorkflowState.Applying || IsActivationFailure(state.LastError) ? state.LastError : null),
             EligibilityState = eligibilityState,
             EligibilityReason = eligibilityReason,

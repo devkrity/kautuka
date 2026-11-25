@@ -73,9 +73,11 @@ is_disposable_test() {
 # UpdateService invokes this helper via sudo from a user-scoped unit. Restarting
 # manager (podman Delegate) can tear down user.slice and SIGTERM the whole US
 # cgroup — live exit 143 with pointers already flipped. Re-enter as a system
-# transient unit so apply/revert finishes outside that cgroup.
+# transient unit so apply/revert finishes outside that cgroup. The Channel
+# renewal timer already runs as a host systemd service.
 # Must run before argument parsing so "$@" is still intact for systemd-run.
-if [[ "${KAUTUKA_APPLY_DETACHED:-}" != '1' && "${1:-}" != '--boot-recover' && "${1:-}" != '--capabilities' ]] && command -v systemd-run >/dev/null 2>&1; then
+if [[ "${KAUTUKA_APPLY_DETACHED:-}" != '1' && "${1:-}" != '--boot-recover' &&
+    "${1:-}" != '--capabilities' && "${1:-}" != '--renew-channel-certificates' ]] && command -v systemd-run >/dev/null 2>&1; then
     self="$(readlink -f "$0")"
     unit="kautuka-apply-${RANDOM}$$"
     setenv_args=(

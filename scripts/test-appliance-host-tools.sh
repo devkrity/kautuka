@@ -133,6 +133,23 @@ if bash "$version_dir/kautuka-apply-release" 2> "$test_root/writer.log"; then
 fi
 grep -Fq "pid $writer_pid (" "$test_root/writer.log"
 
+# The timer is a system service already. A redundant systemd-run process would
+# look like a live writer because its command names the versioned host helper.
+mkdir "$test_root/bin"
+cat > "$test_root/bin/systemd-run" <<'DETACH'
+#!/usr/bin/env bash
+printf 'detached\n'
+DETACH
+chmod 0755 "$test_root/bin/systemd-run"
+{
+    printf '%s\n' 'set -euo pipefail' "lock_path=$test_root/lock"
+    awk '/^# UpdateService invokes this helper/ {capture=1} capture && /^while \[\[/ {exit} capture {print}' \
+        "$script_dir/kautuka-apply-release.sh"
+    printf '%s\n' "printf 'direct\\n'"
+} > "$test_root/dispatch-check"
+[[ "$(PATH="$test_root/bin:$PATH" KAUTUKA_APPLY_DETACHED=0 bash "$test_root/dispatch-check" --renew-channel-certificates)" == direct ]]
+[[ "$(PATH="$test_root/bin:$PATH" KAUTUKA_APPLY_DETACHED=0 bash "$test_root/dispatch-check" --consume-appliance-request)" == detached ]]
+
 # Drive the production timer decision without touching the host lock or certificates.
 renewal="$test_root/renewal"
 mkdir -p "$renewal/security"

@@ -41,8 +41,8 @@ internal static class ReleaseTrustPolicy
     }
 
     /// <summary>
-    /// Reports the first release source URL that <see cref="EnsureApprovedSourceUrl"/> would
-    /// reject, so discovery can refuse a release instead of offering it.
+    /// Reports why <see cref="EnsureApprovedSourceUrl"/> would reject the first invalid release
+    /// source, so discovery can refuse the release without disclosing the address.
     /// </summary>
     /// <remarks>
     /// Discovery verifies the manifest's signature but never looked at the URLs inside it,
@@ -91,7 +91,7 @@ internal static class ReleaseTrustPolicy
     {
         if (!Uri.TryCreate(assetUrl, UriKind.Absolute, out Uri? uri))
         {
-            return $"{purpose} URL is not an absolute URI: {assetUrl}";
+            return $"{purpose} URL is not an absolute URI.";
         }
 
         if (string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
@@ -106,6 +106,6 @@ internal static class ReleaseTrustPolicy
             return null;
         }
 
-        return $"{purpose} URL must be https or loopback http. Rejected: {assetUrl}";
+        return $"{purpose} URL must be https or loopback http.";
     }
 }
