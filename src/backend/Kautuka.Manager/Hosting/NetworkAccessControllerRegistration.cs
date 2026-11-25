@@ -15,6 +15,7 @@ public static class NetworkAccessControllerRegistration
                 sp.GetRequiredService<Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager>().IsStartupGateOpen,
             packageProxyAdmission: () =>
                 sp.GetRequiredService<Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager>().GetPackageProxyAdmission(),
+            timeProvider: sp.GetService<TimeProvider>(),
             applianceMode: applianceMode));
         return services;
     }

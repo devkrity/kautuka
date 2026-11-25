@@ -13,7 +13,7 @@ using Kautuka.Telemetry.Telemetry;
 using Microsoft.Extensions.Options;
 
 if (args.Length > 0 && args[0] == "--maintain-channel-certificates")
-    return ApplianceChannelCertificateMaintenance.Run(args.Length == 2 ? args[1] : "");
+    return await ApplianceChannelCertificateMaintenance.RunAsync(args.Length == 2 ? args[1] : "").ConfigureAwait(false);
 
 if (args is ["--retire-appliance-images", .. var obsoleteVersions])
     return await ApplianceRoleImageRetirement.RunAsync(obsoleteVersions).ConfigureAwait(false);
@@ -218,6 +218,8 @@ builder.Services.AddSingleton(sp =>
         Path.Combine(managerDataRoot, "networkAccess", "policy", "state.json"),
         seedRules: applianceEnabled ? null : NetworkAccessDefaultSeeds.DefaultRules.Where(rule => rule.AgentId != "updateservice").ToArray(),
         logger: sp.GetRequiredService<ILogger<NetworkAccessPolicyStore>>(),
+        timeProvider: sp.GetService<TimeProvider>(),
+        pendingRequestRetention: builder.Configuration.GetValue<TimeSpan?>("Kautuka:NetworkAccess:PendingRequestRetention"),
         registrableDomain: new NetworkRegistrableDomain(
             Path.Combine(KautukaHostPathPolicy.ResolveSharedStateRoot(builder.Configuration), "updateService", NetworkRegistrableDomain.ListFileName),
             builder.Configuration.GetValue("Update:PublicSuffixMinimumRuleCount", NetworkRegistrableDomain.DefaultMinimumRuleCount))));

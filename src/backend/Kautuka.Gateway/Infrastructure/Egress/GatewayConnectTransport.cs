@@ -241,7 +241,8 @@ internal sealed class GatewayConnectTransport : IDisposable
                     Header("x-kautuka-correlation", scope.Correlation) +
                     (scope.PublicOnly ? "x-kautuka-public-only: true\r\n" : string.Empty) + "\r\n";
                 await tls.WriteAsync(Encoding.ASCII.GetBytes(message), token).ConfigureAwait(false);
-                await ReadConnectResponseAsync(tls, authority[..authority.LastIndexOf(':')], token).ConfigureAwait(false);
+                string displayDestination = target.Port is 80 or 443 ? authority[..authority.LastIndexOf(':')] : authority;
+                await ReadConnectResponseAsync(tls, displayDestination, token).ConfigureAwait(false);
                 // The TLS session above authenticates Envoy. Hide the SslStream type so
                 // SocketsHttpHandler still negotiates and validates TLS with an HTTPS origin.
                 return new TransportStream(tls);
@@ -308,7 +309,7 @@ internal sealed class GatewayConnectTransport : IDisposable
             throw new InvalidOperationException("Invalid gateway egress scope value.");
     }
 
-    private static async Task ReadConnectResponseAsync(Stream stream, string host, CancellationToken token)
+    private static async Task ReadConnectResponseAsync(Stream stream, string displayDestination, CancellationToken token)
     {
         byte[] bytes = new byte[MaximumResponseHeaderBytes];
         int length = 0;
@@ -327,7 +328,7 @@ internal sealed class GatewayConnectTransport : IDisposable
         }
         string[] lines = Encoding.ASCII.GetString(bytes, 0, length - 4).Split("\r\n", StringSplitOptions.None);
         if (lines[0].StartsWith("HTTP/1.1 403 ", StringComparison.Ordinal) || lines[0] == "HTTP/1.1 403")
-            throw new GatewayConnectDeniedException($"Network access to {host} was denied.");
+            throw new GatewayConnectDeniedException($"Network access to {displayDestination} was denied.");
         if (!lines[0].StartsWith("HTTP/1.1 200 ", StringComparison.Ordinal) && lines[0] != "HTTP/1.1 200") throw new IOException("CONNECT was refused.");
         foreach (string line in lines.Skip(1))
         {

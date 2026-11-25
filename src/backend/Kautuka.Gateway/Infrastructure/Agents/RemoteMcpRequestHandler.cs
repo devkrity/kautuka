@@ -20,8 +20,7 @@ internal sealed record RemoteMcpRequestContext(
     string? CredentialNamespace = null,
     string? ProtocolVersion = null,
     bool PreferIpv4 = false,
-    bool RequiresCredentialReentry = false,
-    Action? NetworkReady = null);
+    bool RequiresCredentialReentry = false);
 
 internal sealed class RemoteMcpConfigurationException : HttpRequestException
 {

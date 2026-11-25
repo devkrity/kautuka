@@ -164,6 +164,9 @@ maintenance_path="$1/fence"
 journal_path="$1/journal"
 configure_appliance_layout() { :; }
 channel_certificate_status() { return "$RENEW_STATUS"; }
+check_serving_channel_before_resume() {
+    [[ ! -e "$database_root/security/.channel-renewal-restart" && "$SERVING_STATUS" == 0 ]]
+}
 renew_appliance_channel_certificates() {
     if [[ "$RENEW_RESULT" == 0 ]]; then
         rm -f -- "$database_root/security/.channel-renewal-restart"
@@ -175,20 +178,27 @@ PREAMBLE
     sed -n '/^if \[\[ "\$renew_channel_certificates" == '\''true'\'' \]\]; then$/,/^fi$/p' "$script_dir/kautuka-apply-release.sh"
 } > "$test_root/renewal-timer"
 test_renewal() {
-    local current_status="$1" busy="$2" outcome="$3" expected_rc="$4" expected_flag="$5" rc=0
-    RENEW_STATUS="$current_status" BUSY="$busy" RENEW_RESULT="$outcome" \
+    local current_status="$1" busy="$2" outcome="$3" expected_rc="$4" expected_flag="$5" serving="${6:-0}" rc=0
+    RENEW_STATUS="$current_status" BUSY="$busy" RENEW_RESULT="$outcome" SERVING_STATUS="$serving" \
         bash "$test_root/renewal-timer" "$renewal" || rc=$?
     [[ "$rc" == "$expected_rc" && "$(cat "$renewal/run.lock")" == "$expected_flag" ]]
 }
 lock_inode="$(stat -c '%i' "$renewal/run.lock")"
+printf 0 > "$renewal/run.lock"
+test_renewal 1 0 0 1 0
+test_renewal 10 0 1 1 0
 test_renewal 11 1 0 0 1
-test_renewal 11 0 1 1 2
+test_renewal 11 0 1 1 0
+test_renewal 11 0 1 1 2 1
 test_renewal 11 1 0 0 2
-test_renewal 11 0 1 1 2
+test_renewal 11 0 1 1 0
 test_renewal 12 1 1 1 2
 test_renewal 1 0 0 1 2
+test_renewal 0 0 0 1 2 1
+test_renewal 0 0 0 0 0
 touch "$renewal/security/.channel-renewal-restart"
-test_renewal 0 0 1 1 2
+test_renewal 10 0 1 1 2
+test_renewal 1 0 0 1 2
 test_renewal 0 0 0 0 0
 [[ "$(stat -c '%i' "$renewal/run.lock")" == "$lock_inode" ]]
 echo 'Host tool publication survives interruption and stale selection redispatches.'

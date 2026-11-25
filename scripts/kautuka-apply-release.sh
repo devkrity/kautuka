@@ -1858,6 +1858,19 @@ channel_certificate_status() {
     "$manager" --maintain-channel-certificates check
 }
 
+check_serving_channel_before_resume() {
+    local manager=/opt/kautuka/manager/current/kautuka-manager
+    local restart="$database_root/security/.channel-renewal-restart" selected_release
+    [[ ! -e "$restart" && ! -L "$restart" ]] || return 1
+    selected_release="$(readlink -f /opt/kautuka/manager/current)" || return 1
+    if ! "$manager" --maintain-channel-certificates check-serving ||
+        ! appliance_user env KAUTUKA_APPLIANCE_VERIFY= "$manager" \
+            --check-appliance-ready --candidate-version "${selected_release##*/}"; then
+        echo 'error: could not verify that the installed release and its Channel connection are ready' >&2
+        return 1
+    fi
+}
+
 renew_appliance_channel_certificates() {
     local boot_only="$1" status=0
     local manager=/opt/kautuka/manager/current/kautuka-manager
@@ -2265,20 +2278,29 @@ if [[ "$renew_channel_certificates" == 'true' ]]; then
         echo 'error: root-owned Kautuka helper run lock is missing or unsafe' >&2
         exit 1
     }
+    channel_restart_marker="$database_root/security/.channel-renewal-restart"
     certificate_status=0
     channel_certificate_status || certificate_status=$?
     case "$certificate_status" in
         0)
-            if [[ ! -f "$database_root/security/.channel-renewal-restart" ]]; then
+            if [[ ! -e "$channel_restart_marker" && ! -L "$channel_restart_marker" ]]; then
+                [[ "$(head -c 1 -- "$helper_run_lock")" != 0 ]] || exit 0
+                check_serving_channel_before_resume || exit 1
                 printf 0 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none || exit 1
                 exit 0
             fi ;;
         10|11|12) ;;
         *)
-            printf 2 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none || exit 1
+            echo "error: could not determine Channel certificate status ($certificate_status)" >&2
+            # Preserve the existing admission state unless a restart was interrupted.
+            if [[ -e "$channel_restart_marker" || -L "$channel_restart_marker" ]]; then
+                printf 2 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none || exit 1
+            fi
             exit 1 ;;
     esac
-    if [[ "$certificate_status" == 11 || "$certificate_status" == 12 ]]; then
+    if [[ "$certificate_status" == 12 ]]; then
+        printf 2 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none || exit 1
+    elif [[ "$certificate_status" == 11 ]]; then
         if [[ "$(head -c 1 -- "$helper_run_lock")" != 2 ]]; then
             printf 1 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none || exit 1
         fi
@@ -2295,7 +2317,11 @@ if [[ "$renew_channel_certificates" == 'true' ]]; then
         renewal_status=0
         renew_appliance_channel_certificates false || renewal_status=$?
         if [[ "$renewal_status" != 0 ]]; then
-            if [[ "$certificate_status" != 10 || -f "$database_root/security/.channel-renewal-restart" ]]; then
+            echo "error: Channel certificate renewal failed ($renewal_status)" >&2
+            if [[ "$certificate_status" == 10 || "$certificate_status" == 11 ]] &&
+                check_serving_channel_before_resume; then
+                printf 0 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none || exit 1
+            else
                 printf 2 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none || exit 1
             fi
             exit "$renewal_status"

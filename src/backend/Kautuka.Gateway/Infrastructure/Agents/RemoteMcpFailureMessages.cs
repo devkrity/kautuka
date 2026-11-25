@@ -24,8 +24,8 @@ internal static class RemoteMcpFailureMessages
                 _ => accessBlocked,
             };
         }
-        if (Find<GatewayConnectDeniedException>(exception) is not null)
-            return accessBlocked;
+        if (Find<GatewayConnectDeniedException>(exception) is { } connectDenial)
+            return connectDenial.Message;
 
         SocketException? socket = Find<SocketException>(exception);
         if (socket?.SocketErrorCode is SocketError.HostNotFound or SocketError.NoData or SocketError.TryAgain)

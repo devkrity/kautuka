@@ -100,8 +100,7 @@ internal sealed partial class McpAgentToolProvider
                 context.UserId,
                 context,
                 ct,
-                captureEndpoint: endpoint => endpointHash = AgentToolingFingerprint.EndpointHash(endpoint),
-                networkReady: () => timeout.CancelAfter(remoteDiscoveryTimeout)).ConfigureAwait(false);
+                captureEndpoint: endpoint => endpointHash = AgentToolingFingerprint.EndpointHash(endpoint)).ConfigureAwait(false);
             await using (client.ConfigureAwait(false))
             {
                 IList<McpClientTool> listed = await client.ListToolsAsync(cancellationToken: ct).ConfigureAwait(false);
@@ -185,8 +184,7 @@ internal sealed partial class McpAgentToolProvider
         CancellationToken ct,
         string? expectedEndpointHash = null,
         Action<Uri>? captureEndpoint = null,
-        string? expectedExecutionHash = null,
-        Action? networkReady = null)
+        string? expectedExecutionHash = null)
     {
         string userRevision = credentialRevisions.Get(serverDef.Id, userId ?? string.Empty, includeSystem: false);
         string combinedRevision = credentialRevisions.Get(serverDef.Id, userId ?? string.Empty, includeSystem: true);
@@ -243,8 +241,7 @@ internal sealed partial class McpAgentToolProvider
             (keys, token) => credentialResolver.ResolveRemoteAsync(serverDef.CredentialAssociationId, serverDef.Id, serverDef.CredentialNamespace, userId ?? string.Empty, keys, includeSystem, token), RevalidateAsync,
             () => credentialRevisions.Acquire(serverDef.Id, userId ?? string.Empty, toolContext.AgentId, includeSystem), serverDef.CredentialNamespace, serverDef.McpProtocolVersion,
             PreferIpv4: approvedEndpoint.IdnHost.Equals("mcp.exa.ai", StringComparison.OrdinalIgnoreCase),
-            RequiresCredentialReentry: serverDef.RequiresCredentialReentry,
-            NetworkReady: networkReady);
+            RequiresCredentialReentry: serverDef.RequiresCredentialReentry);
         return await mcpHttpClientFactory.CreateAsync(transportOptions, allowPrivateDestination, requestContext, ct).ConfigureAwait(false);
     }
 

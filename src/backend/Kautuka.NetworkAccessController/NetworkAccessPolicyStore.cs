@@ -3,9 +3,10 @@ namespace Kautuka.NetworkAccessController;
 public sealed partial class NetworkAccessPolicyStore
 {
     private readonly Dictionary<string, string> serviceSetupGroups;
-    private static readonly TimeSpan pendingRequestLifetime = TimeSpan.FromHours(24);
-    private static bool IsExpired(NetworkAccessRequest request, DateTimeOffset now)
-        => request.Status == "pending" && request.FirstSeenUtc <= now - pendingRequestLifetime;
+    public static TimeSpan DefaultPendingRequestRetention => TimeSpan.FromHours(24);
+    private bool IsExpired(NetworkAccessRequest request, DateTimeOffset now)
+        => request.Status == "pending" && now >= request.FirstSeenUtc
+            && now - request.FirstSeenUtc >= pendingRequestRetention;
 
     public NetworkAccessApprovalLimits GetApprovalLimits(NetworkAccessActor actor)
     {
@@ -235,7 +236,7 @@ public sealed partial class NetworkAccessPolicyStore
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
-            DateTimeOffset now = DateTimeOffset.UtcNow;
+            DateTimeOffset now = timeProvider.GetUtcNow();
             List<NetworkAccessRequest> retained = current.Requests.Where(r => !IsExpired(r, now)).ToList();
             if (retained.Count != current.Requests.Count)
             {
@@ -260,7 +261,7 @@ public sealed partial class NetworkAccessPolicyStore
             var views = new List<NetworkAccessRequestView>();
             foreach (NetworkAccessRequest req in current.Requests)
             {
-                if (IsExpired(req, DateTimeOffset.UtcNow) || !NetworkAccessPolicyAuthorizer.CanViewRequest(actor, req))
+                if (IsExpired(req, now) || !NetworkAccessPolicyAuthorizer.CanViewRequest(actor, req))
                 {
                     continue;
                 }
@@ -275,7 +276,7 @@ public sealed partial class NetworkAccessPolicyStore
             foreach (TemporaryProbePendingEntry probeEntry in probeRequestsById.Values)
             {
                 NetworkAccessRequest req = probeEntry.Request;
-                if (IsExpired(req, DateTimeOffset.UtcNow) || !NetworkAccessPolicyAuthorizer.CanViewRequest(actor, req))
+                if (IsExpired(req, now) || !NetworkAccessPolicyAuthorizer.CanViewRequest(actor, req))
                 {
                     continue;
                 }
@@ -362,7 +363,7 @@ public sealed partial class NetworkAccessPolicyStore
                 request,
                 scope,
                 (userId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin));
-            if (request.Status != "pending" || IsExpired(request, DateTimeOffset.UtcNow))
+            if (request.Status != "pending" || IsExpired(request, timeProvider.GetUtcNow()))
                 throw new KeyNotFoundException("Request not found.");
             string effectiveScope = resolved.EffectiveScope;
             string? ruleUserId = resolved.RuleUserId;
@@ -733,7 +734,7 @@ public sealed partial class NetworkAccessPolicyStore
         string? compatProfile = null,
         DateTimeOffset? observedAtUtc = null)
     {
-        DateTimeOffset now = observedAtUtc ?? DateTimeOffset.UtcNow;
+        DateTimeOffset now = observedAtUtc ?? timeProvider.GetUtcNow();
         string scopeId = NetworkAccessRequest.ComputeId(
             actorKind,
             attribution,
@@ -928,7 +929,7 @@ public sealed partial class NetworkAccessPolicyStore
         DateTimeOffset? observedAtUtc = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(containerId);
-        DateTimeOffset now = observedAtUtc ?? DateTimeOffset.UtcNow;
+        DateTimeOffset now = observedAtUtc ?? timeProvider.GetUtcNow();
         string scopeId = NetworkAccessIdGenerator.ComputeBase32Id(
             $"probe|{containerId}|{attribution}|{userId ?? string.Empty}|{connectorId ?? string.Empty}|{origin}|{destKind}|{destination}|{port}");
 
@@ -1057,7 +1058,7 @@ public sealed partial class NetworkAccessPolicyStore
             allowLan,
             (userId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin));
 
-        if (request.Status != "pending" || IsExpired(request, DateTimeOffset.UtcNow))
+        if (request.Status != "pending" || IsExpired(request, timeProvider.GetUtcNow()))
             throw new KeyNotFoundException("Request not found.");
 
         if (current.Revision != expectedRevision)

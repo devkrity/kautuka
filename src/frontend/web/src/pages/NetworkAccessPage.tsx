@@ -136,8 +136,8 @@ export function NetworkAccessPage() {
       if (decision.allow && request?.purpose !== 'probe' && result.rule?.allowed) {
         setDecisionNotice(
           request?.userId === currentUser?.id
-            ? 'Access approved. Return to the original action and try again.'
-            : 'Access approved. The person who started the action can try again.'
+            ? 'Access approved. Try again.'
+            : 'Access approved. They can try again.'
         );
       }
       await requestsQuery.refetch();

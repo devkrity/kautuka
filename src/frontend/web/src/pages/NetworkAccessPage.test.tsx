@@ -335,12 +335,15 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
 
   // ──────────────── UX2: Allow and Keep Blocked Decisions ────────────────
   describe('UX2: decisions and retry outcomes', () => {
-    it('Allow submits agent-scope decision, and Keep Blocked submits allow:false decision', async () => {
+    it.each([
+      ['user-ravi', 'Access approved. Try again.'],
+      ['another-user', 'Access approved. They can try again.'],
+    ])('shows the retry notice for requester %s and submits one decision', async (requester, notice) => {
       const user = userEvent.setup();
       const requestsData = createDefaultRequests([
         {
           id: 'req-1',
-          userId: 'user-ravi',
+          userId: requester,
           userDisplayName: 'Ravi',
           agentId: 'agent-1',
           agentDisplayName: 'Search Agent',
@@ -376,7 +379,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
           })
         )
       );
-      expect(await screen.findByText(/Access approved\..*try again\./i)).toBeVisible();
+      expect(await screen.findByText(notice)).toBeVisible();
       expect(post).toHaveBeenCalledTimes(1);
 
       // Click Keep Blocked

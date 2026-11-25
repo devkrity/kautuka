@@ -15,29 +15,68 @@ public sealed class NetworkAccessImmediateDenialTests
         Assert.Contains("timeout: 2s", config[gateway..], StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void ExpiredRequestCannotAuthorizeAfterRestartOrFreshRequest()
+    [Theory]
+    [InlineData(null, 24)]
+    [InlineData(2, 2)]
+    public void PendingRequestsExpireFromFirstSightingAcrossRestart(int? configuredHours, int expectedHours)
     {
         string root = Directory.CreateTempSubdirectory("kautuka-request-expiry-").FullName;
         string path = Path.Combine(root, "policy.json");
+        var clock = new ManualClock(new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        TimeSpan? retention = configuredHours is null ? null : TimeSpan.FromHours(configuredHours.Value);
+        var admin = new NetworkAccessActor("admin", IsAdmin: true);
         try
         {
-            DateTimeOffset old = DateTimeOffset.UtcNow.AddHours(-25);
             string expired;
-            using (var store = new NetworkAccessPolicyStore(path, []))
+            using (var store = new NetworkAccessPolicyStore(path, [], timeProvider: clock, pendingRequestRetention: retention))
             {
-                expired = Assert.IsType<string>(Record(store, old));
-                Assert.Equal(expired, Record(store, old.AddMinutes(1)));
+                expired = Assert.IsType<string>(Record(store));
+                clock.Advance(TimeSpan.FromHours(expectedHours) - TimeSpan.FromSeconds(1));
+                Assert.Equal(expired, Record(store));
+                Assert.Equal(2, Assert.Single(store.ListRequests(admin).Requests).Request.Attempts);
             }
-            using var reopened = new NetworkAccessPolicyStore(path, []);
-            var admin = new NetworkAccessActor("admin", IsAdmin: true);
+            clock.Advance(TimeSpan.FromSeconds(1));
+            using var reopened = new NetworkAccessPolicyStore(path, [], timeProvider: clock, pendingRequestRetention: retention);
             Assert.Throws<KeyNotFoundException>(() => reopened.DecideRequest(admin, expired, true, "agent", reopened.Revision));
-            string fresh = Assert.IsType<string>(Record(reopened, DateTimeOffset.UtcNow));
+            string fresh = Assert.IsType<string>(Record(reopened));
             Assert.NotEqual(expired, fresh);
-            Assert.Equal(fresh, Record(reopened, DateTimeOffset.UtcNow));
+            Assert.Equal(fresh, Record(reopened));
             Assert.Equal(2, Assert.Single(reopened.ListRequests(admin).Requests).Request.Attempts);
             Assert.Throws<KeyNotFoundException>(() => reopened.DecideRequest(admin, expired, true, "agent", reopened.Revision));
             reopened.DecideRequest(admin, fresh, true, "agent", reopened.Revision);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void NonPositivePendingRequestRetentionIsRejected(int seconds)
+    {
+        string path = Path.Combine(Path.GetTempPath(), "kautuka-invalid-retention-" + Guid.NewGuid().ToString("N"));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new NetworkAccessPolicyStore(path, [], pendingRequestRetention: TimeSpan.FromSeconds(seconds)));
+    }
+
+    [Fact]
+    public void TemporaryProbeRequestUsesConfiguredClockAndCannotReuseExpiredId()
+    {
+        string root = Directory.CreateTempSubdirectory("kautuka-probe-expiry-").FullName;
+        var clock = new ManualClock(new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        try
+        {
+            using var store = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"), [],
+                timeProvider: clock, pendingRequestRetention: TimeSpan.FromMinutes(30));
+            string? RecordProbe() => store.RecordOrUpdatePendingProbeRequest("probe-a", "user-a", "agent-a",
+                "connector-a", "user-agent", "host", "probe.example.test", 443, "connector", "container");
+            string old = Assert.IsType<string>(RecordProbe());
+            clock.Advance(TimeSpan.FromMinutes(30));
+            var admin = new NetworkAccessActor("admin", IsAdmin: true);
+            Assert.Throws<KeyNotFoundException>(() => store.DecideRequest(admin, old, true, null, store.Revision));
+            string fresh = Assert.IsType<string>(RecordProbe());
+            Assert.NotEqual(old, fresh);
+            Assert.Throws<KeyNotFoundException>(() => store.DecideRequest(admin, old, true, null, store.Revision));
+            Assert.Equal(fresh, Assert.Single(store.ListRequests(admin).Requests).Request.Id);
         }
         finally { Directory.Delete(root, recursive: true); }
     }
@@ -79,7 +118,14 @@ public sealed class NetworkAccessImmediateDenialTests
         finally { Directory.Delete(root, recursive: true); }
     }
 
-    private static string? Record(NetworkAccessPolicyStore store, DateTimeOffset at)
+    private static string? Record(NetworkAccessPolicyStore store)
         => store.RecordOrUpdatePendingRequest("user-a", "agent-a", null, "user-agent", "host",
-            "expiry.example.test", 443, "agent-sandbox", "container", observedAtUtc: at).RequestId;
+            "expiry.example.test", 443, "agent-sandbox", "container").RequestId;
+
+    private sealed class ManualClock(DateTimeOffset now) : TimeProvider
+    {
+        private DateTimeOffset current = now;
+        public override DateTimeOffset GetUtcNow() => current;
+        public void Advance(TimeSpan duration) => current += duration;
+    }
 }

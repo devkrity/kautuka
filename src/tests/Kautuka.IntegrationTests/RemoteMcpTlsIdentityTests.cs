@@ -38,6 +38,17 @@ public sealed class RemoteMcpTlsIdentityTests
     }
 
     [Theory]
+    [InlineData(80, "Your helper needs permission to connect to mcp.example.test.")]
+    [InlineData(443, "Your helper needs permission to connect to mcp.example.test.")]
+    [InlineData(8443, "Your helper needs permission to connect to mcp.example.test:8443.")]
+    public void HelperDenialShowsOnlyTheNetworkDestination(int port, string expected)
+    {
+        var denied = new NetworkAccessDeniedException("mcp.example.test", port, "https", NetworkAccessDenialKind.Denied,
+            "internal-reason", "request-id", "user-id", "agent-id", "connector-id");
+        Assert.Equal(expected, denied.Message);
+    }
+
+    [Theory]
     [InlineData(NetworkAccessDenialKind.Denied, "request-id", "Network approval is required")]
     [InlineData(NetworkAccessDenialKind.Denied, null, "Network Access blocked")]
     [InlineData(NetworkAccessDenialKind.Paused, null, "Network access is paused")]

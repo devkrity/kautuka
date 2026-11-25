@@ -53,7 +53,7 @@ public sealed class GatewayConnectTransportFixtureTests
         using var request = new HttpRequestMessage(HttpMethod.Get, "https://EXAMPLE.COM/path") { Version = HttpVersion.Version30, VersionPolicy = HttpVersionPolicy.RequestVersionExact };
         var scope = new GatewayEgressScope("user-1", "agent-1", "connector-1", "model", "correlation-1");
         HttpRequestException denied = await Assert.ThrowsAsync<HttpRequestException>(() => transport.SendAsync(request, scope, timeout.Token));
-        Assert.StartsWith("Network Access blocked this connection.", RemoteMcpFailureMessages.Describe(denied), StringComparison.Ordinal);
+        Assert.Equal("Network access to example.com was denied.", RemoteMcpFailureMessages.Describe(denied));
         Assert.Equal(HttpVersion.Version20, request.Version);
         Assert.Equal(HttpVersionPolicy.RequestVersionOrLower, request.VersionPolicy);
         string connect = await serverTask;
@@ -78,8 +78,9 @@ public sealed class GatewayConnectTransportFixtureTests
         Assert.DoesNotContain("x-kautuka-correlation:", secondConnect, StringComparison.Ordinal);
         response.Dispose();
         Task<string> lastTask = ReceiveDeniedConnectAsync(listener, server, client, timeout.Token);
-        using var lastRequest = new HttpRequestMessage(HttpMethod.Get, "http://example.com/");
-        await Assert.ThrowsAsync<HttpRequestException>(() => transport.SendAsync(lastRequest, scope with { Purpose = "provider-test", Correlation = "test-token" }, timeout.Token));
+        using var lastRequest = new HttpRequestMessage(HttpMethod.Get, "http://EXAMPLE.COM:8443/sensitive-path");
+        HttpRequestException lastDenial = await Assert.ThrowsAsync<HttpRequestException>(() => transport.SendAsync(lastRequest, scope with { Purpose = "provider-test", Correlation = "test-token" }, timeout.Token));
+        Assert.Equal("Network access to example.com:8443 was denied.", RemoteMcpFailureMessages.Describe(lastDenial));
         Assert.Contains("x-kautuka-correlation: test-token\r\n", await lastTask, StringComparison.Ordinal);
 
         using var outbound = new GatewayOutboundHttpTransport(transport);
@@ -200,7 +201,7 @@ public sealed class GatewayConnectTransportFixtureTests
                     $"HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\nConnection: {connection}\r\n\r\n{body}")), token);
             }
         }
-        else await tls.WriteAsync("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"u8.ToArray(), token);
+        else await tls.WriteAsync("HTTP/1.1 403 upstream-sensitive-reason\r\nX-Internal-Diagnostic: upstream-sensitive-header\r\nContent-Length: 0\r\n\r\n"u8.ToArray(), token);
         return Encoding.ASCII.GetString(bytes.ToArray());
     }
 

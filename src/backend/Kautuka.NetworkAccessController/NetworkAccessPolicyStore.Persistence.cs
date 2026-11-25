@@ -25,6 +25,8 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
     private readonly ILogger<NetworkAccessPolicyStore>? logger;
     private readonly IReadOnlyList<NetworkAccessRule> seedRules;
     private readonly NetworkAccessAuditRing? auditRing;
+    private readonly TimeProvider timeProvider;
+    private readonly TimeSpan pendingRequestRetention;
 
     private NetworkAccessPolicyState? state;
     private long diskWriteCount;
@@ -44,8 +46,11 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
         IReadOnlyList<NetworkAccessRule>? seedRules = null,
         NetworkAccessAuditRing? auditRing = null,
         ILogger<NetworkAccessPolicyStore>? logger = null,
-        NetworkRegistrableDomain? registrableDomain = null)
-        : this(path, FlushDirectory, beforeRenameHook: null, seedRules, auditRing, logger: logger, registrableDomain: registrableDomain)
+        NetworkRegistrableDomain? registrableDomain = null,
+        TimeProvider? timeProvider = null,
+        TimeSpan? pendingRequestRetention = null)
+        : this(path, FlushDirectory, beforeRenameHook: null, seedRules, auditRing, logger: logger, registrableDomain: registrableDomain,
+            timeProvider: timeProvider, pendingRequestRetention: pendingRequestRetention)
     {
     }
 
@@ -58,10 +63,16 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
         Action? beforeBackgroundDiskLockHook = null,
         Action? beforeBackgroundDrainHook = null,
         ILogger<NetworkAccessPolicyStore>? logger = null,
-        NetworkRegistrableDomain? registrableDomain = null)
+        NetworkRegistrableDomain? registrableDomain = null,
+        TimeProvider? timeProvider = null,
+        TimeSpan? pendingRequestRetention = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(syncDirectory);
+        this.timeProvider = timeProvider ?? TimeProvider.System;
+        this.pendingRequestRetention = pendingRequestRetention ?? DefaultPendingRequestRetention;
+        if (this.pendingRequestRetention <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(pendingRequestRetention), "Pending request retention must be positive.");
         this.path = Path.GetFullPath(path);
         this.syncDirectory = syncDirectory;
         this.beforeRenameHook = beforeRenameHook;

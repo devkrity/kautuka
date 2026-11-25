@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 
+using Kautuka.Hosting.Hosting;
 using Kautuka.Telemetry.Security;
 
 namespace Kautuka.Manager.Hosting;
@@ -14,11 +15,11 @@ internal static class ApplianceChannelCertificateMaintenance
     private const uint renameExchange = 2;
     private const int renewalDue = 10;
 
-    internal static int Run(string action)
+    internal static async Task<int> RunAsync(string action)
     {
         if (!OperatingSystem.IsLinux() || GetEffectiveUserId() != 0)
         {
-            Console.Error.WriteLine("Channel certificate maintenance requires the Linux host administrator.");
+            await Console.Error.WriteLineAsync("Channel certificate maintenance requires the Linux host administrator.").ConfigureAwait(false);
             return 1;
         }
 
@@ -35,6 +36,21 @@ internal static class ApplianceChannelCertificateMaintenance
                         ChannelSecurityMaterialProvisioner.ApplianceRenewalState.FinalDay => 11,
                         _ => 12,
                     };
+                case "check-serving":
+                    var active = RuntimeDirectories(currentRoot);
+                    ChannelSecurityMaterialProvisioner.ValidateRuntimeInventories(active);
+                    if (ChannelSecurityMaterialProvisioner.GetApplianceRenewalState(active, now) ==
+                        ChannelSecurityMaterialProvisioner.ApplianceRenewalState.ExpiredOrInvalid)
+                        return 1;
+                    using (var configuration = new ConfigurationManager { ["Kautuka:Mode"] = "prod" })
+                    {
+                        string socket = Path.Combine(KautukaHostNetworkPolicy.ResolveSocketRoot(configuration),
+                            "channelhost", "channelhost.sock");
+                        return await ApplianceServiceReadiness.CheckAsync(socket,
+                            Path.Combine(active.GatewayTrustRoot, ChannelSecurityMaterialProvisioner.CaCertificate),
+                            Path.Combine(active.GatewayPrivateRoot, ChannelSecurityMaterialProvisioner.GatewayClientPfx),
+                            CancellationToken.None).ConfigureAwait(false) ? 0 : 1;
+                    }
                 case "stage":
                     ChannelSecurityMaterialProvisioner.StageApplianceLeaves(
                         Path.Combine(currentRoot, "offline-authority"), RuntimeDirectories(candidateRoot), now);
@@ -46,13 +62,13 @@ internal static class ApplianceChannelCertificateMaintenance
                             new Win32Exception(Marshal.GetLastPInvokeError()));
                     return 0;
                 default:
-                    Console.Error.WriteLine("Unknown Channel certificate maintenance action.");
+                    await Console.Error.WriteLineAsync("Unknown Channel certificate maintenance action.").ConfigureAwait(false);
                     return 1;
             }
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or CryptographicException or InvalidOperationException)
         {
-            Console.Error.WriteLine($"Channel certificate maintenance failed: {error.Message}");
+            await Console.Error.WriteLineAsync($"Channel certificate maintenance failed: {error.Message}").ConfigureAwait(false);
             return 1;
         }
     }

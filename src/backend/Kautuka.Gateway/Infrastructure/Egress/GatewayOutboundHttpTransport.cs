@@ -35,8 +35,7 @@ internal sealed class GatewayOutboundHttpTransport : IDisposable
         try
         {
             clientCertificate = X509CertificateLoader.LoadPkcs12FromFile($"{certificateDirectory}/client.pfx", null, X509KeyStorageFlags.EphemeralKeySet);
-            var connect = new GatewayConnectTransport("10.247.0.2", 15004, "kautuka-connect.internal", trustedRoot, clientCertificate,
-                connectTimeout: TimeSpan.FromSeconds(5));
+            var connect = new GatewayConnectTransport("10.247.0.2", 15004, "kautuka-connect.internal", trustedRoot, clientCertificate);
             return new GatewayOutboundHttpTransport(connect, trustedRoot, clientCertificate);
         }
         catch
