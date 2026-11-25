@@ -1943,6 +1943,55 @@ retain_appliance_snapshot() {
     sync -f "$backups_root"
 }
 
+retire_superseded_appliance_images() {
+    local previous="$1" current="$2" manager=/opt/kautuka/manager
+    local versions="$manager/versions" directory version role path
+    local roles=(credentialshost channelhost gateway webhost updateservice)
+    local obsolete=() archives=()
+    [[ "$(readlink -f -- "$manager/current")" == "$versions/$current" ]] || return 1
+    for directory in /opt /opt/kautuka "$manager" "$versions"; do
+        [[ -d "$directory" && ! -L "$directory" && "$(stat -c '%u' -- "$directory")" == 0 &&
+            -z "$(find "$directory" -maxdepth 0 -perm /022 -print -quit)" ]] || return 1
+    done
+    # Strictly forward updates cannot select any release older than the
+    # predecessor again. Leave future staged releases alone.
+    for directory in "$versions"/*; do
+        [[ -d "$directory" && ! -L "$directory" ]] || continue
+        version="${directory##*/}"
+        assert_forward_version "$version" "$previous" >/dev/null 2>&1 || continue
+        obsolete+=("$version")
+    done
+    (( ${#obsolete[@]} )) || return 0
+
+    # Verify offline repair material before offering anything for retirement.
+    # Validate all deletion paths first so a malformed cohort leaves files alone.
+    for version in "$current" "$previous" "${obsolete[@]}"; do
+        for directory in "$versions/$version" "$versions/$version/service-images"; do
+            [[ -d "$directory" && ! -L "$directory" && "$(stat -c '%u' -- "$directory")" == 0 &&
+                -z "$(find "$directory" -maxdepth 0 -perm /022 -print -quit)" ]] || return 1
+        done
+        for role in "${roles[@]}"; do
+            path="$directory/$role.tar"
+            if [[ "$version" != "$current" && "$version" != "$previous" && ! -e "$path" && ! -L "$path" ]]; then
+                continue
+            fi
+            [[ -f "$path" && ! -L "$path" && "$(stat -c '%u' -- "$path")" == 0 &&
+                -z "$(find "$path" -maxdepth 0 -perm /022 -print -quit)" ]] || return 1
+            if [[ "$version" != "$current" && "$version" != "$previous" ]]; then
+                archives+=("$path")
+            elif [[ ! -s "$path" ]]; then
+                return 1
+            fi
+        done
+    done
+
+    appliance_user "$versions/$current/kautuka-manager" --retire-appliance-images "${obsolete[@]}" || return 1
+    if (( ${#archives[@]} )); then
+        rm -- "${archives[@]}" || return 1
+        sync -f "$versions" || return 1
+    fi
+}
+
 recover_appliance_operation() {
     local boot_only="$1" phase expected operation_id manifest_digest source_release target_release prune_status
     [[ -e "$journal_path" || -L "$journal_path" || -e "$maintenance_path" || -L "$maintenance_path" ]] || return 0
@@ -1998,6 +2047,12 @@ recover_appliance_operation() {
                 [[ "$boot_only" == 'true' ]] || return 1
             fi
         fi
+    fi
+    if [[ "$phase" == committed && "$(read_journal_field snapshotPruneStatus 2>/dev/null || true)" == succeeded &&
+        -d "$appliance_xdg_runtime_dir" ]]; then
+        source_release="$(read_journal_field sourceRelease)" || return 1
+        retire_superseded_appliance_images "$source_release" "$expected" ||
+            echo 'warning: Kautuka kept older appliance images because retirement could not be verified' >&2
     fi
     echo "Appliance recovery selected release $expected."
 }

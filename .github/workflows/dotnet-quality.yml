@@ -139,6 +139,7 @@ jobs:
       - name: Test appliance update staging and built-in connector packaging
         run: |
           sudo bash ./scripts/test-appliance-staging-extraction.sh
+          sudo bash ./scripts/test-appliance-image-retention.sh
           sudo bash ./scripts/test-appliance-preflight-receipt.sh
           sudo bash ./scripts/test-appliance-host-tools.sh
           bash ./scripts/test-built-in-mcpb-determinism.sh

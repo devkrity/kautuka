@@ -15,6 +15,9 @@ using Microsoft.Extensions.Options;
 if (args.Length > 0 && args[0] == "--maintain-channel-certificates")
     return ApplianceChannelCertificateMaintenance.Run(args.Length == 2 ? args[1] : "");
 
+if (args is ["--retire-appliance-images", .. var obsoleteVersions])
+    return await ApplianceRoleImageRetirement.RunAsync(obsoleteVersions).ConfigureAwait(false);
+
 bool verifyAppliance = KautukaMaintenanceMode.IsApplianceVerification;
 bool prepareApplianceImages = args.Contains("--prepare-appliance-images", StringComparer.Ordinal);
 bool checkApplianceReadiness = args.Contains("--check-appliance-ready", StringComparer.Ordinal);

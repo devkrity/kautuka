@@ -193,4 +193,6 @@ UpdateService reads the host recovery status through Manager's authenticated soc
 
 Once Manager confirms the update committed and backup pruning succeeded, UpdateService removes that update's downloaded Linux bundle. Offline image repair uses the signed service images installed with the release.
 
+The host updater keeps the signed service images for the current release and its immediate predecessor. It also preserves staged releases that can still be installed. After a verified commit it removes older offline image archives and retires matching appliance images from Podman when they have a single appliance-owned tag and no container uses them.
+
 Standalone configuration updates are deferred. Appliance configuration changes ship in the signed release bundle. A release can retain the same pinned service image digests and reuse those images from the local Podman store. Keep the bundle workflow until a specific configuration change needs to ship independently.
