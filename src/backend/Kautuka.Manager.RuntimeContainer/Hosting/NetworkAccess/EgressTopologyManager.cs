@@ -154,7 +154,6 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     private readonly string? gatewayConnectEnvoyDirectory;
     private string? telemetryAuthorization;
-    private readonly TimeSpan approvalHold;
     private readonly int? inspectionTimeoutSeconds;
     private string? pendingTelemetryAuthorization;
     private readonly SemaphoreSlim reconcileWake = new(0, 1);
@@ -179,7 +178,6 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         PodmanImageArchiveStore? imageArchives = null,
         string? gatewayConnectEnvoyDirectory = null,
         string? telemetryAuthorization = null,
-        TimeSpan approvalHold = default,
         int? inspectionTimeoutSeconds = null)
     {
         ArgumentNullException.ThrowIfNull(podmanRunner);
@@ -200,7 +198,6 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         this.imageArchives = imageArchives;
         this.gatewayConnectEnvoyDirectory = gatewayConnectEnvoyDirectory;
         this.telemetryAuthorization = telemetryAuthorization;
-        this.approvalHold = approvalHold;
         this.inspectionTimeoutSeconds = inspectionTimeoutSeconds;
         this.registry = registry;
         this.windowsDecisionEndpointIp = windowsDecisionEndpointIp;
@@ -1739,8 +1736,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             adminSocketPath: isWindowsHostNativeDev ? "/tmp/kautuka-admin.sock" : "/run/kautuka-admin/admin.sock",
             isWindowsMtls: isWindowsHostNativeDev,
             includeGatewayConnect: includeGatewayConnect,
-            includeApplianceTelemetry: includeTelemetry,
-            approvalHold: approvalHold);
+            includeApplianceTelemetry: includeTelemetry);
         string corefile = BoundaryRulesetRenderer.RenderCorefile(EgressPodIp, [OutsideGatewayIp]);
 
         string nacDir = Path.Combine(stateDirectory, "nac");

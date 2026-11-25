@@ -5,30 +5,51 @@ import { ChannelSettingsSection } from '@/features/settings/components/ChannelSe
 const api = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn() }));
 vi.mock('@/lib/apiClient', () => ({ apiClient: api }));
 
+function views(rules: Array<Record<string, unknown>>) {
+  const ids = [...new Set(rules.map(rule => rule.setupService).filter(Boolean))];
+  return ids.map(serviceId => {
+    const targets = rules.filter(rule => rule.setupService === serviceId);
+    const granted = targets.filter(rule => rule.allowed).length;
+    const effective = targets.filter(target => target.allowed && !rules.some(rule => rule.scopeKind === 'system'
+      && rule.destination === target.destination && rule.port === target.port && !rule.allowed)).length;
+    return { serviceId, total: targets.length, granted, effective };
+  });
+}
+
 describe('platform channel settings', () => {
   beforeEach(() => { api.get.mockReset(); api.put.mockReset(); });
+  it('refreshes the current state when the service revision is stale', async () => {
+    const rule = { setupService: 'updates', scopeKind: 'agent', userId: 'system', agentId: 'updateservice',
+      destination: 'api.github.com', destKind: 'host', port: 443, allowed: false };
+    api.get.mockResolvedValueOnce({ data: { revision: 2, rules: [rule], services: views([rule]) } })
+      .mockResolvedValueOnce({ data: { revision: 3, rules: [{ ...rule, allowed: true }], services: views([{ ...rule, allowed: true }]) } });
+    api.put.mockRejectedValue(new Error('revision conflict'));
+    render(<ChannelSettingsSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Enable in-app updates' }));
+    expect(await screen.findByText('In-app updates: Allowed by this setting')).toBeVisible();
+    expect(api.put).toHaveBeenCalledTimes(1);
+    expect(api.put).toHaveBeenCalledWith('/network-access/services', { serviceId: 'updates', allowed: true, expectedRevision: 2 });
+  });
   it('enables Telegram only for the channel service', async () => {
     const rules: Record<string, unknown>[] = [{
       setupService: 'telegram', scopeKind: 'agent', userId: 'system', agentId: 'channelhost',
       destination: 'api.telegram.org', destKind: 'host', port: 443, allowed: false,
     }];
     let revision = 7;
-    api.get.mockImplementation(async () => ({ data: { revision, rules: [...rules] } }));
+    api.get.mockImplementation(async () => ({ data: { revision, rules: [...rules], services: views(rules) } }));
     api.put.mockImplementation(async (_url: string, body: Record<string, unknown>) => {
-      const index = rules.findIndex(rule => rule.destination === body.destination);
-      if (index < 0) rules.push(body); else rules[index] = { ...rules[index], ...body };
+      rules[0] = { ...rules[0], allowed: body.allowed };
       revision += 1;
-      return { data: body };
+      return { data: { status: body.allowed ? 'allowed' : 'paused', revision } };
     });
     render(<ChannelSettingsSection />);
     fireEvent.click(await screen.findByRole('button', { name: 'Enable Telegram' }));
-    await waitFor(() => expect(api.put).toHaveBeenCalledWith('/network-access/rules', expect.objectContaining({
-      scopeKind: 'agent', userId: 'system', agentId: 'channelhost', destination: 'api.telegram.org',
-      allowed: true, expectedRevision: 7,
+    await waitFor(() => expect(api.put).toHaveBeenCalledWith('/network-access/services', expect.objectContaining({
+      serviceId: 'telegram', allowed: true, expectedRevision: 7,
     })));
     fireEvent.click(await screen.findByRole('button', { name: 'Pause Telegram' }));
-    await waitFor(() => expect(api.put).toHaveBeenCalledWith('/network-access/rules', expect.objectContaining({
-      destination: 'api.telegram.org', allowed: false, expectedRevision: 8,
+    await waitFor(() => expect(api.put).toHaveBeenCalledWith('/network-access/services', expect.objectContaining({
+      serviceId: 'telegram', allowed: false, expectedRevision: 8,
     })));
     expect(await screen.findByText('Channel paused. Saved account settings are kept.')).toBeTruthy();
   });
@@ -37,16 +58,16 @@ describe('platform channel settings', () => {
       setupService: 'slack', scopeKind: 'agent', userId: 'system', agentId: 'channelhost',
       destination: 'slack.com', destKind: 'host', port: 443, allowed: false,
     }];
-    api.get.mockImplementation(async () => ({ data: { revision: 1, rules: [...rules] } }));
+    api.get.mockImplementation(async () => ({ data: { revision: 1, rules: [...rules], services: views(rules) } }));
     api.put.mockImplementation(async (_url: string, body: Record<string, unknown>) => {
-      rules[0] = { ...rules[0], ...body };
-      return { data: body };
+      rules[0] = { ...rules[0], allowed: body.allowed };
+      return { data: { status: body.allowed ? 'allowed' : 'paused' } };
     });
     render(<ChannelSettingsSection />);
     fireEvent.click(await screen.findByRole('button', { name: 'Enable Slack' }));
     await waitFor(() => expect(api.put).toHaveBeenCalledTimes(1));
-    expect(api.put).toHaveBeenCalledWith('/network-access/rules', expect.objectContaining({
-      userId: 'system', agentId: 'channelhost', destination: 'slack.com', allowed: true,
+    expect(api.put).toHaveBeenCalledWith('/network-access/services', expect.objectContaining({
+      serviceId: 'slack', allowed: true,
     }));
   });
 
@@ -57,12 +78,11 @@ describe('platform channel settings', () => {
       destination, destKind: 'host', port: 443, allowed: false,
     }));
     let revision = 4;
-    api.get.mockImplementation(async () => ({ data: { revision, rules: [...rules] } }));
-    api.put.mockImplementation(async (_url: string, body: (typeof rules)[number]) => {
-      const index = rules.findIndex(rule => rule.destination === body.destination);
-      rules[index] = { ...rules[index], ...body };
+    api.get.mockImplementation(async () => ({ data: { revision, rules: [...rules], services: views(rules) } }));
+    api.put.mockImplementation(async (_url: string, body: { allowed: boolean }) => {
+      rules.forEach(rule => { rule.allowed = body.allowed; });
       revision += 1;
-      return { data: body };
+      return { data: { status: body.allowed ? 'allowed' : 'paused', revision } };
     });
     render(<ChannelSettingsSection />);
     expect(await screen.findByText('In-app updates: Paused')).toBeVisible();
@@ -70,12 +90,9 @@ describe('platform channel settings', () => {
     expect(api.put).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Enable in-app updates' }));
     expect(await screen.findByText('In-app updates enabled.')).toBeVisible();
-    expect(api.put).toHaveBeenCalledTimes(hosts.length);
-    hosts.forEach((destination, index) => {
-      expect(api.put).toHaveBeenNthCalledWith(index + 1, '/network-access/rules', expect.objectContaining({
-        scopeKind: 'agent', userId: 'system', agentId: 'updateservice', destination,
-        port: 443, allowed: true, allowLan: false, expectedRevision: 4 + index,
-      }));
+    expect(api.put).toHaveBeenCalledTimes(1);
+    expect(api.put).toHaveBeenCalledWith('/network-access/services', {
+      serviceId: 'updates', allowed: true, expectedRevision: 4,
     });
   });
 
@@ -84,10 +101,10 @@ describe('platform channel settings', () => {
       agentId: 'updateservice', destination: 'publicsuffix.org', destKind: 'host', port: 443, allowed: true };
     const release = { ...suffix, setupService: 'updates', destination: 'api.github.com', allowed: false };
     const rules = [suffix, release];
-    api.get.mockImplementation(async () => ({ data: { revision: 1, rules: [...rules] } }));
-    api.put.mockImplementation(async (_url: string, body: typeof suffix) => {
-      rules[0] = { ...rules[0], ...body };
-      return { data: body };
+    api.get.mockImplementation(async () => ({ data: { revision: 1, rules: [...rules], services: views(rules) } }));
+    api.put.mockImplementation(async (_url: string, body: { allowed: boolean }) => {
+      rules[0] = { ...rules[0], allowed: body.allowed };
+      return { data: { status: body.allowed ? 'allowed' : 'paused' } };
     });
     render(<ChannelSettingsSection />);
     expect(await screen.findByText('Public Suffix List refresh: Allowed by this setting')).toBeVisible();
@@ -96,8 +113,8 @@ describe('platform channel settings', () => {
     expect(await screen.findByText('Public Suffix List refresh: Paused')).toBeVisible();
     expect(screen.getByText('In-app updates: Paused')).toBeVisible();
     expect(api.put).toHaveBeenCalledTimes(1);
-    expect(api.put).toHaveBeenCalledWith('/network-access/rules', expect.objectContaining({
-      scopeKind: 'agent', userId: 'system', agentId: 'updateservice', destination: 'publicsuffix.org', allowed: false,
+    expect(api.put).toHaveBeenCalledWith('/network-access/services', expect.objectContaining({
+      serviceId: 'suffix-list', allowed: false,
     }));
   });
 
@@ -106,17 +123,17 @@ describe('platform channel settings', () => {
       destination: 'slack.com', destKind: 'host', port: 443, allowed: true };
     const block = { scopeKind: 'system', destination: 'slack.com', port: 443, allowed: false };
     const rules = [grant, block];
-    api.get.mockImplementation(async () => ({ data: { revision: 6, rules: [...rules] } }));
-    api.put.mockImplementation(async (_url: string, body: typeof grant) => {
-      rules[0] = { ...rules[0], ...body };
-      return { data: body };
+    api.get.mockImplementation(async () => ({ data: { revision: 6, rules: [...rules], services: views(rules) } }));
+    api.put.mockImplementation(async (_url: string, body: { allowed: boolean }) => {
+      rules[0] = { ...rules[0], allowed: body.allowed };
+      return { data: { status: body.allowed ? 'allowed' : 'paused' } };
     });
     render(<ChannelSettingsSection />);
     expect(await screen.findByText('Slack: Blocked by another network rule')).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: 'Pause Slack' }));
     expect(await screen.findByText('Slack: Paused')).toBeVisible();
-    expect(api.put).toHaveBeenCalledWith('/network-access/rules', expect.objectContaining({
-      userId: 'system', agentId: 'channelhost', destination: 'slack.com', allowed: false,
+    expect(api.put).toHaveBeenCalledWith('/network-access/services', expect.objectContaining({
+      serviceId: 'slack', allowed: false,
     }));
   });
 
@@ -127,7 +144,7 @@ describe('platform channel settings', () => {
       { ...rule, destination: 'api.groq.com' },
       { scopeKind: 'system', destination: 'api.groq.com', port: 443, allowed: false },
       { ...rule, setupService: undefined, userId: 'person', agentId: 'helper', destination: 'example.com' }];
-    api.get.mockResolvedValue({ data: { revision: 1, rules } });
+    api.get.mockResolvedValue({ data: { revision: 1, rules, services: views(rules) } });
 
     render(<ChannelSettingsSection />);
 

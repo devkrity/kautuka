@@ -65,8 +65,7 @@ internal sealed partial class AgentMemoryEmbeddingService(
                 userId: string.IsNullOrWhiteSpace(agent!.OwnerUserId) ? "system" : agent.OwnerUserId,
                 agentId: agent.Id,
                 purpose: "memory-embedding",
-                service: "ai-model",
-                skipApprovalHold: true)
+                service: "ai-model")
             : null;
 
         try

@@ -3,7 +3,6 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 
 using Kautuka.Gateway.Domain.Connectors;
-using Kautuka.Gateway.Infrastructure.Egress;
 
 namespace Kautuka.Gateway.Infrastructure.Connectors;
 
@@ -18,7 +17,7 @@ internal sealed class BrokerInstallationSuspendedException : HttpRequestExceptio
 }
 
 internal sealed class BrokerInstallationRegistration(
-    BrokerInstallationIdentityProvider identities, HttpClient client, GatewayOutboundApproval? approval = null) : IDisposable
+    BrokerInstallationIdentityProvider identities, HttpClient client) : IDisposable
 {
     private readonly SemaphoreSlim gate = new(1, 1);
     private string? registeredOrigin;
@@ -33,12 +32,9 @@ internal sealed class BrokerInstallationRegistration(
         identities.ValidateBrokerOrigin(brokerOrigin);
 
         string url = brokerOrigin.GetLeftPart(UriPartial.Authority) + "/installation/register";
-        if (approval is not null)
-            await approval.WaitAsync(brokerOrigin, cancellationToken).ConfigureAwait(false);
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            using IDisposable? providerScope = approval?.BeginProviderRequest();
             string origin = brokerOrigin.GetLeftPart(UriPartial.Authority);
             await identities.RotateAsync(origin, (oldKey, newKey, operation, ct) => SendRotationAsync(origin, oldKey, newKey, operation, ct), create: false, cancellationToken).ConfigureAwait(false);
             BrokerInstallationIdentity identity = await identities.GetOrCreateAsync(cancellationToken).ConfigureAwait(false);
@@ -80,12 +76,9 @@ internal sealed class BrokerInstallationRegistration(
             throw new ArgumentException("The broker must be an HTTPS origin.", nameof(brokerOrigin));
         identities.ValidateBrokerOrigin(brokerOrigin);
         string origin = brokerOrigin.GetLeftPart(UriPartial.Authority);
-        if (approval is not null)
-            await approval.WaitAsync(brokerOrigin, cancellationToken).ConfigureAwait(false);
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            using IDisposable? providerScope = approval?.BeginProviderRequest();
             if (registeredOrigin != origin + "/installation/register") throw new InvalidOperationException("Register the installation before rotating its key.");
             await identities.RotateAsync(origin, (oldKey, newKey, operation, ct) => SendRotationAsync(origin, oldKey, newKey, operation, ct), create: true, cancellationToken).ConfigureAwait(false);
             registeredOrigin = null;

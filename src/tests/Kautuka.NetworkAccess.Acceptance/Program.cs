@@ -2231,9 +2231,10 @@ public static class Program
             long lanApprovedBefore = ExtractNftCommentCounterPackets(lanCountersBefore, "lan_approved");
             long lanMasqueradeBefore = ExtractNftCommentCounterPackets(lanCountersBefore, "lan_source_masquerade");
             int lanFixtureHitsBeforeNoGrant = File.Exists(lanAccessLogPath) ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length : 0;
+            string lanRetryUrl = $"https://{lanHostName}:8443/explicit-retry";
             var (lanDeniedRc, _, _) = await ExecAsync(
                 "podman",
-                ["exec", lanWorkloadName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://" + lanHostName + ":8443/"]).ConfigureAwait(false);
+                ["exec", lanWorkloadName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "3", lanRetryUrl]).ConfigureAwait(false);
             string noGrantEgressCounters = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
             long noGrantPrivateRejectDelta = ExtractNftCommentCounterPackets(noGrantEgressCounters, "private_reject") - lanPrivateRejectBeforeNoGrant;
             long noGrantMasqueradeDelta = ExtractNftCommentCounterPackets(noGrantEgressCounters, "lan_source_masquerade") - lanMasqueradeBefore;
@@ -2250,6 +2251,8 @@ public static class Program
             bool lanCardCreated = lanDeniedRc != 0 && lanCard is not null;
             NetworkAccessRule? lanRule = null;
             bool lanBodyReceived = false;
+            bool lanApprovalSentNoTraffic = false;
+            bool lanRetryReachedDestinationOnce = false;
             int lanAllowedRc = 1;
             int lanFixtureHitsAfterApproval = 0;
             long lanApprovedDelta = 0;
@@ -2264,12 +2267,17 @@ public static class Program
                     allowLan: true,
                     expectedRevision: policyStore.Revision);
                 lanRule = lanDecision.Rule;
+                await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
+                lanApprovalSentNoTraffic = (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length
+                    == lanFixtureHitsAfterNoGrant;
                 var (allowedRc, lanAllowedOut, lanAllowedErr) = await ExecAsync(
                     "podman",
-                    ["exec", lanWorkloadName, "curl", "--verbose", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://" + lanHostName + ":8443/"]).ConfigureAwait(false);
+                    ["exec", lanWorkloadName, "curl", "--verbose", "--insecure", "--silent", "--show-error", "--max-time", "8", lanRetryUrl]).ConfigureAwait(false);
                 lanAllowedRc = allowedRc;
                 lanBodyReceived = lanAllowedRc == 0 && lanAllowedOut.Contains("NAC LAN fixture ok", StringComparison.Ordinal);
                 lanFixtureHitsAfterApproval = (File.Exists(lanAccessLogPath) ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length : 0) - lanFixtureHitsBeforeNoGrant;
+                lanRetryReachedDestinationOnce = (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false))
+                    .Count(line => line.StartsWith("GET /explicit-retry from ", StringComparison.Ordinal)) == 1;
                 string lanCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
                 lanApprovedDelta = ExtractNftCommentCounterPackets(lanCountersAfter, "lan_approved") - lanApprovedBefore;
                 lanMasqueradeDelta = ExtractNftCommentCounterPackets(lanCountersAfter, "lan_source_masquerade") - lanMasqueradeBefore;
@@ -2286,12 +2294,12 @@ public static class Program
                     await Console.Error.WriteLineAsync($"LAN-grant retry failed: {lanAllowedErr}").ConfigureAwait(false);
                 }
             }
-            string lanObservation = $"blocked={lanAllowedRc != 0}:beforeApprovalBlocked={lanDeniedRc != 0}:cardCreated={lanCardCreated}:allowLanRule={lanRule?.AllowLan == true}:lanApprovedPacketDeltaGt0={lanApprovedDelta > 0}:lanMasqueradePacketDeltaGt0={lanMasqueradeDelta > 0}:body={lanBodyReceived}";
+            string lanObservation = $"blocked={lanAllowedRc != 0}:beforeApprovalBlocked={lanDeniedRc != 0}:deniedBeforeClientTimeout={lanDeniedRc is not (0 or 28)}:cardCreated={lanCardCreated}:allowLanRule={lanRule?.AllowLan == true}:approvalSentNoTraffic={lanApprovalSentNoTraffic}:retryReachedDestinationOnce={lanRetryReachedDestinationOnce}:lanApprovedPacketDeltaGt0={lanApprovedDelta > 0}:lanMasqueradePacketDeltaGt0={lanMasqueradeDelta > 0}:body={lanBodyReceived}";
             string lanNcObservation = $"blocked={lanDeniedRc != 0}:beforeApprovalBlocked={lanDeniedRc != 0}:cardCreated={lanCardCreated}";
             AcceptanceObservation lanAcceptance = AcceptanceHarness.Record(
                 "PROD_LAN_GRANT",
                 lanObservation,
-                "blocked=False:beforeApprovalBlocked=True:cardCreated=True:allowLanRule=True:lanApprovedPacketDeltaGt0=True:lanMasqueradePacketDeltaGt0=True:body=True",
+                "blocked=False:beforeApprovalBlocked=True:deniedBeforeClientTimeout=True:cardCreated=True:allowLanRule=True:approvalSentNoTraffic=True:retryReachedDestinationOnce=True:lanApprovedPacketDeltaGt0=True:lanMasqueradePacketDeltaGt0=True:body=True",
                 lanNcObservation,
                 "blocked=True:beforeApprovalBlocked=True:cardCreated=True", comparisonField: "blocked");
             AcceptanceObservation noGrantLanAcceptance = AcceptanceHarness.Record(

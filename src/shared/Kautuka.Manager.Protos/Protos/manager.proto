@@ -22,13 +22,14 @@ service ManagerService {
   rpc ListMcpContainerTools (WorkspaceMcpContainerCallRequest) returns (WorkspaceMcpContainerListToolsResponse);
   rpc CallMcpContainerTool  (WorkspaceMcpContainerCallRequest) returns (WorkspaceMcpContainerCallResponse);
   rpc CheckOutbound       (NetworkAccessCheckOutboundRequest) returns (NetworkAccessCheckOutboundResponse);
-  rpc BeginProviderTest   (NetworkAccessProviderTestRequest) returns (NetworkAccessProviderTestResponse);
+  rpc PrepareProviderTest   (NetworkAccessProviderTestRequest) returns (NetworkAccessProviderTestResponse);
   rpc EndProviderTest     (NetworkAccessProviderTestEndRequest) returns (WorkspaceBoolResponse);
   rpc ListRequests        (NetworkAccessListRequestsRequest)  returns (NetworkAccessListRequestsResponse);
   rpc DecideRequest       (NetworkAccessDecideRequest)        returns (NetworkAccessDecideResponse);
   rpc ListRules           (NetworkAccessListRulesRequest)     returns (NetworkAccessListRulesResponse);
   rpc SetRule             (NetworkAccessSetRuleRequest)       returns (NetworkAccessSetRuleResponse);
   rpc EnsureProviderPermission (NetworkAccessProviderPermissionRequest) returns (NetworkAccessProviderPermissionResponse);
+  rpc SetServicePermission (NetworkAccessServicePermissionRequest) returns (NetworkAccessProviderPermissionResponse);
   rpc DeleteRule          (NetworkAccessDeleteRuleRequest)    returns (NetworkAccessDeleteRuleResponse);
   rpc ListActivity        (NetworkAccessListActivityRequest)  returns (NetworkAccessListActivityResponse);
   rpc GetUserPrivileges   (NetworkAccessGetUserPrivilegesRequest) returns (NetworkAccessUserPrivilegesMessage);
@@ -434,7 +435,7 @@ message NetworkAccessCheckOutboundRequest {
   int32 port = 6;
   string purpose = 7;
   string correlation_id = 8;
-  bool skip_approval_hold = 9;
+  reserved 9;
 }
 
 message NetworkAccessCheckOutboundResponse {
@@ -449,9 +450,10 @@ message NetworkAccessProviderTestRequest {
   string host = 2;
   int32 port = 3;
   bool allow_lan = 4;
+  bool confirmed = 5;
 }
 
-message NetworkAccessProviderTestResponse { string token = 1; }
+message NetworkAccessProviderTestResponse { string token = 1; string status = 2; string reason = 3; }
 message NetworkAccessProviderTestEndRequest { NetworkAccessActorMessage actor = 1; string token = 2; }
 
 message NetworkAccessRequestMessage {
@@ -559,6 +561,14 @@ message NetworkAccessListRulesRequest {
 message NetworkAccessListRulesResponse {
   int64 revision = 1;
   repeated NetworkAccessRuleMessage rules = 2;
+  repeated NetworkAccessServicePermissionView services = 3;
+}
+
+message NetworkAccessServicePermissionView {
+  string service_id = 1;
+  int32 total = 2;
+  int32 granted = 3;
+  int32 effective = 4;
 }
 
 message NetworkAccessSetRuleRequest {
@@ -581,6 +591,13 @@ message NetworkAccessSetRuleRequest {
 message NetworkAccessSetRuleResponse {
   int64 revision = 1;
   NetworkAccessRuleMessage rule = 2;
+}
+
+message NetworkAccessServicePermissionRequest {
+  NetworkAccessActorMessage actor = 1;
+  string service_id = 2;
+  optional bool allowed = 3;
+  optional int64 expected_revision = 4;
 }
 
 message NetworkAccessProviderPermissionRequest {

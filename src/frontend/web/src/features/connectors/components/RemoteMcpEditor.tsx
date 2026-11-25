@@ -612,7 +612,7 @@ export function RemoteMcpEditor({
               disabled={!!busy}
               onClick={() => void run('test')}
             >
-              {busy === 'test' ? 'Testing…' : 'Test connection'}
+              {busy === 'test' ? 'Testing…' : result?.success === false ? 'Try again' : 'Test connection'}
             </Button>
             <Button
               type="button"

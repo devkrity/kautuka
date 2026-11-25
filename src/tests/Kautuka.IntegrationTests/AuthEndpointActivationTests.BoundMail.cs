@@ -30,7 +30,6 @@ public sealed partial class AuthEndpointActivationTests
         Assert.False(string.IsNullOrWhiteSpace(checker.Target.UserId));
         Assert.Equal("kautuka-google-mail", checker.Target.ConnectorId);
         Assert.Equal("connector-oauth", checker.Target.Purpose);
-        Assert.True(checker.Target.SkipApprovalHold);
         Assert.Null(checker.Target.AgentId);
         using JsonDocument payload = JsonDocument.Parse(await auth.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
         Assert.Equal("approval-1", payload.RootElement.GetProperty("requestId").GetString());
@@ -38,7 +37,6 @@ public sealed partial class AuthEndpointActivationTests
         Assert.Equal(HttpStatusCode.OK, mail.StatusCode);
         Assert.Equal("gmail.googleapis.com", checker.Target!.Host);
         Assert.Equal("kautuka-google-mail", checker.Target.ConnectorId);
-        Assert.True(checker.Target.SkipApprovalHold);
         using HttpResponseMessage invalid = await PostExternalAsync(fixture, "/api/connectors/kautuka-google-mail/oauth/network-check/other", new { }, applianceOrigin, bearer);
         Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
     }

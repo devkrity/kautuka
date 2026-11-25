@@ -45,7 +45,7 @@ internal static partial class ConnectorOAuthEndpointMappings
         if (profile is null || host is null) return Results.BadRequest();
         int port = phase == "auth" && Uri.TryCreate(endpoint.Host, UriKind.Absolute, out Uri? authUri) ? authUri.Port : 443;
         var target = new OutboundTarget(host, port, UserId: user.Id,
-            ConnectorId: connectorId, Purpose: "connector-oauth", Service: "connector-auth", SkipApprovalHold: true);
+            ConnectorId: connectorId, Purpose: "connector-oauth", Service: "connector-auth");
         NetworkAccessCheckResult result = await checker.CheckAsync(target, ct).ConfigureAwait(false);
         var response = new JsonObject
         {

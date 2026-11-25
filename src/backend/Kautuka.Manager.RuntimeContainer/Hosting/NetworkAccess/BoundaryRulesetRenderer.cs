@@ -214,8 +214,7 @@ public static class BoundaryRulesetRenderer
         string adminSocketPath = "/run/kautuka-admin/admin.sock",
         bool isWindowsMtls = false,
         bool includeGatewayConnect = false,
-        bool includeApplianceTelemetry = false,
-        TimeSpan approvalHold = default)
+        bool includeApplianceTelemetry = false)
     {
         string template = ResolveTemplate("envoy.static.yaml.tmpl");
         string gatewayConnect = includeGatewayConnect ? RenderGatewayConnectListener() : string.Empty;
@@ -234,13 +233,10 @@ public static class BoundaryRulesetRenderer
             NetworkAddressClassifier.WorkloadSubnetCidr
         ];
 
-        TimeSpan authorizationDeadline = (includeGatewayConnect ? approvalHold : TimeSpan.Zero) + TimeSpan.FromSeconds(2);
-        TimeSpan connectIdleDeadline = authorizationDeadline > TimeSpan.FromMinutes(5)
-            ? authorizationDeadline + TimeSpan.FromSeconds(1) : TimeSpan.FromMinutes(5);
         string rendered = template
             .Replace("{{GATEWAY_CONNECT_LISTENER}}", gatewayConnect, StringComparison.Ordinal)
-            .Replace("{{AUTHORIZATION_DEADLINE}}", FormattableString.Invariant($"{authorizationDeadline.TotalSeconds:0.###}s"), StringComparison.Ordinal)
-            .Replace("{{GATEWAY_STREAM_IDLE_DEADLINE}}", FormattableString.Invariant($"{connectIdleDeadline.TotalSeconds:0.###}s"), StringComparison.Ordinal)
+            .Replace("{{AUTHORIZATION_DEADLINE}}", "35s", StringComparison.Ordinal)
+            .Replace("{{GATEWAY_STREAM_IDLE_DEADLINE}}", "300s", StringComparison.Ordinal)
             .Replace("{{TELEMETRY_LISTENER}}", includeApplianceTelemetry ? RenderTelemetryListener() : string.Empty, StringComparison.Ordinal)
             .Replace("{{TELEMETRY_SECRET}}", includeApplianceTelemetry ? TelemetrySecretYaml : string.Empty, StringComparison.Ordinal)
             .Replace("{{TELEMETRY_CLUSTER}}", includeApplianceTelemetry ? RenderTelemetryCluster() : string.Empty, StringComparison.Ordinal)

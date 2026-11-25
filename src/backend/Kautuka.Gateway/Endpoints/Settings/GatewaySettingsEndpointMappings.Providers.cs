@@ -82,7 +82,9 @@ internal static partial class GatewaySettingsEndpointMappings
                 KautukaJsonContext.Default.GatewayProvidersResponse);
         });
 
-        app.MapPost("/api/settings/providers/test", async (JsonElement body, IProviderValidationService providerValidationService, IGatewayAuthGuard auth, HttpContext context, CancellationToken ct) =>
+        app.MapPost("/api/settings/providers/test", async (JsonElement body, IProviderValidationService providerValidationService,
+            IGatewayCatalogStore catalog, IProviderTypeCatalog providerTypes, IManagerGrpcService manager,
+            IGatewayAuthGuard auth, HttpContext context, CancellationToken ct) =>
         {
             IResult? unauthorized = auth.RequireAdmin(context, out GatewayUser? adminUser);
             if (unauthorized is not null || adminUser is null)
@@ -90,26 +92,44 @@ internal static partial class GatewaySettingsEndpointMappings
                 return unauthorized ?? Results.Unauthorized();
             }
 
-            string? testToken = null;
-            IManagerGrpcService? manager = null;
+            if (!ProviderValidationService.TryPrepare(body, catalog, providerTypes, out ProviderTestDefinition? definition, out string error))
+                return ProviderTestResult(false, error, StatusCodes.Status400BadRequest);
+            if (!Uri.TryCreate(AiProviderSettings.GetString(definition.Settings, "base_url"), UriKind.Absolute, out Uri? target))
+                return ProviderTestResult(false, "Provider endpoint is invalid.", StatusCodes.Status400BadRequest);
+
             var actor = new NetworkAccessActorMessage { UserId = adminUser.Id, IsAdmin = true };
-            bool temporary = body.TryGetProperty("allowTemporaryNetworkAccess", out JsonElement temporaryValue) && temporaryValue.ValueKind == JsonValueKind.True;
-            if (temporary)
+            bool hasConfirmation = body.TryGetProperty("confirmedTarget", out JsonElement consent);
+            bool confirmed = hasConfirmation && consent.ValueKind == JsonValueKind.Object
+                && consent.GetStringProperty("host", string.Empty) == target.IdnHost
+                && consent.TryGetProperty("port", out JsonElement port) && port.ValueKind == JsonValueKind.Number
+                && port.TryGetInt32(out int confirmedPort) && confirmedPort == target.Port;
+            NetworkAccessProviderTestResponse grant;
+            try
             {
-                var catalog = context.RequestServices.GetRequiredService<IGatewayCatalogStore>();
-                var types = context.RequestServices.GetRequiredService<IProviderTypeCatalog>();
-                Uri? target = ResolveProviderTarget(body, catalog, types);
-                if (target is null) return Results.BadRequest(new GatewayErrorResponse("Provider endpoint is invalid."));
-                manager = context.RequestServices.GetRequiredService<IManagerGrpcService>();
-                var grant = await manager.Client.BeginProviderTestAsync(new NetworkAccessProviderTestRequest
+                grant = await manager.Client.PrepareProviderTestAsync(new NetworkAccessProviderTestRequest
                 {
                     Actor = actor,
                     Host = target.IdnHost,
                     Port = target.Port,
                     AllowLan = IsLocalProviderTarget(target),
+                    Confirmed = confirmed,
                 }, cancellationToken: ct);
-                testToken = grant.Token;
             }
+            catch (RpcException) when (!ct.IsCancellationRequested)
+            {
+                return ProviderTestResult(false, "Manager could not check network access for this test. Try again when Manager is available.",
+                    StatusCodes.Status503ServiceUnavailable);
+            }
+            if (grant.Status == "confirmation_required")
+                return ProviderTestResult(false, "Temporary network access requires confirmation.", StatusCodes.Status200OK,
+                    new ProviderTestTarget(target.IdnHost, target.Port));
+            if (grant.Status != "allowed")
+                return ProviderTestResult(false, $"Network access to {target.IdnHost}:{target.Port} is blocked ({grant.Reason}).",
+                    StatusCodes.Status403Forbidden);
+            if (hasConfirmation && !confirmed)
+                return ProviderTestResult(false, $"The provider destination changed to {target.IdnHost}:{target.Port}. Select Test connection again.",
+                    StatusCodes.Status409Conflict);
+            string? testToken = grant.Token.Length == 0 ? null : grant.Token;
             using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
                 userId: adminUser.Id,
                 agentId: "gateway",
@@ -117,19 +137,29 @@ internal static partial class GatewaySettingsEndpointMappings
                 service: "ai-provider",
                 correlationId: testToken);
             GatewayProviderTestResult result;
-            try { result = await providerValidationService.TestProviderAsync(body, ct).ConfigureAwait(false); }
+            try { result = await providerValidationService.TestProviderAsync(definition, ct).ConfigureAwait(false); }
             finally
             {
-                if (manager is not null && testToken is not null)
-                    await manager.Client.EndProviderTestAsync(new NetworkAccessProviderTestEndRequest { Actor = actor, Token = testToken }, cancellationToken: CancellationToken.None);
+                if (testToken is not null)
+                {
+                    try
+                    {
+                        await manager.Client.EndProviderTestAsync(new NetworkAccessProviderTestEndRequest { Actor = actor, Token = testToken },
+                            deadline: DateTime.UtcNow.AddSeconds(5), cancellationToken: CancellationToken.None);
+                    }
+                    catch (RpcException exception)
+                    {
+                        ProviderValidationServiceLog.TestGrantCleanupFailed(app.Logger, exception, target.IdnHost, target.Port);
+                    }
+                }
             }
-            return Results.Json(
-                new GatewayProviderTestResponse(result.Success, result.Message),
-                KautukaJsonContext.Default.GatewayProviderTestResponse,
-                statusCode: result.Success ? StatusCodes.Status200OK : StatusCodes.Status400BadRequest);
+            return ProviderTestResult(result.Success, result.Message, result.Success ? StatusCodes.Status200OK : StatusCodes.Status400BadRequest);
         })
         .Produces<GatewayProviderTestResponse>(StatusCodes.Status200OK)
-        .Produces<GatewayProviderTestResponse>(StatusCodes.Status400BadRequest);
+        .Produces<GatewayProviderTestResponse>(StatusCodes.Status400BadRequest)
+        .Produces<GatewayProviderTestResponse>(StatusCodes.Status403Forbidden)
+        .Produces<GatewayProviderTestResponse>(StatusCodes.Status409Conflict)
+        .Produces<GatewayProviderTestResponse>(StatusCodes.Status503ServiceUnavailable);
 
         app.MapPost("/api/settings/providers/save", async (
             HttpContext context,
@@ -346,19 +376,9 @@ internal static partial class GatewaySettingsEndpointMappings
         => Results.Json(new ProviderSaveConflict(detail, "provider_network_activation_incomplete", providerId),
             KautukaJsonContext.Default.ProviderSaveConflict, statusCode: statusCode);
 
-    private static Uri? ResolveProviderTarget(JsonElement body, IGatewayCatalogStore catalog, IProviderTypeCatalog types)
-    {
-        string id = body.GetStringProperty("provider_id", string.Empty).Trim();
-        if (id.Length == 0) id = body.GetStringProperty("id", string.Empty).Trim();
-        catalog.TryGetProvider(id, out GatewayProvider? existing);
-        string type = ProviderTypeCatalogSettings.NormalizeType(body.GetStringProperty("type", existing?.Type ?? string.Empty));
-        bool hasBaseUrl = body.TryGetProperty("settings", out JsonElement settings) && settings.ValueKind == JsonValueKind.Object
-            && settings.TryGetProperty("base_url", out _);
-        string? baseUrl = hasBaseUrl ? settings.GetStringProperty("base_url", string.Empty) : null;
-        if (!hasBaseUrl && existing is not null) baseUrl = AiProviderSettings.GetString(existing.Settings, "base_url");
-        if (string.IsNullOrWhiteSpace(baseUrl) && types.TryGet(type, out AiProviderCatalog.ProviderMetadata? metadata)) baseUrl = metadata?.DefaultBaseUrl;
-        return Uri.TryCreate(baseUrl, UriKind.Absolute, out Uri? uri) && uri.Scheme is "http" or "https" ? uri : null;
-    }
+    private static IResult ProviderTestResult(bool success, string message, int statusCode, ProviderTestTarget? target = null)
+        => Results.Json(new GatewayProviderTestResponse(success, message, target), KautukaJsonContext.Default.GatewayProviderTestResponse,
+            statusCode: statusCode);
 
     private static bool IsLocalProviderTarget(Uri uri)
     {

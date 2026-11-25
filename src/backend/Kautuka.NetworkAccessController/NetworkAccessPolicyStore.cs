@@ -3,6 +3,9 @@ namespace Kautuka.NetworkAccessController;
 public sealed partial class NetworkAccessPolicyStore
 {
     private readonly Dictionary<string, string> serviceSetupGroups;
+    private static readonly TimeSpan pendingRequestLifetime = TimeSpan.FromHours(24);
+    private static bool IsExpired(NetworkAccessRequest request, DateTimeOffset now)
+        => request.Status == "pending" && request.FirstSeenUtc <= now - pendingRequestLifetime;
 
     public NetworkAccessApprovalLimits GetApprovalLimits(NetworkAccessActor actor)
     {
@@ -232,6 +235,19 @@ public sealed partial class NetworkAccessPolicyStore
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            List<NetworkAccessRequest> retained = current.Requests.Where(r => !IsExpired(r, now)).ToList();
+            if (retained.Count != current.Requests.Count)
+            {
+                current = current with { Requests = retained, Revision = checked(current.Revision + 1) };
+                SaveSync(current);
+                lastRequestActivityWatermark = Math.Max(lastRequestActivityWatermark, current.Revision);
+            }
+            foreach (string expired in probeRequestsById.Where(kv => IsExpired(kv.Value.Request, now)).Select(kv => kv.Key).ToArray())
+            {
+                probeRequestsById.Remove(expired);
+                lastRequestActivityWatermark = Math.Max(lastRequestActivityWatermark + 1, checked(current.Revision + 1));
+            }
             UserPrivileges callerPrivs = ResolveUserPrivilegesUnsafe(ref current, actor.UserId, isTargetAdmin: actor.IsAdmin);
 
             if (sinceRevision.HasValue
@@ -244,7 +260,7 @@ public sealed partial class NetworkAccessPolicyStore
             var views = new List<NetworkAccessRequestView>();
             foreach (NetworkAccessRequest req in current.Requests)
             {
-                if (!NetworkAccessPolicyAuthorizer.CanViewRequest(actor, req))
+                if (IsExpired(req, DateTimeOffset.UtcNow) || !NetworkAccessPolicyAuthorizer.CanViewRequest(actor, req))
                 {
                     continue;
                 }
@@ -259,7 +275,7 @@ public sealed partial class NetworkAccessPolicyStore
             foreach (TemporaryProbePendingEntry probeEntry in probeRequestsById.Values)
             {
                 NetworkAccessRequest req = probeEntry.Request;
-                if (!NetworkAccessPolicyAuthorizer.CanViewRequest(actor, req))
+                if (IsExpired(req, DateTimeOffset.UtcNow) || !NetworkAccessPolicyAuthorizer.CanViewRequest(actor, req))
                 {
                     continue;
                 }
@@ -316,26 +332,6 @@ public sealed partial class NetworkAccessPolicyStore
         }
     }
 
-    internal async Task<string?> WaitForPendingResolutionAsync(string requestId, CancellationToken cancellationToken)
-    {
-        while (true)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            Task changed;
-            lock (gate)
-            {
-                NetworkAccessPolicyState current = Load();
-                NetworkAccessRequest? request = current.Requests.FirstOrDefault(r => r.Id == requestId);
-                if (request is null) return null;
-                if (current.Brake.System) return "brake_system";
-                if (current.Brake.IsUserBraked(request.UserId)) return "brake_user";
-                if (request.Status != "pending") return request.Status;
-                changed = (policyChanged ??= new(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
-            }
-            await changed.WaitAsync(cancellationToken).ConfigureAwait(false);
-        }
-    }
-
     public DecideRequestResult DecideRequest(
         NetworkAccessActor actor,
         string requestId,
@@ -366,6 +362,8 @@ public sealed partial class NetworkAccessPolicyStore
                 request,
                 scope,
                 (userId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin));
+            if (request.Status != "pending" || IsExpired(request, DateTimeOffset.UtcNow))
+                throw new KeyNotFoundException("Request not found.");
             string effectiveScope = resolved.EffectiveScope;
             string? ruleUserId = resolved.RuleUserId;
             string? ruleAgentId = resolved.RuleAgentId;
@@ -736,7 +734,7 @@ public sealed partial class NetworkAccessPolicyStore
         DateTimeOffset? observedAtUtc = null)
     {
         DateTimeOffset now = observedAtUtc ?? DateTimeOffset.UtcNow;
-        string id = NetworkAccessRequest.ComputeId(
+        string scopeId = NetworkAccessRequest.ComputeId(
             actorKind,
             attribution,
             userId,
@@ -750,7 +748,8 @@ public sealed partial class NetworkAccessPolicyStore
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
-            NetworkAccessRequest? existing = current.Requests.FirstOrDefault(r => string.Equals(r.Id, id, StringComparison.Ordinal));
+            NetworkAccessRequest? existing = current.Requests.FirstOrDefault(r => r.Status == "pending" && !IsExpired(r, now)
+                && NetworkAccessRequest.ComputeId(r.ActorKind, r.Attribution, r.UserId, r.AgentId, r.ConnectorId, r.Origin, r.DestKind, r.Destination, r.Port) == scopeId);
             if (existing is { Status: "pending" })
             {
                 // Retries of an existing pending request increment attempts in memory without synchronous disk writes.
@@ -762,20 +761,21 @@ public sealed partial class NetworkAccessPolicyStore
                     LastSeenUtc = lastSeen,
                     CompatProfile = compatProfile ?? existing.CompatProfile,
                 };
-                var nextRequests = current.Requests.Select(r => string.Equals(r.Id, id, StringComparison.Ordinal) ? updatedPending : r).ToList();
+                var nextRequests = current.Requests.Select(r => string.Equals(r.Id, existing.Id, StringComparison.Ordinal) ? updatedPending : r).ToList();
                 EnqueuePendingRequestSave(current with { Requests = nextRequests });
                 lastRequestActivityWatermark = Math.Max(lastRequestActivityWatermark, checked(current.Revision + 1));
-                return (id, Overflow: false);
+                return (existing.Id, Overflow: false);
             }
 
+            string id = Guid.NewGuid().ToString("N");
             DateTimeOffset cutoff = now - resolvedRequestRetention;
             var activeRequests = current.Requests
-                .Where(r => !string.Equals(r.Id, id, StringComparison.Ordinal) && (r.Status == "pending" || r.LastSeenUtc >= cutoff))
+                .Where(r => !IsExpired(r, now) && (r.Status == "pending" || r.LastSeenUtc >= cutoff))
                 .ToList();
 
             NetworkAccessApprovalLimits limits = ResolveApprovalLimits(current);
-            int pendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending");
-            int userPendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending" && string.Equals(entry.Request.UserId, userId, StringComparison.Ordinal));
+            int pendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending" && !IsExpired(entry.Request, now));
+            int userPendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending" && !IsExpired(entry.Request, now) && string.Equals(entry.Request.UserId, userId, StringComparison.Ordinal));
             if (activeRequests.Count(r => r.Status == "pending" && string.Equals(r.UserId, userId, StringComparison.Ordinal)) + userPendingProbes >= limits.PerUser
                 || activeRequests.Count(r => r.Status == "pending") + pendingProbes >= limits.Global)
                 return (null, Overflow: true);
@@ -797,7 +797,7 @@ public sealed partial class NetworkAccessPolicyStore
                 }
             }
 
-            long attempts = existing is null ? 1 : (existing.Attempts == long.MaxValue ? long.MaxValue : existing.Attempts + 1);
+            long attempts = 1;
             var newRequest = new NetworkAccessRequest(
                 id,
                 userId,
@@ -808,7 +808,7 @@ public sealed partial class NetworkAccessPolicyStore
                 destKind,
                 port,
                 actorKind,
-                existing?.FirstSeenUtc ?? now,
+                now,
                 now,
                 attempts,
                 Status: "pending",
@@ -929,12 +929,16 @@ public sealed partial class NetworkAccessPolicyStore
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(containerId);
         DateTimeOffset now = observedAtUtc ?? DateTimeOffset.UtcNow;
-        string id = NetworkAccessIdGenerator.ComputeBase32Id(
+        string scopeId = NetworkAccessIdGenerator.ComputeBase32Id(
             $"probe|{containerId}|{attribution}|{userId ?? string.Empty}|{connectorId ?? string.Empty}|{origin}|{destKind}|{destination}|{port}");
 
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
+            foreach (string expired in probeRequestsById.Where(kv => IsExpired(kv.Value.Request, now)).Select(kv => kv.Key).ToArray())
+                probeRequestsById.Remove(expired);
+            string? existingId = probeRequestsById.Keys.FirstOrDefault(key => key == scopeId || key.StartsWith(scopeId + "-", StringComparison.Ordinal));
+            string id = existingId ?? scopeId + "-" + Guid.NewGuid().ToString("N");
             if (probeRequestsById.TryGetValue(id, out TemporaryProbePendingEntry? existing))
             {
                 long nextAttempts = existing.Request.Attempts == long.MaxValue ? long.MaxValue : existing.Request.Attempts + 1;
@@ -950,10 +954,10 @@ public sealed partial class NetworkAccessPolicyStore
             else
             {
                 NetworkAccessApprovalLimits limits = ResolveApprovalLimits(current);
-                int pendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending");
-                int userPendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending" && string.Equals(entry.Request.UserId, userId, StringComparison.Ordinal));
-                if (current.Requests.Count(r => r.Status == "pending") + pendingProbes >= limits.Global
-                    || current.Requests.Count(r => r.Status == "pending" && string.Equals(r.UserId, userId, StringComparison.Ordinal)) + userPendingProbes >= limits.PerUser)
+                int pendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending" && !IsExpired(entry.Request, now));
+                int userPendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending" && !IsExpired(entry.Request, now) && string.Equals(entry.Request.UserId, userId, StringComparison.Ordinal));
+                if (current.Requests.Count(r => r.Status == "pending" && !IsExpired(r, now)) + pendingProbes >= limits.Global
+                    || current.Requests.Count(r => r.Status == "pending" && !IsExpired(r, now) && string.Equals(r.UserId, userId, StringComparison.Ordinal)) + userPendingProbes >= limits.PerUser)
                     return null;
                 var req = new NetworkAccessRequest(
                     id,
@@ -1052,6 +1056,9 @@ public sealed partial class NetworkAccessPolicyStore
             allow,
             allowLan,
             (userId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin));
+
+        if (request.Status != "pending" || IsExpired(request, DateTimeOffset.UtcNow))
+            throw new KeyNotFoundException("Request not found.");
 
         if (current.Revision != expectedRevision)
         {

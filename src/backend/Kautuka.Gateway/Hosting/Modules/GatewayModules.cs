@@ -149,11 +149,8 @@ internal static class GatewayCatalogModule
             ?? provider.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>()["Kautuka:ConnectorAuth:Host"]));
         services.AddSingleton(static provider => ConnectorAuthCatalog.Load(provider.GetRequiredService<IWebHostEnvironment>().ContentRootPath));
         services.AddSingleton<ConnectorOAuthSessionStore>();
-        services.AddSingleton(static provider => new GatewayOutboundApproval(provider.GetRequiredService<INetworkAccessChecker>(),
-            provider.GetRequiredService<GatewayOutboundHttpTransport>().ApprovalHold > TimeSpan.Zero));
         services.AddSingleton(static provider => new ConnectorAuthorizationClient(provider.GetRequiredService<INetworkAccessChecker>(),
-            outbound: provider.GetRequiredService<GatewayOutboundHttpTransport>(),
-            approval: provider.GetRequiredService<GatewayOutboundApproval>()));
+            outbound: provider.GetRequiredService<GatewayOutboundHttpTransport>()));
         services.AddSingleton<IConnectorRefreshTokenStore, CredentialsHostConnectorRefreshTokenStore>();
         services.AddSingleton<IBrokerMailCredentialStorage, CredentialsHostBrokerMailCredentialStorage>();
         services.AddSingleton<BrokerMailCredentialStore>();
@@ -166,15 +163,13 @@ internal static class GatewayCatalogModule
             provider.GetRequiredService<BrokerInstallationIdentityProvider>(),
             new HttpClient(new NetworkAccessCheckHandler(provider.GetRequiredService<INetworkAccessChecker>(),
                 provider.GetRequiredService<GatewayOutboundHttpTransport>().CreateApplicationTransport()
-                    ?? new SocketsHttpHandler { AllowAutoRedirect = false }), disposeHandler: true),
-            provider.GetRequiredService<GatewayOutboundApproval>()));
+                    ?? new SocketsHttpHandler { AllowAutoRedirect = false }), disposeHandler: true)));
         services.AddSingleton(static provider => new BrokerHandoffClient(
             provider.GetRequiredService<BrokerInstallationIdentityProvider>(),
             provider.GetRequiredService<BrokerInstallationRegistration>(),
             new HttpClient(new NetworkAccessCheckHandler(provider.GetRequiredService<INetworkAccessChecker>(),
                 provider.GetRequiredService<GatewayOutboundHttpTransport>().CreateApplicationTransport()
-                    ?? new SocketsHttpHandler { AllowAutoRedirect = false }), disposeHandler: true),
-            provider.GetRequiredService<GatewayOutboundApproval>()));
+                    ?? new SocketsHttpHandler { AllowAutoRedirect = false }), disposeHandler: true)));
         services.AddSingleton<ConnectorOAuthService>();
         services.AddHostedService<BuiltInConnectorCatalogService>();
         services.AddHostedService<RemoteMcpPresetBootstrapService>();

@@ -2,13 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { settingsAdmin } from '@/features/settings';
 import { confirmProviderSave } from '../utils/confirmProviderSave';
-import {
-  checkProviderSystemwideRule,
-  resolveProviderNetworkTarget,
-  type ProviderNetworkTarget,
-} from '@/features/network-access/networkAccess';
 import { apiError } from '../utils/settingsUtils';
-import type { ProviderEntry, ProviderTypeInfo } from '../types/settingsTypes';
+import type { ProviderEntry } from '../types/settingsTypes';
 
 const PROVIDER_KIND_TEST = ['te', 'st'].join('');
 const DEFAULT_HTTP_TIMEOUT_SECONDS = '30';
@@ -58,7 +53,6 @@ export function providerChip(type: string): { label: string; className: string }
 export function useProvidersTab() {
   const queryClient = useQueryClient();
   const [providers, setProviders] = useState<ProviderEntry[]>([]);
-  const [providerTypes, setProviderTypes] = useState<ProviderTypeInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<ProviderFormState>(DEFAULT_FORM);
@@ -66,19 +60,15 @@ export function useProvidersTab() {
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [pendingNetworkApproval, setPendingNetworkApproval] = useState<{
-    target: ProviderNetworkTarget;
-    expectedRevision: number;
+    host: string;
+    port: number;
   } | null>(null);
 
   const load = async () => {
     setLoading(true);
     try {
-      const [providersRes, typesRes] = await Promise.all([
-        settingsAdmin.listProviders(),
-        settingsAdmin.listProviderTypes(),
-      ]);
+      const providersRes = await settingsAdmin.listProviders();
       setProviders(providersRes.data.providers);
-      setProviderTypes(typesRes.data.providerTypes);
     } finally {
       setLoading(false);
     }
@@ -89,12 +79,14 @@ export function useProvidersTab() {
   }, []);
 
   const startCreate = () => {
+    setPendingNetworkApproval(null);
     setEditingId('');
     setForm(DEFAULT_FORM);
     setResult(null);
   };
 
   const startEdit = (provider: ProviderEntry) => {
+    setPendingNetworkApproval(null);
     setEditingId(provider.id);
     setForm({
       id: provider.id,
@@ -112,7 +104,7 @@ export function useProvidersTab() {
     setPendingNetworkApproval(null);
   };
 
-  const runProviderTestCall = async (allowTemporaryNetworkAccess = false) => {
+  const runProviderTestCall = async (confirmedTarget?: { host: string; port: number }) => {
     const httpTimeoutSeconds = normalizeHttpTimeoutSeconds(form.http_timeout_seconds);
     if (httpTimeoutSeconds === 'invalid') {
       setResult({ success: false, message: 'HTTP timeout must be a positive number of seconds.' });
@@ -120,18 +112,23 @@ export function useProvidersTab() {
     }
 
     setTesting(true);
+    setPendingNetworkApproval(null);
     setResult(null);
     try {
       const response = await settingsAdmin.testProvider({
         id: form.id.trim() || undefined,
         type: form.type,
-        allowTemporaryNetworkAccess,
+        confirmedTarget,
         settings: {
           base_url: form.base_url.trim() || null,
           api_key: form.api_key.trim() || null,
           http_timeout_seconds: httpTimeoutSeconds,
         },
       });
+      if (response.data.confirmationTarget) {
+        setPendingNetworkApproval(response.data.confirmationTarget);
+        return;
+      }
       setResult({
         success: Boolean(response.data.success),
         message: response.data.message || 'Provider connection check completed.',
@@ -149,25 +146,6 @@ export function useProvidersTab() {
       return;
     }
 
-    const catalogType = providerTypes.find((t) => t.type === form.type);
-    const target = resolveProviderNetworkTarget(form.type, form.base_url, catalogType?.defaultBaseUrl);
-    if (target) {
-      setTesting(true);
-      try {
-        const status = await checkProviderSystemwideRule(target);
-        if (!status.alreadyAllowed) {
-          setPendingNetworkApproval({ target, expectedRevision: status.expectedRevision });
-          setTesting(false);
-          return;
-        }
-      } catch (err) {
-        setResult({ success: false, message: apiError(err) });
-        setTesting(false);
-        return;
-      }
-      setTesting(false);
-    }
-
     await runProviderTestCall();
   };
 
@@ -176,7 +154,7 @@ export function useProvidersTab() {
     if (!pending) return;
 
     setPendingNetworkApproval(null);
-    await runProviderTestCall(true);
+    await runProviderTestCall(pending);
   };
 
   const cancelNetworkApproval = () => {
@@ -257,7 +235,6 @@ export function useProvidersTab() {
 
   return {
     providers,
-    providerTypes,
     loading,
     editingId,
     form,
@@ -267,7 +244,7 @@ export function useProvidersTab() {
     pendingNetworkApproval,
     statusItems,
     setForm: (next: ProviderFormState) => {
-      if (next.type !== form.type || next.base_url.trim() !== form.base_url.trim()) {
+      if (next.id !== form.id || next.type !== form.type || next.base_url.trim() !== form.base_url.trim()) {
         setPendingNetworkApproval(null);
         setResult(null);
       }

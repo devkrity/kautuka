@@ -70,6 +70,7 @@ export interface NetworkAccessRuleDto {
 export interface NetworkRulesResponseDto {
   revision: number;
   rules: NetworkAccessRuleDto[];
+  services?: { serviceId: string; total: number; granted: number; effective: number }[];
 }
 
 export interface RequestDecisionDto {
@@ -98,13 +99,6 @@ export interface CreateOrUpdateRuleDto {
   allowLan?: boolean;
   expectedRevision: number;
   replaceRuleId?: string;
-}
-
-export interface ProviderNetworkTarget {
-  host: string;
-  port: number;
-  destKind: 'host' | 'ip';
-  allowLan: boolean;
 }
 
 export interface NetworkAccessActivityDto {

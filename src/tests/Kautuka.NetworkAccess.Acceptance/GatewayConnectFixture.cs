@@ -45,6 +45,21 @@ internal static class GatewayConnectFixture
             context.Cancel = true;
             stopped.TrySetResult();
         });
+        string approvalRequest = Path.Combine(directory, "approve-explicit-retry");
+        while (!stopped.Task.IsCompleted && !File.Exists(approvalRequest))
+        {
+            await Task.WhenAny(stopped.Task, Task.Delay(50)).ConfigureAwait(false);
+        }
+
+        if (!stopped.Task.IsCompleted)
+        {
+            NetworkAccessRequest request = policy.ListRequests(admin).Requests
+                .Select(view => view.Request)
+                .Single(item => item is { Status: "pending", Destination: "fixture-retry.test", Port: 18080 });
+            _ = policy.DecideRequest(admin, request.Id, allow: true, scope: "agent", expectedRevision: policy.Revision);
+            await File.WriteAllTextAsync(Path.Combine(directory, "explicit-retry-approved"), string.Empty).ConfigureAwait(false);
+        }
+
         await stopped.Task.ConfigureAwait(false);
     }
 }

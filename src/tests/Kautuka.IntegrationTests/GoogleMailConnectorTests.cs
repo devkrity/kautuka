@@ -4,7 +4,6 @@ using System.Text.Json;
 
 using Kautuka.Gateway.Domain.Connectors;
 using Kautuka.Gateway.Infrastructure.Connectors;
-using Kautuka.Gateway.Infrastructure.Egress;
 using Kautuka.GoogleMail;
 using Kautuka.NetworkAccess.Client;
 
@@ -894,55 +893,44 @@ public sealed class GoogleMailConnectorTests
     }
 
     [Fact]
-    public async Task ConnectorExchangeSendsOnceAfterScopedApproval()
+    public async Task ConnectorExchangeRequiresFreshSignInAfterScopedApproval()
     {
-        var checker = new HoldingConnectorChecker();
+        var checker = new RetryNetworkChecker();
         using var handler = new ScriptedHandler
         {
             Respond = request =>
             {
                 Assert.Equal("oauth2.googleapis.com", request.RequestUri?.IdnHost);
-                Assert.True(NetworkAccessContext.Current!.SkipApprovalHold);
                 return JsonResponse("""{"access_token":"access","refresh_token":"refresh"}""");
             },
         };
         using var transport = new NetworkAccessCheckHandler(checker, handler);
-        using var client = new ConnectorAuthorizationClient(handler: transport,
-            approval: new GatewayOutboundApproval(checker, enabled: true));
+        using var client = new ConnectorAuthorizationClient(handler: transport);
         var credentials = new FakeRefreshTokens();
         var sessions = new ConnectorOAuthSessionStore();
-        sessions.Save("state", new ConnectorOAuthSession
+        void StartSession(string state) => sessions.Save(state, new ConnectorOAuthSession
         {
             UserId = "owner",
             ConnectorId = "kautuka-google-mail",
             CodeVerifier = "verifier",
             ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5),
         });
+        StartSession("first");
         var service = new ConnectorOAuthService(new ConnectorAuthCatalog([Profile(googleClientId, googleClientSecret)]),
             credentials, client, sessions);
         CancellationToken token = TestContext.Current.CancellationToken;
 
-        Task<ConnectorOAuthCompleteResponse> exchange = service.CompleteAsync("owner", "auth-code", "state", token);
-        Assert.False(exchange.IsCompleted);
+        await Assert.ThrowsAsync<NetworkAccessDeniedException>(() => service.CompleteAsync("owner", "first-code", "first", token));
+        var denied = Assert.Single(checker.Targets);
+        Assert.Equal("owner", denied.UserId);
+        Assert.Equal("kautuka-google-mail", denied.ConnectorId);
+        checker.Allowed = true;
+        Assert.Equal("rejected", (await service.CompleteAsync("owner", "first-code", "first", token)).Status);
         Assert.Equal(0, handler.Calls);
-        checker.Approved.SetResult(NetworkAccessCheckResult.CreateAllowed("rule_user"));
-
-        Assert.Equal("connected", (await exchange.WaitAsync(TimeSpan.FromSeconds(5), token)).Status);
+        StartSession("fresh");
+        Assert.Equal("connected", (await service.CompleteAsync("owner", "fresh-code", "fresh", token)).Status);
         Assert.Equal(1, handler.Calls);
         Assert.Equal("refresh", credentials.SavedRefreshToken);
-    }
-
-    private sealed class HoldingConnectorChecker : INetworkAccessChecker
-    {
-        internal TaskCompletionSource<NetworkAccessCheckResult> Approved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)
-        {
-            Assert.Equal("owner", target.UserId);
-            Assert.Equal("kautuka-google-mail", target.ConnectorId);
-            return target.SkipApprovalHold ? Task.FromResult(NetworkAccessCheckResult.CreateAllowed("rule_user"))
-                : Approved.Task.WaitAsync(cancellationToken);
-        }
     }
 
     [Fact]

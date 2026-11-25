@@ -3,7 +3,6 @@ using System.Text.Json.Nodes;
 
 using Kautuka.Gateway.Domain.Runtime;
 using Kautuka.Gateway.Infrastructure.Credentials;
-using Kautuka.Gateway.Infrastructure.Egress;
 using Kautuka.NetworkAccess.Client;
 
 using Microsoft.Extensions.AI;
@@ -16,8 +15,7 @@ internal sealed class KautukaAiClientFactory(
     IProviderTypeCatalog providerTypeCatalog,
     IRunLimitResolver? runLimitResolver = null,
     INetworkAccessChecker? checker = null,
-    Func<INetworkAccessChecker?, HttpMessageHandler>? transportFactory = null,
-    GatewayOutboundApproval? approval = null)
+    Func<INetworkAccessChecker?, HttpMessageHandler>? transportFactory = null)
 {
     public KautukaAiClientFactory(IEnumerable<IAiClientProvider> providers, CredentialResolverService credentialResolver)
         : this(providers, credentialResolver, new SeededProviderTypeCatalog())
@@ -30,7 +28,7 @@ internal sealed class KautukaAiClientFactory(
         .ToDictionary(provider => ProviderTypeCatalogSettings.NormalizeType(provider.ProviderType), provider => provider, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Sync path — extracts api_key directly from settings JSON (validation/test flow).
+    /// Sync path â€” extracts api_key directly from settings JSON (validation/test flow).
     /// </summary>
     public IChatClient? TryCreate(string providerType, JsonObject settings, string modelName)
     {
@@ -50,7 +48,7 @@ internal sealed class KautukaAiClientFactory(
     }
 
     /// <summary>
-    /// Async path — resolves api_key from CredentialsHost using the provider ID.
+    /// Async path â€” resolves api_key from CredentialsHost using the provider ID.
     /// Use this for all runtime paths (agent execution, probing, introspection).
     /// </summary>
     public async Task<IChatClient?> TryCreateAsync(
@@ -71,7 +69,7 @@ internal sealed class KautukaAiClientFactory(
         JsonObject settingsJson = ToSettingsObject(provider);
         string? apiKey = await ResolveApiKeyAsync(provider.Id, providerType, settingsJson, ct).ConfigureAwait(false);
 
-        return CreateRuntimeClient(strategy, providerType, settingsJson, modelName, apiKey);
+        return CreateRuntimeClient(strategy, settingsJson, modelName, apiKey);
     }
 
     public async Task<IEmbeddingGenerator<string, Embedding<float>>?> TryCreateEmbeddingGeneratorAsync(
@@ -95,7 +93,7 @@ internal sealed class KautukaAiClientFactory(
         JsonObject settingsJson = ToSettingsObject(provider);
         string? apiKey = await ResolveApiKeyAsync(provider.Id, providerType, settingsJson, ct).ConfigureAwait(false);
 
-        return CreateRuntimeEmbeddingGenerator(strategy, providerType, settingsJson, modelName, apiKey);
+        return CreateRuntimeEmbeddingGenerator(strategy, settingsJson, modelName, apiKey);
     }
 
     public async Task<IEmbeddingGenerator<string, Embedding<float>>?> TryCreateEmbeddingGeneratorAsync(
@@ -118,7 +116,7 @@ internal sealed class KautukaAiClientFactory(
 
         string? apiKey = await ResolveApiKeyAsync(providerId, normalizedProviderType, settings, ct).ConfigureAwait(false);
 
-        return CreateRuntimeEmbeddingGenerator(strategy, normalizedProviderType, settings, modelName, apiKey);
+        return CreateRuntimeEmbeddingGenerator(strategy, settings, modelName, apiKey);
     }
 
     /// <summary>
@@ -144,36 +142,23 @@ internal sealed class KautukaAiClientFactory(
         // Inline api_key (e.g. from test/validation request) takes priority over CredentialsHost.
         string? apiKey = await ResolveApiKeyAsync(providerId, normalizedProviderType, settings, ct).ConfigureAwait(false);
 
-        return CreateRuntimeClient(strategy, normalizedProviderType, settings, modelName, apiKey);
+        return CreateRuntimeClient(strategy, settings, modelName, apiKey);
     }
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope", Justification = "The returned chat client owns the provider client.")]
-    private IChatClient? CreateRuntimeClient(IAiClientProvider strategy, string providerType, JsonObject settings,
+    private static IChatClient? CreateRuntimeClient(IAiClientProvider strategy, JsonObject settings,
         string modelName, string? apiKey)
     {
         IChatClient? client = strategy.TryCreate(settings, modelName, apiKey);
-        return client is not null && approval is { Enabled: true } && ResolveModelDestination(providerType, settings) is { } destination
-            ? new ApprovalAwareModelChatClient(client, approval, destination)
-            : client;
+        return client;
     }
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope", Justification = "The returned embedding generator owns the provider generator.")]
-    private IEmbeddingGenerator<string, Embedding<float>>? CreateRuntimeEmbeddingGenerator(
-        IAiClientProvider strategy, string providerType, JsonObject settings, string modelName, string? apiKey)
+    private static IEmbeddingGenerator<string, Embedding<float>>? CreateRuntimeEmbeddingGenerator(
+        IAiClientProvider strategy, JsonObject settings, string modelName, string? apiKey)
     {
         IEmbeddingGenerator<string, Embedding<float>>? generator = strategy.TryCreateEmbeddingGenerator(settings, modelName, apiKey);
-        return generator is not null && approval is { Enabled: true } && ResolveModelDestination(providerType, settings) is { } destination
-            ? new ApprovalAwareEmbeddingGenerator(generator, approval, destination)
-            : generator;
-    }
-
-    private static Uri? ResolveModelDestination(string providerType, JsonObject settings)
-    {
-        string? endpoint = AiProviderSettings.GetString(settings, "base_url");
-        if (providerType == "gemini")
-            endpoint = GoogleAiClientProvider.ResolveNativeBaseUrl(endpoint) ?? "https://generativelanguage.googleapis.com";
-
-        return Uri.TryCreate(endpoint, UriKind.Absolute, out Uri? destination) ? destination : null;
+        return generator;
     }
 
     public async Task<IReadOnlyList<DiscoveredModelDefinition>> DiscoverModelsAsync(

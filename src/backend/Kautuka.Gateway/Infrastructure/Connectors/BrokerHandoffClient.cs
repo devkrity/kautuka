@@ -3,7 +3,6 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 
 using Kautuka.Gateway.Domain.Connectors;
-using Kautuka.Gateway.Infrastructure.Egress;
 
 namespace Kautuka.Gateway.Infrastructure.Connectors;
 
@@ -33,8 +32,7 @@ internal sealed class BrokerMailRequestException : HttpRequestException
 internal sealed class BrokerHandoffClient(
     BrokerInstallationIdentityProvider identities,
     BrokerInstallationRegistration registration,
-    HttpClient client,
-    GatewayOutboundApproval? approval = null) : IDisposable
+    HttpClient client) : IDisposable
 {
     private async Task<BrokerInstallationIdentity> GetIdentityAsync(Uri origin, CancellationToken ct)
     {
@@ -241,7 +239,6 @@ internal sealed class BrokerHandoffClient(
             request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
             request.Headers.Add("Kautuka-Installation-Proof", ConnectorDpop.CreateInstallationProof(key.PrivateJwk, "POST", url, body));
             if (mailKey is not null) request.Headers.Add("DPoP", ConnectorDpop.CreateProof(mailKey, nonce, authorizationCode: null, "POST", url));
-            using IDisposable? providerScope = approval?.BeginProviderRequest();
             return await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         }
         async Task<HttpResponseMessage> SendWithNonceAsync(BrokerInstallationIdentity key)

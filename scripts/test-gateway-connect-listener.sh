@@ -67,7 +67,7 @@ cat > "$temp/Corefile" <<'COREFILE'
 .:10053 {
     bind 127.0.0.1
     hosts {
-        93.184.216.34 fixture-public.test
+        93.184.216.34 fixture-public.test fixture-retry.test
         192.168.88.2 fixture-lan.test fixture-public-to-lan.test
         127.0.0.1 fixture-lan-to-loopback.test
     }
@@ -156,7 +156,7 @@ request() {
         auth=(--proxy-cert "$temp/certs/$certificate.crt" --proxy-key "$temp/certs/$certificate.key")
     fi
     in_fixture_net curl "${proxy[@]}" "${auth[@]}" "$@" \
-        --output "$temp/body" --write-out '%{http_connect} %{http_code}' "http://$host:18080/"
+        --output "$temp/body" --write-out '%{http_connect} %{http_code}' "http://$host:18080/${request_path:-}"
 }
 expect_tunnel() {
     local host="$1" expected_address="$2" expected_source="$3"
@@ -189,6 +189,23 @@ expect_denied() {
         return 1
     }
 }
+
+request_path=explicit-retry expect_denied fixture-retry.test gateway 403 --max-time 3
+request_path=explicit-retry expect_denied fixture-retry.test gateway 403 --max-time 3
+retry_hits() { grep -c 'GET /explicit-retry HTTP/' "$temp/origin.log" || true; }
+[[ "$(retry_hits)" == 0 ]]
+touch "$temp/authorization/approve-explicit-retry"
+for _ in {1..100}; do
+    [[ -f "$temp/authorization/explicit-retry-approved" ]] && break
+    kill -0 "$auth_pid" 2>/dev/null || { cat "$temp/auth.log" >&2; exit 1; }
+    sleep 0.1
+done
+[[ -f "$temp/authorization/explicit-retry-approved" ]] || { cat "$temp/auth.log" >&2; exit 1; }
+sleep 1
+[[ "$(retry_hits)" == 0 ]]
+request_path=explicit-retry expect_tunnel fixture-retry.test 93.184.216.34 93.184.216.34
+[[ "$(retry_hits)" == 1 ]]
+echo 'A short-deadline CONNECT call ended with denial. Approval sent zero requests, and an explicit retry sent one.'
 
 expect_tunnel fixture-public.test 93.184.216.34 93.184.216.34
 expect_tunnel fixture-public.test 93.184.216.34 93.184.216.34 --proxy-header 'x-kautuka-public-only: true'

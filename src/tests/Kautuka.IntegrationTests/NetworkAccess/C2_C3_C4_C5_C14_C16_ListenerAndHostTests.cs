@@ -117,15 +117,14 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
     }
 
     [Fact]
-    public async Task ConnectAuthorizationResumesTheSameGrpcCallAfterApproval()
+    public async Task ConnectAuthorizationDeniesImmediatelyAndFreshCallSucceedsAfterApproval()
     {
         Assert.SkipUnless(OperatingSystem.IsLinux(), "The appliance authorization socket uses Linux Unix domain sockets.");
         string directory = Directory.CreateTempSubdirectory("nac-hold-").FullName;
         try
         {
             using var policy = new NetworkAccessPolicyStore(Path.Combine(directory, "policy.json"), []);
-            var controller = new NacController(policy, new WorkloadRegistry(), isContainerAuthorizationGateOpen: () => true,
-                approvalHold: TimeSpan.FromSeconds(8));
+            var controller = new NacController(policy, new WorkloadRegistry(), isContainerAuthorizationGateOpen: () => true);
             string socket = Path.Combine(directory, "auth.sock");
             await using var host = new EnvoyAuthorizationHost(controller, new EnvoyAuthorizationHostOptions
             {
@@ -137,7 +136,7 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
             await host.StartAsync(token);
             using GrpcChannel channel = CreateUdsChannel(socket);
             var client = new EnvoyAuth.AuthorizationClient(channel);
-            using AsyncUnaryCall<CheckResponse> call = client.CheckAsync(new CheckRequest
+            var check = new CheckRequest
             {
                 Attributes = new AttributeContext
                 {
@@ -153,16 +152,19 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
                         }
                     },
                 },
-            }, deadline: DateTime.UtcNow.AddSeconds(10), cancellationToken: token);
+            };
+            using AsyncUnaryCall<CheckResponse> call = client.CheckAsync(check, deadline: DateTime.UtcNow.AddSeconds(5), cancellationToken: token);
 
             var admin = new NetworkAccessActor("admin", IsAdmin: true);
             DateTimeOffset deadline = DateTimeOffset.UtcNow.AddSeconds(5);
             while (policy.ListRequests(admin).Requests.Count == 0 && DateTimeOffset.UtcNow < deadline)
                 await Task.Delay(10, token);
             NetworkAccessRequest request = Assert.Single(policy.ListRequests(admin).Requests).Request;
-            Assert.False(call.ResponseAsync.IsCompleted);
+            CheckResponse denied = await call.ResponseAsync.WaitAsync(TimeSpan.FromSeconds(3), token);
+            Assert.Equal(7, denied.Status.Code);
             policy.DecideRequest(admin, request.Id, true, "agent", policy.Revision);
-            CheckResponse response = await call.ResponseAsync;
+            using AsyncUnaryCall<CheckResponse> retry = client.CheckAsync(check, deadline: DateTime.UtcNow.AddSeconds(5), cancellationToken: token);
+            CheckResponse response = await retry.ResponseAsync;
             Assert.Equal(0, response.Status.Code);
             Assert.Equal("public", response.DynamicMetadata.Fields["egress_class"].StringValue);
         }

@@ -776,7 +776,7 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
               ) : (
                 <FlaskConical className="h-3.5 w-3.5" />
               )}
-              {testing ? 'Testing…' : 'Test connection'}
+              {testing ? 'Testing…' : testResult?.success === false ? 'Try again' : 'Test connection'}
             </Button>
             <div className="flex gap-2">
               <Button type="button" variant="outline" size="sm" onClick={onClose}>

@@ -364,6 +364,8 @@ namespace Kautuka.Gateway.Serialization;
 [JsonSerializable(typeof(RequestDecisionDto))]
 [JsonSerializable(typeof(RequestDecisionResponseDto))]
 [JsonSerializable(typeof(CreateOrUpdateRuleDto))]
+[JsonSerializable(typeof(ServicePermissionDto))]
+[JsonSerializable(typeof(ServicePermissionResultDto))]
 [JsonSerializable(typeof(NetworkAccessActivityDto))]
 [JsonSerializable(typeof(NetworkAccessActivityDto[]))]
 [JsonSerializable(typeof(NetworkActivityResponseDto))]

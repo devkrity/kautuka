@@ -10,8 +10,7 @@ public sealed record OutboundTarget(
     string? AgentId = null,
     string? ConnectorId = null,
     string? CorrelationId = null,
-    string ExecutionContext = "app",
-    bool SkipApprovalHold = false)
+    string ExecutionContext = "app")
 {
     public OutboundTarget MergeContext(NetworkAccessScope? scope)
     {

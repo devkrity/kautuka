@@ -26,10 +26,12 @@ public sealed partial class WorkspaceGrpcService
     private static NetworkAccessApprovalLimitsMessage ToLimitsMessage(NetworkAccessApprovalLimits limits)
         => new() { Global = limits.Global, PerUser = limits.PerUser };
 
-    public override Task<NetworkAccessProviderTestResponse> BeginProviderTest(NetworkAccessProviderTestRequest request, ServerCallContext context)
-        => ExecuteNacRpc(() => new NetworkAccessProviderTestResponse
+    public override Task<NetworkAccessProviderTestResponse> PrepareProviderTest(NetworkAccessProviderTestRequest request, ServerCallContext context)
+        => ExecuteNacRpc(() =>
         {
-            Token = Nac.BeginProviderTest(ToActor(request.Actor), request.Host, request.Port, request.AllowLan),
+            var (status, reason, token) = Nac.PrepareProviderTest(ToActor(request.Actor), request.Host, request.Port,
+                request.AllowLan, request.Confirmed);
+            return new NetworkAccessProviderTestResponse { Status = status, Reason = reason, Token = token };
         });
 
     public override Task<WorkspaceBoolResponse> EndProviderTest(NetworkAccessProviderTestEndRequest request, ServerCallContext context)
@@ -85,17 +87,9 @@ public sealed partial class WorkspaceGrpcService
                 string.IsNullOrWhiteSpace(request.CorrelationId) ? null : request.CorrelationId,
                 origin);
         }).ConfigureAwait(false);
-        bool applianceGateway = input.Origin == "gateway" && Nac.ApprovalHold > TimeSpan.Zero;
+        bool applianceGateway = input.Origin == "gateway" && Nac.ApplianceMode;
         NetworkAccessDecisionResult decision = await ExecuteNacRpc(() => applianceGateway
             ? Nac.EvaluateGatewayConnect(input, publicOnly: false) : Nac.EvaluateOutboundCheck(input)).ConfigureAwait(false);
-        if (decision.Reason == "no_rule" && applianceGateway && !request.SkipApprovalHold
-            && context.Deadline - DateTime.UtcNow > Nac.ApprovalHold
-            && input.Purpose is not ("provider-test" or "probe" or "save-discovery"))
-        {
-            await context.WriteResponseHeadersAsync(new Metadata { { "kautuka-approval-pending", "1" } }).ConfigureAwait(false);
-            decision = await Nac.RecheckAfterApprovalAsync(decision, input.UserId,
-                () => Nac.EvaluateGatewayConnect(input, publicOnly: false, recordPendingRequest: false), context.CancellationToken).ConfigureAwait(false);
-        }
         return new NetworkAccessCheckOutboundResponse
         {
             Allowed = decision.Allowed,
@@ -174,7 +168,7 @@ public sealed partial class WorkspaceGrpcService
 
         return ExecuteNacRpc(() =>
         {
-            (long revision, IReadOnlyList<NetworkAccessRuleView> rules) = Nac.PolicyStore.ListRules(
+            (long revision, IReadOnlyList<NetworkAccessRuleView> rules, IReadOnlyList<ServicePermissionView> services) = Nac.PolicyStore.ListRulesWithServices(
                 ToActor(request.Actor),
                 string.IsNullOrWhiteSpace(request.FilterUserId) ? null : request.FilterUserId);
 
@@ -183,6 +177,13 @@ public sealed partial class WorkspaceGrpcService
                 Revision = revision,
             };
             response.Rules.AddRange(rules.Select(ToMessage));
+            response.Services.AddRange(services.Select(service => new NetworkAccessServicePermissionView
+            {
+                ServiceId = service.ServiceId,
+                Total = service.Total,
+                Granted = service.Granted,
+                Effective = service.Effective,
+            }));
             return response;
         });
     }
@@ -233,6 +234,22 @@ public sealed partial class WorkspaceGrpcService
                 Revision = revision,
                 Rule = ToMessage(rule),
             };
+        });
+    }
+
+    public override Task<NetworkAccessProviderPermissionResponse> SetServicePermission(
+        NetworkAccessServicePermissionRequest request, ServerCallContext context)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(context);
+        using IDisposable scope = BeginGrpcScope(context, "SetServicePermission");
+        return ExecuteNacRpc(() =>
+        {
+            if (!request.HasAllowed || !request.HasExpectedRevision)
+                throw new ArgumentException("Service state and expected revision are required.");
+            (long revision, string status) = Nac.PolicyStore.SetServicePermission(
+                ToActor(request.Actor), request.ServiceId, request.Allowed, request.ExpectedRevision);
+            return new NetworkAccessProviderPermissionResponse { Revision = revision, Status = status };
         });
     }
 

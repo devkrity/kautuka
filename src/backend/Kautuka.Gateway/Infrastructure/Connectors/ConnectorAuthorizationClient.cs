@@ -20,7 +20,6 @@ internal sealed class ConnectorAuthorizationClient : IDisposable
 {
     private readonly HttpClient http;
     private readonly HttpMessageHandler? ownedHandler;
-    private readonly GatewayOutboundApproval? approval;
 
     public ConnectorAuthorizationClient(HttpMessageHandler handler)
         : this(checker: null, handler)
@@ -28,9 +27,8 @@ internal sealed class ConnectorAuthorizationClient : IDisposable
     }
 
     public ConnectorAuthorizationClient(INetworkAccessChecker? checker = null, HttpMessageHandler? handler = null,
-        GatewayOutboundHttpTransport? outbound = null, GatewayOutboundApproval? approval = null)
+        GatewayOutboundHttpTransport? outbound = null)
     {
-        this.approval = approval;
         if (handler is null)
         {
 #pragma warning disable CA2000 // Disposed by ownedHandler in ConnectorAuthorizationClient.Dispose
@@ -54,9 +52,6 @@ internal sealed class ConnectorAuthorizationClient : IDisposable
         http.DefaultRequestHeaders.UserAgent.ParseAdd("KautukaConnectorAuth/0.1");
         http.DefaultRequestHeaders.Accept.ParseAdd("application/json");
     }
-
-    internal ValueTask WaitForApprovalAsync(string url, CancellationToken cancellationToken)
-        => approval?.WaitAsync(new Uri(url), cancellationToken) ?? ValueTask.CompletedTask;
 
     public Task<ConnectorTokenResult> ExchangeCodeAsync(
         ConnectorAuthProfile profile,
@@ -139,7 +134,6 @@ internal sealed class ConnectorAuthorizationClient : IDisposable
             ["refresh_token"] = refreshToken,
         });
         _ = request.Headers.TryAddWithoutValidation("DPoP", dpopProof);
-        using IDisposable? providerScope = approval?.BeginProviderRequest();
         using HttpResponseMessage response = await http.SendAsync(request, cancellationToken).ConfigureAwait(false);
         string body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
         return new ConnectorDpopRevokeResult(
@@ -168,7 +162,6 @@ internal sealed class ConnectorAuthorizationClient : IDisposable
             _ = request.Headers.TryAddWithoutValidation("DPoP", dpopProof);
         }
 
-        using IDisposable? providerScope = approval?.BeginProviderRequest();
         using HttpResponseMessage response = await http.SendAsync(request, cancellationToken).ConfigureAwait(false);
         string body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
         string? nonce = ReadNonce(response);

@@ -85,7 +85,7 @@ public sealed partial class EnvoyAuthorizationService : Authorization.Authorizat
             AttributeContext? attributes = request.Attributes;
             if (attributes is not null && (attributes.Request is not null || attributes.ContextExtensions.ContainsKey(GatewayConnectRouteKey)))
             {
-                return await CheckGatewayConnectAsync(attributes, context.CancellationToken).ConfigureAwait(false);
+                return CheckGatewayConnect(attributes, context.CancellationToken);
             }
 
             SocketAddress? source = attributes?.Source?.Address?.SocketAddress;
@@ -174,11 +174,6 @@ public sealed partial class EnvoyAuthorizationService : Authorization.Authorizat
                     Interlocked.Decrement(ref packageVerificationWaiters);
                 }
             }
-
-            if (decision.PendingSource is { } originalSource)
-                decision = await controller.RecheckAfterApprovalAsync(decision, originalSource.UserId ?? "system",
-                    () => controller.EvaluateContainerConnection(source.Address, destination.Address, (int)destination.PortValue,
-                        isTls, sni, expectedSource: originalSource, recordPendingRequest: false), context.CancellationToken).ConfigureAwait(false);
 
             if (!decision.Allowed)
             {

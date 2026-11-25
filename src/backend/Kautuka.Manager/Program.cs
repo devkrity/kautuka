@@ -102,13 +102,6 @@ string? telemetryAuthorization = null;
 bool applianceEnabled = builder.Configuration.GetValue<bool>("Kautuka:Appliance:Enabled");
 int? egressInspectionTimeoutSeconds = builder.Configuration.GetValue<int?>("Kautuka:NetworkAccess:EgressInspectionTimeoutSeconds")
     ?? (applianceEnabled ? 30 : null);
-const string approvalHoldSection = "Kautuka:NetworkAccess:ApprovalHold:";
-TimeSpan approvalHold = applianceEnabled
-    ? builder.Configuration.GetValue(approvalHoldSection + "Duration",
-        Kautuka.NetworkAccessController.NetworkAccessController.DefaultApplianceApprovalHold)
-    : TimeSpan.Zero;
-if (applianceEnabled && approvalHold <= TimeSpan.Zero)
-    throw new InvalidOperationException("The appliance approval hold duration must be positive.");
 if (verifyAppliance && !applianceEnabled)
     throw new InvalidOperationException("Verification requires appliance service supervision.");
 
@@ -170,7 +163,7 @@ if (applianceEnabled)
         verificationMode: verifyAppliance,
         verificationSidecars: verifyAppliance ? sp.GetRequiredService<WorkspaceSidecarSupervisor>() : null,
         publishedWebPort: publishedWebPort, recoveryPage: new ApplianceRecoveryPage(publishedWebPort),
-        approvalHold: approvalHold, confineManagerPeers: confineManagerPeers));
+        confineManagerPeers: confineManagerPeers));
     AddApplianceVerificationService(sp => sp.GetRequiredService<ApplianceServiceSupervisor>());
     builder.Services.AddSingleton<Func<(string ReleaseId, bool VerificationMode, bool Ready)>>(sp =>
     {
@@ -265,15 +258,12 @@ builder.Services.AddSingleton(sp =>
         imageArchives: sp.GetRequiredService<PodmanImageArchiveStore>(),
         gatewayConnectEnvoyDirectory: gatewayConnectEnvoyDirectory,
         telemetryAuthorization: telemetryAuthorization,
-        approvalHold: approvalHold,
         inspectionTimeoutSeconds: egressInspectionTimeoutSeconds));
 AddApplianceVerificationService(sp => sp.GetRequiredService<EgressTopologyManager>());
 builder.Services.AddSingleton<IHostedService, DevelopmentNacStartupGuard>();
 builder.Services.AddSingleton<IWorkloadStartupState>(sp => sp.GetRequiredService<EgressTopologyManager>());
 builder.Services.AddSingleton<WorkloadLaunchGate>();
-builder.Services.AddManagerNetworkAccessController(approvalHold,
-    builder.Configuration.GetValue(approvalHoldSection + "MaxHeldCalls", Kautuka.NetworkAccessController.NetworkAccessController.DefaultHeldCallLimit),
-    builder.Configuration.GetValue(approvalHoldSection + "MaxHeldCallsPerUser", Kautuka.NetworkAccessController.NetworkAccessController.DefaultHeldCallLimitPerUser));
+builder.Services.AddManagerNetworkAccessController(applianceEnabled);
 
 if (OperatingSystem.IsLinux())
 {

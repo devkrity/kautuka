@@ -22,7 +22,7 @@ internal sealed partial class McpAgentToolProvider
         CancellationToken ct)
     {
         using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        if (serverDef.Transport == McpTransport.Http) timeout.CancelAfter(mcpHttpClientFactory.ApprovalHold + remoteDiscoveryTimeout);
+        if (serverDef.Transport == McpTransport.Http) timeout.CancelAfter(remoteDiscoveryTimeout);
         try
         {
             IReadOnlyList<AgentToolSurfaceEntry> entries = await ListSurfaceEntriesAsync(serverDef, context, timeout).WaitAsync(timeout.Token).ConfigureAwait(false);

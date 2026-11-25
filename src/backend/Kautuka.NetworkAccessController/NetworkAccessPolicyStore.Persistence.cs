@@ -16,7 +16,6 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
 
     private readonly object gate = new();
     private readonly object diskWriteLock = new();
-    private TaskCompletionSource? policyChanged;
     private long lastRequestActivityWatermark = -1;
     private readonly string path;
     private readonly Action<string> syncDirectory;
@@ -357,9 +356,6 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
 
             state = next;
             inMemoryMutationSeq = seq;
-            TaskCompletionSource? previous = policyChanged;
-            policyChanged = null;
-            previous?.TrySetResult();
         }
     }
 

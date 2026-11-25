@@ -2,9 +2,6 @@ using System.Net;
 using System.Text;
 using System.Text.Json.Nodes;
 
-using System.Runtime.CompilerServices;
-
-using Kautuka.Gateway.Infrastructure.Egress;
 using Kautuka.NetworkAccess.Client;
 
 using Microsoft.Extensions.AI;
@@ -14,70 +11,37 @@ namespace Kautuka.IntegrationTests;
 public sealed class ProviderModelTransportRoutingTests
 {
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task RuntimeModelWaitsAndKeepsProbesAndBackgroundWorkImmediate(bool streaming)
+    [InlineData("chat")]
+    [InlineData("stream")]
+    [InlineData("embedding")]
+    public async Task RuntimeModelSendsOnlyAfterAnExplicitRetry(string operation)
     {
-        var checker = new HoldingModelChecker();
-        using var provider = new RecordingModelClient();
-        using var client = new ApprovalAwareModelChatClient(provider, new GatewayOutboundApproval(checker, enabled: true),
-            new Uri("https://model.example.test"));
-        CancellationToken token = TestContext.Current.CancellationToken;
+        var checker = new RetryNetworkChecker();
+        using var handler = new RecordingHandler();
+        var provider = new OllamaAiClientProvider(defaultBaseUrl: "http://model.example.test",
+            transportFactory: _ => new NetworkAccessCheckHandler(checker, handler));
+        var settings = new JsonObject();
         using IDisposable scope = NetworkAccessContext.BeginScope("user-a", "agent-a", purpose: "agent-run");
+        CancellationToken token = TestContext.Current.CancellationToken;
+        using var chat = provider.TryCreate(settings, "model", null)!;
+        using var embeddings = provider.TryCreateEmbeddingGenerator(settings, "model", null)!;
 
-        Task pending = SendAsync();
-        Assert.False(pending.IsCompleted);
-        Assert.Equal(0, provider.Calls);
-        Assert.Equal("agent-a", checker.Target?.AgentId);
-
-        using (NetworkAccessContext.BeginScope("user-a", "agent-a", purpose: "ai-probe"))
-            await SendAsync().WaitAsync(TimeSpan.FromSeconds(5), token);
-        using (NetworkAccessContext.BeginScope("user-a", "agent-a", purpose: "memory-extraction", skipApprovalHold: true))
-            await SendAsync().WaitAsync(TimeSpan.FromSeconds(5), token);
-        Assert.Equal(2, provider.Calls);
-        Assert.False(pending.IsCompleted);
-
-        checker.Approved.SetResult(NetworkAccessCheckResult.CreateAllowed("rule_agent"));
-        await pending.WaitAsync(TimeSpan.FromSeconds(5), token);
-        Assert.Equal(3, provider.Calls);
-        Assert.False(NetworkAccessContext.Current!.SkipApprovalHold);
+        await Assert.ThrowsAsync<NetworkAccessDeniedException>(SendAsync);
+        Assert.Equal("agent-a", Assert.Single(checker.Targets).AgentId);
+        checker.Allowed = true;
+        Assert.Equal(0, handler.RequestCount);
+        await SendAsync();
+        Assert.Equal(1, handler.RequestCount);
 
         async Task SendAsync()
         {
-            if (streaming)
+            if (operation == "embedding") await embeddings.GenerateAsync(["hello"], cancellationToken: token);
+            else if (operation == "stream")
             {
-                await foreach (ChatResponseUpdate _ in client.GetStreamingResponseAsync([], cancellationToken: token)) { }
+                await foreach (var _ in chat.GetStreamingResponseAsync([new(ChatRole.User, "hello")], cancellationToken: token)) { }
             }
-            else
-            {
-                await client.GetResponseAsync([], cancellationToken: token);
-            }
+            else await chat.GetResponseAsync([new(ChatRole.User, "hello")], cancellationToken: token);
         }
-    }
-
-    [Fact]
-    public async Task RuntimeEmbeddingCancellationDoesNotSendAndApprovalResumesTheOriginalRequest()
-    {
-        var checker = new HoldingModelChecker();
-        using var provider = new RecordingEmbeddingGenerator();
-        using var generator = new ApprovalAwareEmbeddingGenerator(provider, new GatewayOutboundApproval(checker, enabled: true),
-            new Uri("https://model.example.test"));
-        CancellationToken token = TestContext.Current.CancellationToken;
-        using IDisposable scope = NetworkAccessContext.BeginScope("user-a", "agent-a", purpose: "agent-run");
-        using var cancelled = CancellationTokenSource.CreateLinkedTokenSource(token);
-
-        Task<GeneratedEmbeddings<Embedding<float>>> abandoned = generator.GenerateAsync(["cancelled"], cancellationToken: cancelled.Token);
-        await cancelled.CancelAsync();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await abandoned);
-        Assert.Equal(0, provider.Calls);
-
-        Task<GeneratedEmbeddings<Embedding<float>>> waiting = generator.GenerateAsync(["original"], cancellationToken: token);
-        Assert.False(waiting.IsCompleted);
-        Assert.Equal(0, provider.Calls);
-        checker.Approved.SetResult(NetworkAccessCheckResult.CreateAllowed("rule_agent"));
-
-        Assert.Single(await waiting.WaitAsync(TimeSpan.FromSeconds(5), token));
-        Assert.Equal(1, provider.Calls);
     }
 
     [Fact]
@@ -125,9 +89,15 @@ public sealed class ProviderModelTransportRoutingTests
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             RequestCount++;
+            string body = request.RequestUri?.AbsolutePath switch
+            {
+                "/api/chat" => """{"model":"model","created_at":"2026-01-01T00:00:00Z","message":{"role":"assistant","content":"ready"},"done":true}""",
+                "/api/embed" => """{"model":"model","embeddings":[[1.0]]}""",
+                _ => """{"data":[],"models":[]}""",
+            };
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StringContent("""{"data":[],"models":[]}""", Encoding.UTF8, "application/json"),
+                Content = new StringContent(body, Encoding.UTF8, "application/json"),
             });
         }
         protected override void Dispose(bool disposing)
@@ -137,59 +107,17 @@ public sealed class ProviderModelTransportRoutingTests
         }
     }
 
-    private sealed class HoldingModelChecker : INetworkAccessChecker
+}
+
+internal sealed class RetryNetworkChecker : INetworkAccessChecker
+{
+    public bool Allowed { get; set; }
+    public List<OutboundTarget> Targets { get; } = [];
+
+    public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)
     {
-        public TaskCompletionSource<NetworkAccessCheckResult> Approved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public OutboundTarget? Target { get; private set; }
-
-        public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)
-        {
-            Assert.Equal("model.example.test", target.Host);
-            Assert.Equal("agent-run", target.Purpose);
-            Target = target;
-            return Approved.Task.WaitAsync(cancellationToken);
-        }
-    }
-
-    private sealed class RecordingModelClient : IChatClient
-    {
-        public int Calls { get; private set; }
-
-        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> chatMessages,
-            ChatOptions? options = null, CancellationToken cancellationToken = default)
-        {
-            Assert.True(NetworkAccessContext.Current!.SkipApprovalHold);
-            Calls++;
-            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "ready")));
-        }
-
-        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> chatMessages,
-            ChatOptions? options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
-        {
-            await GetResponseAsync(chatMessages, options, cancellationToken);
-            yield return new ChatResponseUpdate(ChatRole.Assistant, "ready");
-        }
-
-        public object? GetService(Type serviceType, object? serviceKey = null) => null;
-
-        public void Dispose() { }
-    }
-
-    private sealed class RecordingEmbeddingGenerator : IEmbeddingGenerator<string, Embedding<float>>
-    {
-        public int Calls { get; private set; }
-
-        public Task<GeneratedEmbeddings<Embedding<float>>> GenerateAsync(IEnumerable<string> values,
-            EmbeddingGenerationOptions? options = null, CancellationToken cancellationToken = default)
-        {
-            Assert.Equal("original", Assert.Single(values));
-            Assert.True(NetworkAccessContext.Current!.SkipApprovalHold);
-            Calls++;
-            return Task.FromResult(new GeneratedEmbeddings<Embedding<float>>([new Embedding<float>(new float[] { 1 })]));
-        }
-
-        public object? GetService(Type serviceType, object? serviceKey = null) => null;
-
-        public void Dispose() { }
+        Targets.Add(target);
+        return Task.FromResult(Allowed ? NetworkAccessCheckResult.CreateAllowed("rule_user")
+            : NetworkAccessCheckResult.CreateDenied("no_rule", "pending-request"));
     }
 }

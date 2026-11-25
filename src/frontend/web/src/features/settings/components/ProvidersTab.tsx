@@ -90,7 +90,7 @@ export function ProvidersTab() {
                 form={form}
                 saving={saving}
                 testing={testing}
-                pendingNetworkTarget={pendingNetworkApproval?.target ?? null}
+                pendingNetworkTarget={pendingNetworkApproval}
                 onChange={setForm}
                 onCancel={cancelEdit}
                 onTestConnection={() => {

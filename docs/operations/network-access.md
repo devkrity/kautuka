@@ -30,9 +30,9 @@ Administrators can also set an address that Slack and Telegram users can reach. 
 
 Slack and Telegram start paused. Administrators can enable each channel in Settings → Advanced → Network access. The same channel permission controls ChannelHost's application checks and Envoy's admission of new connections to Telegram's API or Slack's domain and subdomains. It grants no permissions to agents or connectors. Pausing keeps saved account settings and blocks new connections. Pausing Slack also closes an established Slack connection on its next permission check.
 
-The first-run wizard offers these controls in optional setup. In-app update downloads start paused too. An administrator can enable UpdateService's scoped rules for `api.github.com`, `github.com`, and `release-assets.githubusercontent.com` from the same controls. UpdateService still requires verified container identity, TLS on port 443 and Envoy's public route.
+The first-run wizard offers these controls in optional setup. In-app update downloads start paused too. An administrator can enable UpdateService's scoped rules for `api.github.com`, `github.com`, and `release-assets.githubusercontent.com` from the same controls. Manager saves each service switch as one change. An overriding policy block stays in effect and the switch shows that the service is restricted. UpdateService still requires verified container identity, TLS on port 443 and Envoy's public route.
 
-On the appliance, an outbound call with a new network access request can wait up to ten minutes by default. Approval checks the original caller and destination again before traffic proceeds. A rejection, expired wait, cancelled call or changed workload identity leaves the original operation blocked. The defaults allow 64 waiting calls across the appliance, eight per user and one per request. Temporary connector probes still return their request immediately. See the [installation guide](installation.md) for Manager's approval-hold settings.
+On the appliance, an outbound call that needs permission ends immediately. Network Access shows one pending request per caller scope and destination. A pending request expires 24 hours after the first attempt. A new attempt after expiration can create a fresh request.
 
 Hostname approvals start with the requested host. When the appliance's Public Suffix List identifies a base domain, the card can approve that domain and its subdomains. The selected user, helper or connector scope and port still apply. IP addresses, shared public suffixes and temporary probes use exact approval. If the list is missing or invalid, existing domain allows match their exact hostname and domain blocks still cover subdomains.
 
@@ -213,6 +213,8 @@ The package proxy is not an npm/PyPI-only service. The pinned `git-pkgs/proxy` i
 ### 2.1 Approval Cards
 
 Unapproved network connections produce requests for the requesting user and agent or connector. A user with permission to manage their own network access can approve or block their requests; an administrator can decide requests for other users. A rule can apply to the platform, a user, a user and agent, or a user and connector. Only administrators can create platform rules. Explicit blocks win across all applicable scopes. See [Network access matching](network-access-matching.md) for the matching rules and examples.
+
+The original action ends when a destination needs approval. **Allow** saves the permission and sends no traffic to the destination. Return to the original action and select **Try again**, or start it again from where you were working. The new attempt checks the current policy.
 
 A connector save performs discovery with the signing-in user's identity and no agent. Disabling an existing connector skips discovery. When discovery creates a network approval request, the connector can be saved with its tool list still unknown. After approval, Test connection can retry discovery. Test connection itself still uses a temporary probe; its temporary decisions end with the probe.
 
@@ -395,14 +397,15 @@ When container startup fails with exit code 126 or 1, check the `reason` field i
 ## 5. Outbound Redirect Policy (`v7-34`)
 - `NetworkAccessCheckHandler` enforces `AllowAutoRedirect = false` on inner `SocketsHttpHandler` / `HttpClientHandler` instances and Gateway/ChannelHost `ConfigureHttpClientDefaults`.
 - Any HTTP `3xx` `Location` target is also evaluated against `INetworkAccessChecker` and rejected with `NetworkAccessDeniedException` if unapproved rather than auto-followed silently.
-- Chat tool-failure fallback lookup (`ChatToolNetworkAccessHelper`) queries Manager `ListRequests` as the current non-admin user (`IsAdmin = false`) and matches pending requests owned by the same `(userId, agentId)`. When several requests match, it reports the one with the newest valid `LastSeenUtc`; that match alone does not prove that the current tool call caused the request.
+- Chat shows an approval link when the operation reports a structured network denial with a request ID. A generic connector error leaves the cause unspecified.
 
 ## 6. AI Provider Endpoints (v7-37)
-- There is no built-in localhost or Ollama exception. Gateway calls to a provider endpoint are denied until an admin grants a rule.
-- If the address is not already allowed, **Test connection** asks the administrator for temporary access to the provider's host and port. The allowance is limited to that test and ends when it finishes or after 30 seconds, whichever comes first; testing creates no persistent rule.
+
+- The same network policy covers cloud providers, localhost and Ollama.
+- When an administrator selects **Test connection**, Gateway resolves the host and port from the provider settings and asks Manager whether the current network policy permits the test. An existing permission lets the test proceed. A block stops it before Gateway contacts the provider.
+- When temporary permission is needed, the form shows the exact host and port. **Cancel** leaves the provider untouched. Confirming allows that administrator's test to contact that destination. Changing the host or port requires its own permission. The allowance lasts up to 30 seconds. Gateway releases it as soon as the test succeeds, fails, or is cancelled. Testing creates no persistent network rule.
 - Saving a provider with no matching permission asks the administrator to confirm a systemwide allow for the exact host and port. Loopback and private IPv4 addresses require a LAN grant. Manager checks the confirmation first and applies the allow after the provider and any credential are saved. It validates the policy revision again when applying the rule. If Network Access changes after the settings are saved, the response identifies the saved provider so you can retry the permission for the same provider.
 - A provider is published after its credential write is acknowledged. If an interrupted save leaves a credential under an unpublished ID, retry with a fresh provider ID. First-run setup prepares a fresh ID for the retry.
-- The temporary test uses the Manager outbound policy check with the test's identity; its completion operation removes the allowance. These changes have focused tests and have not yet been proven by a CI run.
 
 ## SELinux infrastructure config mounts
 

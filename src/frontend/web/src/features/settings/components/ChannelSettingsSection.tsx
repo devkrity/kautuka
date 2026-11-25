@@ -27,32 +27,32 @@ function serviceState(rules: NetworkAccessRuleDto[], targets: NetworkAccessRuleD
 
 export function ChannelSettingsSection({ onReviewReady }: { onReviewReady?: (ready: boolean) => void }) {
   const [rules, setRules] = useState<NetworkAccessRuleDto[] | null>(null);
+  const [revision, setRevision] = useState<number | null>(null);
+  const [services, setServices] = useState<NonNullable<NetworkRulesResponseDto['services']>>([]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const load = async () => {
     const response = await apiClient.get<NetworkRulesResponseDto>('/network-access/rules');
     setRules(response.data.rules);
+    setRevision(response.data.revision);
+    setServices(response.data.services ?? []);
     return response.data;
   };
   useEffect(() => { void load().catch(() => setMessage('Could not load service network settings.')); }, []);
   useEffect(() => {
     onReviewReady?.(rules !== null && !busy && groups.some(group =>
-      group.id !== 'model-providers' && serviceTargets(rules, group).length > 0));
-  }, [onReviewReady, rules, busy]);
+      group.id !== 'model-providers' && services.some(service => service.serviceId === group.id)));
+  }, [onReviewReady, rules, services, busy]);
 
-  async function setService(service: ServicePermission, targets: NetworkAccessRuleDto[], allow: boolean) {
+  async function setService(service: ServicePermission, allow: boolean) {
     setBusy(true); setMessage('');
     try {
-      for (const target of targets) {
-        const current = await load();
-        await apiClient.put('/network-access/rules', {
-          scopeKind: 'agent', userId: 'system', agentId: target.agentId, destination: target.destination,
-          destKind: 'host', port: target.port, allowed: allow, allowLan: false, expectedRevision: current.revision,
-        });
-      }
-      const updated = await load();
-      const result = serviceState(updated.rules, serviceTargets(updated.rules, service));
-      const applied = allow ? result.allowed === targets.length : result.granted === 0;
+      if (revision === null) throw new Error('Policy revision is unavailable.');
+      const result = await apiClient.put<{ revision: number; status: string }>('/network-access/services', {
+        serviceId: service.id, allowed: allow, expectedRevision: revision,
+      });
+      await load();
+      const applied = result.data.status === (allow ? 'allowed' : 'paused');
       if (service.id !== 'telegram' && service.id !== 'slack') {
         setMessage(applied
           ? `${service.label} ${allow ? 'enabled' : 'paused'}.`
@@ -61,7 +61,7 @@ export function ChannelSettingsSection({ onReviewReady }: { onReviewReady?: (rea
       }
       setMessage(allow
         ? applied ? 'Channel enabled.' : 'Another network rule is preventing this channel from being enabled.'
-        : applied ? 'Channel paused. Saved account settings are kept.' : 'The channel is only partly paused. Check the setting and try again.');
+        : applied ? 'Channel paused. Saved account settings are kept.' : 'Could not confirm the channel setting. Refresh and try again.');
     } catch {
       await load().catch(() => setRules(null));
       setMessage('Could not finish updating the permission. Check the current setting and try again.');
@@ -88,15 +88,15 @@ export function ChannelSettingsSection({ onReviewReady }: { onReviewReady?: (rea
           </ul>
         </div>;
       }
-      const state = serviceState(rules, targets);
-      const status = state.granted > state.allowed ? 'Blocked by another network rule'
-        : state.allowed === targets.length ? 'Allowed by this setting' : state.allowed > 0 ? 'Partially allowed' : 'Paused';
+      const state = services.find(item => item.serviceId === service.id);
+      const status = !state ? 'Status unavailable' : state.granted > state.effective ? 'Blocked by another network rule'
+        : state.effective === state.total ? 'Allowed by this setting' : state.effective > 0 ? 'Partially allowed' : 'Paused';
       return <div key={service.name} className="flex flex-wrap items-center justify-between gap-3">
         <div><span>{service.label}: {status}</span>
           <p className="text-xs text-muted-foreground break-all">{targets.map(rule => rule.destination).join(', ')}{service.id === 'slack' ? ' and Slack subdomains' : ''}</p></div>
         <div className="flex gap-2">
-          {state.granted < targets.length && <Button type="button" variant="outline" disabled={busy} onClick={() => void setService(service, targets, true)}>Enable {service.name}</Button>}
-          {state.granted > 0 && <Button type="button" variant="outline" disabled={busy} onClick={() => void setService(service, targets, false)}>Pause {service.name}</Button>}
+          {state && state.granted < state.total && <Button type="button" variant="outline" disabled={busy} onClick={() => void setService(service, true)}>Enable {service.name}</Button>}
+          {state && state.granted > 0 && <Button type="button" variant="outline" disabled={busy} onClick={() => void setService(service, false)}>Pause {service.name}</Button>}
         </div>
       </div>;
     })}

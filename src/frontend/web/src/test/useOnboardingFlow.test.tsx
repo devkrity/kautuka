@@ -30,24 +30,6 @@ const {
   createSessionMock: vi.fn(),
 }));
 
-const { checkRuleMock } = vi.hoisted(() => ({
-  checkRuleMock: vi.fn(),
-}));
-
-vi.mock('@/features/network-access/networkAccess', () => ({
-  resolveProviderNetworkTarget: (type: string, baseUrl?: string | null) => {
-    const raw = baseUrl || (type === 'ollama' ? 'http://localhost:11434' : 'https://generativelanguage.googleapis.com/');
-    const url = new URL(raw);
-    return {
-      host: url.hostname,
-      port: url.port ? Number(url.port) : url.protocol === 'http:' ? 80 : 443,
-      destKind: 'host',
-      allowLan: url.hostname === 'localhost',
-    };
-  },
-  checkProviderSystemwideRule: checkRuleMock,
-}));
-
 vi.mock('@/features/chat', () => ({ createSession: createSessionMock }));
 
 vi.mock('@/features/auth', () => ({
@@ -155,7 +137,6 @@ describe('useOnboardingFlow existing setup detection', () => {
       },
     });
 
-    checkRuleMock.mockResolvedValue({ alreadyAllowed: true, expectedRevision: 7 });
     saveProviderMock.mockResolvedValue({ data: {} });
     probeModelCandidateMock.mockResolvedValue({
       data: {
@@ -407,7 +388,6 @@ describe('useOnboardingFlow existing setup detection', () => {
       await result.current.saveSetup();
     });
 
-    expect(checkRuleMock).not.toHaveBeenCalled();
     expect(testProviderMock).not.toHaveBeenCalled();
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining('api.groq.com:443'));
     expect(saveProviderMock).toHaveBeenCalledTimes(2);
@@ -417,7 +397,6 @@ describe('useOnboardingFlow existing setup detection', () => {
 
   it('does not prompt when the provider address is already allowed', async () => {
     listAgentsMock.mockResolvedValue({ data: { agents: [] } });
-    checkRuleMock.mockResolvedValue({ alreadyAllowed: true, expectedRevision: 7 });
 
     const { result } = renderHook(() => useOnboardingFlow(), { wrapper: createWrapper() });
     await waitFor(() => expect(result.current.checkingExisting).toBe(false));
@@ -428,7 +407,6 @@ describe('useOnboardingFlow existing setup detection', () => {
       await result.current.saveSetup();
     });
 
-    expect(checkRuleMock).not.toHaveBeenCalled();
     expect(saveProviderMock).toHaveBeenCalledTimes(1);
     expect(testProviderMock).not.toHaveBeenCalled();
   });

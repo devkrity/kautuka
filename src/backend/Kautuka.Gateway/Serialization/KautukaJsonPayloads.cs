@@ -975,9 +975,11 @@ internal sealed record GatewayChatRunResponse(
     GatewayMetrics Metrics,
     GatewayRunState? Run = null);
 
+internal sealed record ProviderTestTarget(string Host, int Port);
 internal sealed record GatewayProviderTestResponse(
     bool Success,
-    string Message);
+    string Message,
+    ProviderTestTarget? ConfirmationTarget = null);
 
 internal sealed record CredentialCollectionResponse(
     string Scope,

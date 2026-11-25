@@ -10,7 +10,7 @@ public sealed class ManagerRpcAuthorizationTests
     [Fact]
     public void EveryManagerRpcHasAnExplicitClientAuthorizationClassification()
     {
-        string[] gatewayOnly = ["ListRuntimeContainers", "GetPkgsProxyCacheStats", "DescribeWorkspace", "RebuildWorkspace", "DeleteWorkspace", "SpawnSandbox", "InspectSandbox", "Exec", "StopSandbox", "PrimeWorkspace", "UpdateDesiredState", "ProbeMcpContainer", "ListMcpContainerTools", "CallMcpContainerTool", "BeginProviderTest", "EndProviderTest", "EnsureProviderPermission", "ListRequests", "DecideRequest", "ListRules", "SetRule", "DeleteRule", "ListActivity", "GetUserPrivileges", "SetUserPrivileges", "GetBrake", "SetBrake", "GetApprovalLimits", "SetApprovalLimits", "GetNetworkAccessStatus", "GetImageCompatibility", "SetImageCompatibility", "DeleteImageCompatibility"];
+        string[] gatewayOnly = ["ListRuntimeContainers", "GetPkgsProxyCacheStats", "DescribeWorkspace", "RebuildWorkspace", "DeleteWorkspace", "SpawnSandbox", "InspectSandbox", "Exec", "StopSandbox", "PrimeWorkspace", "UpdateDesiredState", "ProbeMcpContainer", "ListMcpContainerTools", "CallMcpContainerTool", "PrepareProviderTest", "EndProviderTest", "EnsureProviderPermission", "ListRequests", "DecideRequest", "ListRules", "SetRule", "SetServicePermission", "DeleteRule", "ListActivity", "GetUserPrivileges", "SetUserPrivileges", "GetBrake", "SetBrake", "GetApprovalLimits", "SetApprovalLimits", "GetNetworkAccessStatus", "GetImageCompatibility", "SetImageCompatibility", "DeleteImageCompatibility"];
         string[] sharedStatus = ["Ping", "GetHostStatus"];
         string[] gatewayAndChannel = ["CheckOutbound"];
         string[] classified = [.. gatewayOnly, .. sharedStatus, .. gatewayAndChannel];

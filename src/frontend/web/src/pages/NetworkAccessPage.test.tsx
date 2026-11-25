@@ -363,6 +363,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       const allowBtn = await screen.findByRole('button', { name: /^Allow (?:.+ to access this site|access)$/ });
       const keepBlockedBtn = screen.getByRole('button', { name: /Keep blocked/i });
 
+      post.mockResolvedValueOnce({ data: { revision: 2, rule: { allowed: true } } });
       // Click Allow
       await user.click(allowBtn);
       await waitFor(() =>
@@ -375,6 +376,8 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
           })
         )
       );
+      expect(await screen.findByText(/Access approved\..*try again\./i)).toBeVisible();
+      expect(post).toHaveBeenCalledTimes(1);
 
       // Click Keep Blocked
       await user.click(keepBlockedBtn);

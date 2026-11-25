@@ -69,7 +69,10 @@ internal sealed record NetworkAccessRuleDto(
 [SuppressMessage("Performance", "CA1819:PropertiesShouldNotReturnArrays", Justification = "DTO record matches JSON array serialization directly.")]
 internal sealed record NetworkRulesResponseDto(
     long Revision,
-    NetworkAccessRuleDto[] Rules);
+    NetworkAccessRuleDto[] Rules,
+    ServicePermissionViewDto[]? Services = null);
+
+internal sealed record ServicePermissionViewDto(string ServiceId, int Total, int Granted, int Effective);
 
 internal sealed record RequestDecisionDto(
     bool Allow,
@@ -82,6 +85,9 @@ internal sealed record RequestDecisionResponseDto(
     long Revision,
     NetworkAccessRuleDto? Rule,
     NetworkAccessRequestDto? Request);
+
+internal sealed record ServicePermissionDto(string? ServiceId, bool? Allowed, long? ExpectedRevision);
+internal sealed record ServicePermissionResultDto(long Revision, string Status);
 
 internal sealed record CreateOrUpdateRuleDto(
     string ScopeKind,

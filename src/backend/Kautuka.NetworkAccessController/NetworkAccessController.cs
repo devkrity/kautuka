@@ -11,11 +11,23 @@ public sealed class NetworkAccessController
     private sealed record ProviderTestGrant(string UserId, string Host, int Port, bool AllowLan, DateTimeOffset ExpiresAt);
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ProviderTestGrant> providerTests = new(StringComparer.Ordinal);
 
-    public string BeginProviderTest(NetworkAccessActor actor, string host, int port, bool allowLan)
+    public (string Status, string Reason, string Token) PrepareProviderTest(NetworkAccessActor actor, string host, int port,
+        bool allowLan, bool confirmed)
     {
         ArgumentNullException.ThrowIfNull(actor);
         if (!actor.IsAdmin) throw new UnauthorizedAccessException("Provider tests require an administrator.");
-        if (port is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(port));
+        var input = new OutboundCheckInput(actor.UserId, "gateway", null, host, port, "provider-test", null);
+        NetworkAccessDecisionResult decision = ApplianceMode
+            ? EvaluateGatewayConnect(input, publicOnly: false, recordPendingRequest: false)
+            : EvaluateOutboundCheck(input, recordPendingRequest: false);
+        if (decision.Allowed) return ("allowed", decision.Reason, string.Empty);
+        if (decision.Reason != "no_rule") return ("blocked", decision.Reason, string.Empty);
+        return confirmed ? ("allowed", "provider_test", CreateProviderTestGrant(actor, host, port, allowLan))
+            : ("confirmation_required", decision.Reason, string.Empty);
+    }
+
+    private string CreateProviderTestGrant(NetworkAccessActor actor, string host, int port, bool allowLan)
+    {
         string normalized;
         if (!NetworkDestinationNormalizer.TryNormalizeIpv4(host, out normalized, out _)
             && !NetworkDestinationNormalizer.TryNormalizeHostname(host, out normalized, out _))
@@ -43,22 +55,12 @@ public sealed class NetworkAccessController
     public const string ClusterOrigDstPublic = "orig_dst_public";
     public const string ClusterOrigDstLan = "orig_dst_lan";
     public const string ClusterPackageProxy = "pkgs_proxy";
-    public static TimeSpan DefaultApplianceApprovalHold => TimeSpan.FromMinutes(10);
-    public const int DefaultHeldCallLimit = 64;
-    public const int DefaultHeldCallLimitPerUser = 8;
-
     private readonly NetworkAccessPolicyStore policyStore;
     private readonly IWorkloadRegistry registry;
     private readonly NetworkAccessAuditRing auditRing;
     private readonly Func<bool>? isContainerAuthorizationGateOpen;
     private readonly Func<PackageProxyAdmission>? packageProxyAdmission;
     private readonly TimeProvider timeProvider;
-    private readonly TimeSpan approvalHold;
-    private readonly object approvalHoldLock = new();
-    private readonly Dictionary<string, string> outstandingApprovalHolds = new(StringComparer.Ordinal);
-    private readonly int maxHeldCalls;
-    private readonly int maxHeldCallsPerUser;
-
     private long checks;
     private long allowed;
     private long denied;
@@ -73,76 +75,22 @@ public sealed class NetworkAccessController
         Func<bool>? isContainerAuthorizationGateOpen = null,
         Func<PackageProxyAdmission>? packageProxyAdmission = null,
         TimeProvider? timeProvider = null,
-        TimeSpan approvalHold = default,
-        int maxHeldCalls = DefaultHeldCallLimit,
-        int maxHeldCallsPerUser = DefaultHeldCallLimitPerUser)
+        bool applianceMode = false)
     {
         ArgumentNullException.ThrowIfNull(policyStore);
         ArgumentNullException.ThrowIfNull(registry);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxHeldCalls);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxHeldCallsPerUser);
-        ArgumentOutOfRangeException.ThrowIfGreaterThan(maxHeldCallsPerUser, maxHeldCalls);
         this.policyStore = policyStore;
         this.registry = registry;
         this.auditRing = auditRing ?? new NetworkAccessAuditRing();
         this.isContainerAuthorizationGateOpen = isContainerAuthorizationGateOpen;
         this.packageProxyAdmission = packageProxyAdmission;
         this.timeProvider = timeProvider ?? TimeProvider.System;
-        this.approvalHold = approvalHold;
-        this.maxHeldCalls = maxHeldCalls;
-        this.maxHeldCallsPerUser = maxHeldCallsPerUser;
-
-        // Fail closed on startup if state.json is malformed (C12).
-        this.policyStore.EnsureLoaded();
-        this.registry.ContainerDeregistered += (_, args) => this.policyStore.ClearProbeContainer(args.ContainerId);
-        this.registry.ContainerIdPromoted += (_, args) => this.policyStore.PromoteProbeContainerId(args.PreviousContainerId, args.ActualContainerId);
+        ApplianceMode = applianceMode;
     }
 
-    public void ClearProbeContainer(string containerId) => policyStore.ClearProbeContainer(containerId);
+    public bool ApplianceMode { get; }
 
     public NetworkAccessPolicyStore PolicyStore => policyStore;
-    public TimeSpan ApprovalHold => approvalHold;
-
-    public async Task<NetworkAccessDecisionResult> RecheckAfterApprovalAsync(
-        NetworkAccessDecisionResult initial, string userId, Func<NetworkAccessDecisionResult> recheck, CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(initial);
-        ArgumentException.ThrowIfNullOrWhiteSpace(userId);
-        ArgumentNullException.ThrowIfNull(recheck);
-        if (approvalHold <= TimeSpan.Zero || initial.Reason != "no_rule" || initial.RequestId is not { } requestId)
-            return initial;
-        lock (approvalHoldLock)
-        {
-            // Reserve authorization capacity for immediate decisions and hold at most one call per request.
-            if (outstandingApprovalHolds.Count >= maxHeldCalls
-                || outstandingApprovalHolds.Values.Count(owner => string.Equals(owner, userId, StringComparison.Ordinal)) >= maxHeldCallsPerUser
-                || !outstandingApprovalHolds.TryAdd(requestId, userId))
-                return initial;
-        }
-
-        try
-        {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(approvalHold);
-            try
-            {
-                string? resolution = await policyStore.WaitForPendingResolutionAsync(requestId, timeout.Token).ConfigureAwait(false);
-                timeout.Token.ThrowIfCancellationRequested();
-                return resolution switch
-                {
-                    "allowed" => recheck(),
-                    "blocked" or "brake_system" or "brake_user" => initial with { Reason = resolution },
-                    _ => initial,
-                };
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return initial; }
-        }
-        finally
-        {
-            lock (approvalHoldLock) outstandingApprovalHolds.Remove(requestId);
-        }
-    }
-
     public IWorkloadRegistry Registry => registry;
 
     public NetworkAccessAuditRing AuditRing => auditRing;
@@ -482,7 +430,7 @@ public sealed class NetworkAccessController
                 }
 
                 NetworkAccessDecisionResult pending = RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "no_rule", requestId);
-                return approvalHold > TimeSpan.Zero && entry.Purpose != "save-discovery" ? pending with { PendingSource = entry } : pending;
+                return pending;
         }
     }
 
@@ -646,7 +594,8 @@ public sealed class NetworkAccessController
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
 
             default:
-                if (input.Purpose == "provider-test" && input.CorrelationId is { Length: > 0 } token
+                if (input.Purpose == "provider-test" && input.AgentId == "gateway" && connectorId is null
+                    && input.CorrelationId is { Length: > 0 } token
                     && providerTests.TryGetValue(token, out ProviderTestGrant? grant)
                     && grant.ExpiresAt > timeProvider.GetUtcNow()
                     && grant.UserId == userId && grant.Host == normalizedDestination && grant.Port == input.Port

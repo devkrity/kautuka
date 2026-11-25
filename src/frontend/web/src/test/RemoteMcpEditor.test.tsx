@@ -36,6 +36,26 @@ function setup() {
 }
 
 describe('RemoteMcpEditor', () => {
+  it('starts a new test only when the owner selects Try again', async () => {
+    const { onTest, onSave } = setup();
+    onTest.mockResolvedValueOnce({
+      ...success,
+      success: false,
+      message: 'Network approval is required.',
+      toolCount: null,
+      toolNames: null,
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    expect(await screen.findByText('Network approval is required.')).toBeVisible();
+    expect(onTest).toHaveBeenCalledOnce();
+    expect(onSave).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('Connected.')).toBeVisible();
+    expect(onTest).toHaveBeenCalledTimes(2);
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
   it('connects from a URL without JSON or advanced settings and invalidates stale test results', async () => {
     const { onTest } = setup();
     expect(screen.getByLabelText('Name')).toHaveValue('mcp.example.com');
