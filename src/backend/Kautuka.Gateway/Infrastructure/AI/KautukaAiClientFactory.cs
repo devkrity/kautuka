@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 
 using Kautuka.Gateway.Domain.Runtime;
 using Kautuka.Gateway.Infrastructure.Credentials;
+using Kautuka.Gateway.Infrastructure.Egress;
 using Kautuka.NetworkAccess.Client;
 
 using Microsoft.Extensions.AI;
@@ -15,7 +16,8 @@ internal sealed class KautukaAiClientFactory(
     IProviderTypeCatalog providerTypeCatalog,
     IRunLimitResolver? runLimitResolver = null,
     INetworkAccessChecker? checker = null,
-    Func<INetworkAccessChecker?, HttpMessageHandler>? transportFactory = null)
+    Func<INetworkAccessChecker?, HttpMessageHandler>? transportFactory = null,
+    GatewayOutboundApproval? approval = null)
 {
     public KautukaAiClientFactory(IEnumerable<IAiClientProvider> providers, CredentialResolverService credentialResolver)
         : this(providers, credentialResolver, new SeededProviderTypeCatalog())
@@ -69,7 +71,7 @@ internal sealed class KautukaAiClientFactory(
         JsonObject settingsJson = ToSettingsObject(provider);
         string? apiKey = await ResolveApiKeyAsync(provider.Id, providerType, settingsJson, ct).ConfigureAwait(false);
 
-        return strategy.TryCreate(settingsJson, modelName, apiKey);
+        return CreateRuntimeClient(strategy, providerType, settingsJson, modelName, apiKey);
     }
 
     public async Task<IEmbeddingGenerator<string, Embedding<float>>?> TryCreateEmbeddingGeneratorAsync(
@@ -93,7 +95,7 @@ internal sealed class KautukaAiClientFactory(
         JsonObject settingsJson = ToSettingsObject(provider);
         string? apiKey = await ResolveApiKeyAsync(provider.Id, providerType, settingsJson, ct).ConfigureAwait(false);
 
-        return strategy.TryCreateEmbeddingGenerator(settingsJson, modelName, apiKey);
+        return CreateRuntimeEmbeddingGenerator(strategy, providerType, settingsJson, modelName, apiKey);
     }
 
     public async Task<IEmbeddingGenerator<string, Embedding<float>>?> TryCreateEmbeddingGeneratorAsync(
@@ -116,7 +118,7 @@ internal sealed class KautukaAiClientFactory(
 
         string? apiKey = await ResolveApiKeyAsync(providerId, normalizedProviderType, settings, ct).ConfigureAwait(false);
 
-        return strategy.TryCreateEmbeddingGenerator(settings, modelName, apiKey);
+        return CreateRuntimeEmbeddingGenerator(strategy, normalizedProviderType, settings, modelName, apiKey);
     }
 
     /// <summary>
@@ -142,7 +144,36 @@ internal sealed class KautukaAiClientFactory(
         // Inline api_key (e.g. from test/validation request) takes priority over CredentialsHost.
         string? apiKey = await ResolveApiKeyAsync(providerId, normalizedProviderType, settings, ct).ConfigureAwait(false);
 
-        return strategy.TryCreate(settings, modelName, apiKey);
+        return CreateRuntimeClient(strategy, normalizedProviderType, settings, modelName, apiKey);
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope", Justification = "The returned chat client owns the provider client.")]
+    private IChatClient? CreateRuntimeClient(IAiClientProvider strategy, string providerType, JsonObject settings,
+        string modelName, string? apiKey)
+    {
+        IChatClient? client = strategy.TryCreate(settings, modelName, apiKey);
+        return client is not null && approval is { Enabled: true } && ResolveModelDestination(providerType, settings) is { } destination
+            ? new ApprovalAwareModelChatClient(client, approval, destination)
+            : client;
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope", Justification = "The returned embedding generator owns the provider generator.")]
+    private IEmbeddingGenerator<string, Embedding<float>>? CreateRuntimeEmbeddingGenerator(
+        IAiClientProvider strategy, string providerType, JsonObject settings, string modelName, string? apiKey)
+    {
+        IEmbeddingGenerator<string, Embedding<float>>? generator = strategy.TryCreateEmbeddingGenerator(settings, modelName, apiKey);
+        return generator is not null && approval is { Enabled: true } && ResolveModelDestination(providerType, settings) is { } destination
+            ? new ApprovalAwareEmbeddingGenerator(generator, approval, destination)
+            : generator;
+    }
+
+    private static Uri? ResolveModelDestination(string providerType, JsonObject settings)
+    {
+        string? endpoint = AiProviderSettings.GetString(settings, "base_url");
+        if (providerType == "gemini")
+            endpoint = GoogleAiClientProvider.ResolveNativeBaseUrl(endpoint) ?? "https://generativelanguage.googleapis.com";
+
+        return Uri.TryCreate(endpoint, UriKind.Absolute, out Uri? destination) ? destination : null;
     }
 
     public async Task<IReadOnlyList<DiscoveredModelDefinition>> DiscoverModelsAsync(

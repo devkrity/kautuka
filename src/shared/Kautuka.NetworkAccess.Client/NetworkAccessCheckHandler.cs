@@ -107,7 +107,8 @@ public sealed partial class NetworkAccessCheckHandler : DelegatingHandler
             AgentId: ambient?.AgentId,
             ConnectorId: ambient?.ConnectorId,
             CorrelationId: ambient?.CorrelationId,
-            ExecutionContext: ambient?.ExecutionContext ?? defaultExecutionContext);
+            ExecutionContext: ambient?.ExecutionContext ?? defaultExecutionContext,
+            SkipApprovalHold: ambient?.SkipApprovalHold ?? false);
     }
 
     private static bool IsRedirectStatusCode(System.Net.HttpStatusCode statusCode)

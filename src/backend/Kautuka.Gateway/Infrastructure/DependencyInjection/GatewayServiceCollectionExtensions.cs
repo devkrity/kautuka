@@ -47,7 +47,8 @@ internal static class GatewayServiceCollectionExtensions
             sp.GetRequiredService<IProviderTypeCatalog>(),
             sp.GetService<IRunLimitResolver>(),
             sp.GetService<INetworkAccessChecker>(),
-            ResolveModelTransport(sp)));
+            ResolveModelTransport(sp),
+            sp.GetService<GatewayOutboundApproval>()));
 
         return services;
     }

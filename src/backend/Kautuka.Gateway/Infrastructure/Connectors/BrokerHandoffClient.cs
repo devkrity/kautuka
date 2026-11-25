@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 
 using Kautuka.Gateway.Domain.Connectors;
+using Kautuka.Gateway.Infrastructure.Egress;
 
 namespace Kautuka.Gateway.Infrastructure.Connectors;
 
@@ -32,7 +33,8 @@ internal sealed class BrokerMailRequestException : HttpRequestException
 internal sealed class BrokerHandoffClient(
     BrokerInstallationIdentityProvider identities,
     BrokerInstallationRegistration registration,
-    HttpClient client) : IDisposable
+    HttpClient client,
+    GatewayOutboundApproval? approval = null) : IDisposable
 {
     private async Task<BrokerInstallationIdentity> GetIdentityAsync(Uri origin, CancellationToken ct)
     {
@@ -231,6 +233,7 @@ internal sealed class BrokerHandoffClient(
         if (!origin.IsAbsoluteUri || origin.Scheme != Uri.UriSchemeHttps || origin.AbsolutePath != "/"
             || !string.IsNullOrEmpty(origin.UserInfo) || !string.IsNullOrEmpty(origin.Query) || !string.IsNullOrEmpty(origin.Fragment))
             throw new ArgumentException("The broker must be an HTTPS origin.", nameof(origin));
+        // GetIdentityAsync has already checked this origin with the same scope.
         string url = origin.GetLeftPart(UriPartial.Authority) + path;
         async Task<HttpResponseMessage> SendOnceAsync(BrokerInstallationIdentity key, string? nonce)
         {
@@ -238,6 +241,7 @@ internal sealed class BrokerHandoffClient(
             request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
             request.Headers.Add("Kautuka-Installation-Proof", ConnectorDpop.CreateInstallationProof(key.PrivateJwk, "POST", url, body));
             if (mailKey is not null) request.Headers.Add("DPoP", ConnectorDpop.CreateProof(mailKey, nonce, authorizationCode: null, "POST", url));
+            using IDisposable? providerScope = approval?.BeginProviderRequest();
             return await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         }
         async Task<HttpResponseMessage> SendWithNonceAsync(BrokerInstallationIdentity key)

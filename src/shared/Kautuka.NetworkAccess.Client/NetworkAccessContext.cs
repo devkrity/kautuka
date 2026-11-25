@@ -10,7 +10,8 @@ public sealed record NetworkAccessScope(
     string? Purpose = null,
     string? Service = null,
     string ExecutionContext = "app",
-    string? CorrelationId = null);
+    string? CorrelationId = null,
+    bool SkipApprovalHold = false);
 
 /// <summary>
 /// Provides an AsyncLocal ambient scope for attributing outbound HTTP/WebSocket requests to users, agents, and connectors.

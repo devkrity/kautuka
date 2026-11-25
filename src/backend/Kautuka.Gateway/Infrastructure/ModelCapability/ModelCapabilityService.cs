@@ -1,5 +1,7 @@
 using System.Text.Json;
 
+using Kautuka.NetworkAccess.Client;
+
 using Microsoft.Extensions.AI;
 
 namespace Kautuka.Gateway.Infrastructure.ModelCapability;
@@ -35,6 +37,9 @@ internal sealed class ModelCapabilityService(
         ProbedCapabilities probed;
         try
         {
+            using IDisposable? probeScope = NetworkAccessContext.Current is { } scope
+                ? NetworkAccessContext.BeginScope(scope with { SkipApprovalHold = true })
+                : null;
             probed = await prober.ProbeAsync(rawClient, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)

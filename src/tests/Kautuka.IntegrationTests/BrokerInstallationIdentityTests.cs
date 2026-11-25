@@ -6,6 +6,8 @@ using System.Text.Json;
 using Kautuka.Gateway.Domain.Connectors;
 using Kautuka.Gateway.Infrastructure.Connectors;
 using Kautuka.Gateway.Infrastructure.Credentials;
+using Kautuka.Gateway.Infrastructure.Egress;
+using Kautuka.NetworkAccess.Client;
 using Kautuka.Protos;
 
 namespace Kautuka.IntegrationTests;
@@ -387,6 +389,65 @@ public sealed class BrokerInstallationIdentityTests
         handler.Status = HttpStatusCode.Redirect;
         await registration.InvalidateAsync(CancellationToken.None);
         await Assert.ThrowsAsync<HttpRequestException>(() => registration.RegisterAsync(new Uri("https://auth.kautuka.io/"), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task BrokerApprovalWaitsBeforeStartingTheProviderDeadlineAndSigning()
+    {
+        using var identities = new BrokerInstallationIdentityProvider(new MemoryStore());
+        using var handler = new HandoffHandler();
+        var checker = new HoldingBrokerChecker();
+        var approval = new GatewayOutboundApproval(checker, enabled: true);
+        using var transport = new NetworkAccessCheckHandler(checker, handler);
+        TimeSpan providerDeadline = TimeSpan.FromMilliseconds(800);
+        using var registration = new BrokerInstallationRegistration(identities,
+            new HttpClient(transport, disposeHandler: false) { Timeout = providerDeadline }, approval);
+        using var broker = new BrokerHandoffClient(identities, registration,
+            new HttpClient(transport, disposeHandler: false) { Timeout = providerDeadline }, approval);
+        var origin = new Uri("https://auth.kautuka.io/");
+        const string expected = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        var start = new BrokerHandoffStart("google", "login", expected, expected, expected, "http://localhost:20229");
+        CancellationToken token = TestContext.Current.CancellationToken;
+        using IDisposable scope = NetworkAccessContext.BeginScope("user-a", connectorId: "mail", purpose: "connector-oauth");
+        using var cancelled = CancellationTokenSource.CreateLinkedTokenSource(token);
+
+        Task<string> abandoned = broker.StartAsync(origin, start, cancelled.Token);
+        Assert.False(abandoned.IsCompleted);
+        await cancelled.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await abandoned);
+        Assert.Empty(handler.Paths);
+
+        long beforeApproval = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        Task<string> running = broker.StartAsync(origin, start, token);
+        await Task.Delay(TimeSpan.FromMilliseconds(1_100), token);
+        Assert.False(running.IsCompleted);
+        Assert.Empty(handler.Paths);
+        checker.Approved.SetResult(NetworkAccessCheckResult.CreateAllowed("rule_user"));
+
+        Assert.Equal(expected, await running.WaitAsync(TimeSpan.FromSeconds(5), token));
+        Assert.Equal(new[] { "/installation/register", "/installation/flow" }, handler.Paths);
+        Assert.Equal(2, checker.ImmediateChecks);
+        foreach (string proof in handler.Proofs)
+        {
+            using JsonDocument claims = JsonDocument.Parse(Decode(proof.Split('.')[1]));
+            Assert.True(claims.RootElement.GetProperty("iat").GetInt64() > beforeApproval);
+        }
+    }
+
+    private sealed class HoldingBrokerChecker : INetworkAccessChecker
+    {
+        internal TaskCompletionSource<NetworkAccessCheckResult> Approved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal int ImmediateChecks { get; private set; }
+
+        public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)
+        {
+            Assert.Equal("auth.kautuka.io", target.Host);
+            Assert.Equal("user-a", target.UserId);
+            Assert.Equal("mail", target.ConnectorId);
+            if (!target.SkipApprovalHold) return Approved.Task.WaitAsync(cancellationToken);
+            ImmediateChecks++;
+            return Task.FromResult(NetworkAccessCheckResult.CreateAllowed("rule_user"));
+        }
     }
 
     [Fact]

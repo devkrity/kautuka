@@ -385,6 +385,7 @@ internal sealed class ConnectorOAuthService(
         string? brokerTicket = null,
         string? returnOrigin = null)
     {
+        await client.WaitForApprovalAsync(TokenUrl(profile), cancellationToken).ConfigureAwait(false);
         string? proof = ProofFor(profile, session.DpopPrivateJwk, nonce: null, code);
         if (UsesDpop(profile) && proof is null)
         {
@@ -449,6 +450,7 @@ internal sealed class ConnectorOAuthService(
             }
         }
 
+        await client.WaitForApprovalAsync(TokenUrl(profile), cancellationToken).ConfigureAwait(false);
         string? proof = ProofFor(profile, privateJwk, nonce, authorizationCode: null);
         ConnectorTokenResult refreshed = await client.RefreshAsync(
             profile,
@@ -524,6 +526,7 @@ internal sealed class ConnectorOAuthService(
         string? nonce = string.IsNullOrWhiteSpace(profile.DpopNonceCredentialKey)
             ? null
             : await tokens.GetAsync(userId, profile.DpopNonceCredentialKey, cancellationToken).ConfigureAwait(false);
+        await client.WaitForApprovalAsync(url, cancellationToken).ConfigureAwait(false);
         string proof = ConnectorDpop.CreateProof(privateJwk, nonce, authorizationCode: null, "DELETE", url);
         ConnectorDpopRevokeResult revoked = await client.RevokeDpopKeyAsync(url, refreshToken, proof, cancellationToken).ConfigureAwait(false);
         if (revoked.UseDpopNonce && !string.IsNullOrWhiteSpace(revoked.DpopNonce))
