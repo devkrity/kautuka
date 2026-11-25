@@ -1966,7 +1966,7 @@ public sealed class UpdateServiceIntegrationTests
         Assert.Equal(expected, status.State);
         if (expected == UpdateWorkflowState.Available)
         {
-            Assert.Contains("insufficient free space", status.LastError, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Free space on the disks that store Kautuka’s updates and container images, then retry", status.LastError, StringComparison.Ordinal);
             UpdateStatusSnapshot next = await coordinator.GetStatusAsync(TestContext.Current.CancellationToken);
             Assert.Equal(status.LastError, next.LastError);
         }
@@ -2061,17 +2061,18 @@ public sealed class UpdateServiceIntegrationTests
     }
 
     [Theory]
-    [InlineData("succeeded", true, true, true)]
-    [InlineData("pending", true, true, false)]
-    [InlineData("failed", true, true, false)]
-    [InlineData("succeeded", false, true, false)]
-    [InlineData("succeeded", true, false, false)]
+    [InlineData("amd64", "succeeded", true, true, true)]
+    [InlineData("arm64", "succeeded", true, true, true)]
+    [InlineData("amd64", "pending", true, true, false)]
+    [InlineData("amd64", "failed", true, true, false)]
+    [InlineData("amd64", "succeeded", false, true, false)]
+    [InlineData("amd64", "succeeded", true, false, false)]
     public async Task ApplianceRemovesOnlyItsCurrentCommittedDownload(
-        string pruneStatus, bool recentJournal, bool canonicalPath, bool expectRemoval)
+        string architecture, string pruneStatus, bool recentJournal, bool canonicalPath, bool expectRemoval)
     {
         const string sourceTag = "v1.2.3-preview.1";
         const string targetTag = "v1.2.4-preview.1";
-        const string packageName = "kautuka-linux-amd64.tar.gz";
+        string packageName = $"kautuka-linux-{architecture}.tar.gz";
         string root = CreateTempDirectory();
         try
         {
@@ -2081,10 +2082,13 @@ public sealed class UpdateServiceIntegrationTests
             string targetPackage = Path.Combine(targetDirectory, packageName);
             string recoveryPackage = Path.Combine(recoveryDirectory, packageName);
             string manifest = Path.Combine(targetDirectory, "kautuka-platform-release.json");
+            string otherPackage = Path.Combine(targetDirectory, architecture == "arm64"
+                ? "kautuka-linux-amd64.tar.gz" : "kautuka-linux-arm64.tar.gz");
             CancellationToken cancellationToken = TestContext.Current.CancellationToken;
             await File.WriteAllTextAsync(targetPackage, "new transfer", cancellationToken);
             await File.WriteAllTextAsync(recoveryPackage, "other transfer", cancellationToken);
             await File.WriteAllTextAsync(manifest, "metadata", cancellationToken);
+            await File.WriteAllTextAsync(otherPackage, "unrelated transfer", cancellationToken);
 
             UpdateReleaseReference source = CreateRelease(sourceTag[1..], "preview") with { ReleaseId = sourceTag };
             UpdateReleaseReference target = CreateRelease(targetTag[1..], "preview") with { ReleaseId = targetTag };
@@ -2108,6 +2112,7 @@ public sealed class UpdateServiceIntegrationTests
                 StateRootPath = root,
                 ApplianceReleaseId = targetTag,
                 ApplianceReleaseVersion = target.Version,
+                PlatformAssetName = packageName,
             });
             var coordinator = new UpdateCoordinator(store, new InMemoryUpdateRuntimePolicyStore("preview"),
                 new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()),
@@ -2119,6 +2124,7 @@ public sealed class UpdateServiceIntegrationTests
             Assert.Equal(!expectRemoval, File.Exists(targetPackage));
             Assert.True(File.Exists(recoveryPackage));
             Assert.True(File.Exists(manifest));
+            Assert.True(File.Exists(otherPackage));
             if (expectRemoval)
             {
                 Assert.Equal(UpdateWorkflowState.Current, status.State);

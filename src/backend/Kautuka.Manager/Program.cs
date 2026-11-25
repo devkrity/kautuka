@@ -53,13 +53,18 @@ if (prepareApplianceImages || checkApplianceReadiness || args.Contains("--verify
         {
             var images = new ApplianceRoleImageImporter(new PodmanCommandRunner());
             await images.EnsureAsync(release.Deployment, Path.Combine(managerRoot, "versions", release.Version), CancellationToken.None,
-                requireVerificationFence: verifyAppliance)
+                requireVerificationFence: verifyAppliance, checkImageStoreSpace: selectCandidate && verifyAppliance)
                 .ConfigureAwait(false);
             await Console.Out.WriteLineAsync($"Prepared appliance images for {release.ReleaseId}.").ConfigureAwait(false);
             return 0;
         }
         await Console.Out.WriteLineAsync($"Verified appliance release {release.ReleaseId}.").ConfigureAwait(false);
         return 0;
+    }
+    catch (ApplianceRoleImageImporter.InsufficientImageStoreSpaceException error)
+    {
+        await Console.Error.WriteLineAsync(error.Message).ConfigureAwait(false);
+        return 73;
     }
     catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException
         or InvalidOperationException or System.Text.Json.JsonException or System.Text.DecoderFallbackException)

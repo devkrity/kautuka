@@ -191,7 +191,9 @@ The systemd path is the appliance's privileged update entry point. A signed Linu
 
 UpdateService reads the host recovery status through Manager's authenticated socket. A candidate's fenced verification boot cannot complete an update in the app. Rollback status requires a healthy source release and a recovery journal entry for the current attempt.
 
-Once Manager confirms the update committed and backup pruning succeeded, UpdateService removes that update's downloaded Linux bundle. Offline image repair uses the signed service images installed with the release.
+Before importing a missing service image, the updater checks free space on the disk that holds the appliance's Podman images. If that disk is short on space, free space there and retry the update. The running release stays selected.
+
+Once Manager confirms the update committed and backup pruning succeeded, UpdateService removes that update's downloaded Linux bundle for the installed platform. Offline image repair uses the signed service images installed with the release.
 
 The host updater keeps the signed service images for the current release and its immediate predecessor. It also preserves staged releases that can still be installed. After a verified commit it removes older offline image archives and retires matching appliance images from Podman when they have a single appliance-owned tag and no container uses them.
 

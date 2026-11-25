@@ -119,4 +119,24 @@ describe('platform channel settings', () => {
       userId: 'system', agentId: 'channelhost', destination: 'slack.com', allowed: false,
     }));
   });
+
+  it('shows built-in model permissions separately from a helper’s website access', async () => {
+    const rule = { setupService: 'model-providers', scopeKind: 'agent', userId: 'system',
+      agentId: 'gateway', destination: 'api.openai.com', destKind: 'host', port: 443, allowed: true };
+    const rules = [rule, { ...rule, destination: 'api.anthropic.com', allowed: false },
+      { ...rule, destination: 'api.groq.com' },
+      { scopeKind: 'system', destination: 'api.groq.com', port: 443, allowed: false },
+      { ...rule, setupService: undefined, userId: 'person', agentId: 'helper', destination: 'example.com' }];
+    api.get.mockResolvedValue({ data: { revision: 1, rules } });
+
+    render(<ChannelSettingsSection />);
+
+    expect(await screen.findByText('Built-in model providers')).toBeVisible();
+    expect(screen.getByText(/helpers have separate permissions for websites and connectors/)).toBeVisible();
+    expect(screen.getByText('api.openai.com · Allowed by its rule')).toBeVisible();
+    expect(screen.getByText('api.anthropic.com · Blocked by its rule')).toBeVisible();
+    expect(screen.getByText('api.groq.com · Blocked by another network rule')).toBeVisible();
+    expect(screen.queryByText(/example\.com/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /model providers/i })).not.toBeInTheDocument();
+  });
 });

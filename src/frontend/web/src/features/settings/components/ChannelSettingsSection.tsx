@@ -5,6 +5,7 @@ import type { NetworkAccessRuleDto, NetworkRulesResponseDto } from '@/features/n
 
 const groups = [
   { id: 'sign-in', name: 'social sign-in', label: 'Social sign-in' },
+  { id: 'model-providers', name: 'model providers', label: 'Built-in model providers' },
   { id: 'telegram', name: 'Telegram', label: 'Telegram' },
   { id: 'slack', name: 'Slack', label: 'Slack' },
   { id: 'updates', name: 'in-app updates', label: 'In-app updates' },
@@ -35,7 +36,8 @@ export function ChannelSettingsSection({ onReviewReady }: { onReviewReady?: (rea
   };
   useEffect(() => { void load().catch(() => setMessage('Could not load service network settings.')); }, []);
   useEffect(() => {
-    onReviewReady?.(rules !== null && !busy && groups.some(group => serviceTargets(rules, group).length > 0));
+    onReviewReady?.(rules !== null && !busy && groups.some(group =>
+      group.id !== 'model-providers' && serviceTargets(rules, group).length > 0));
   }, [onReviewReady, rules, busy]);
 
   async function setService(service: ServicePermission, targets: NetworkAccessRuleDto[], allow: boolean) {
@@ -72,6 +74,20 @@ export function ChannelSettingsSection({ onReviewReady }: { onReviewReady?: (rea
     {rules && groups.map(service => {
       const targets = serviceTargets(rules, service);
       if (targets.length === 0) return null;
+      if (service.id === 'model-providers') {
+        return <div key={service.id}>
+          <span>{service.label}</span>
+          <p className="text-xs text-muted-foreground">
+            Kautuka uses these connections to run models. Your helpers have separate permissions for websites and connectors.
+          </p>
+          <ul className="text-xs text-muted-foreground break-all">
+            {targets.map(target => <li key={target.destination}>{target.destination} · {
+              target.paused ? 'Paused' : !target.allowed ? 'Blocked by its rule'
+                : serviceState(rules, [target]).allowed ? 'Allowed by its rule' : 'Blocked by another network rule'
+            }</li>)}
+          </ul>
+        </div>;
+      }
       const state = serviceState(rules, targets);
       const status = state.granted > state.allowed ? 'Blocked by another network rule'
         : state.allowed === targets.length ? 'Allowed by this setting' : state.allowed > 0 ? 'Partially allowed' : 'Paused';

@@ -16,6 +16,7 @@ internal sealed class ApplianceRoleImageImporter
 {
     private static readonly SearchValues<char> HexDigits = SearchValues.Create("0123456789abcdef");
     private static readonly string[] Roles = ["credentialshost", "channelhost", "gateway", "webhost", "updateservice"];
+    private const long ImageStoreReserveBytes = 256L * 1024 * 1024;
     private readonly PodmanCommandRunner runner;
 
     internal ApplianceRoleImageImporter(PodmanCommandRunner runner)
@@ -27,7 +28,7 @@ internal sealed class ApplianceRoleImageImporter
 #pragma warning disable CA2000 // FileStream and its owned handle are held through Podman load and disposed by using declarations.
     internal async Task<Dictionary<string, string>> EnsureAsync(
         ApplianceDeploymentDescriptor descriptor, string releaseVersionDirectory, CancellationToken cancellationToken,
-        bool requireVerificationFence = false)
+        bool requireVerificationFence = false, bool checkImageStoreSpace = false)
     {
         ArgumentNullException.ThrowIfNull(descriptor);
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
@@ -52,6 +53,7 @@ internal sealed class ApplianceRoleImageImporter
             return ReadInstalledImageIds(installed.StdOut, descriptor.Images, architecture, requireVerificationFence);
 
         SafeFileHandle? images = null;
+        DriveInfo? imageStore = null;
         try
         {
             for (int index = 0; index < Roles.Length; index++)
@@ -66,6 +68,11 @@ internal sealed class ApplianceRoleImageImporter
                         images ??= TrustedApplianceReleaseFiles.OpenApplianceImagesDirectory(releaseDirectory);
                         using var archive = TrustedApplianceReleaseFiles.OpenApplianceImageArchive(images, role);
                         using var stream = new FileStream(archive, FileAccess.Read);
+                        if (checkImageStoreSpace)
+                        {
+                            imageStore ??= await ResolveImageStoreAsync(cancellationToken).ConfigureAwait(false);
+                            CheckImageStoreSpace(imageStore.AvailableFreeSpace, stream.Length);
+                        }
                         ValidateArchiveIndex(stream, reference);
                         stream.Position = 0;
                         PodmanCommandResult loaded = await runner.RunAsync(["load"], 300, cancellationToken, standardInput: stream).ConfigureAwait(false);
@@ -73,7 +80,7 @@ internal sealed class ApplianceRoleImageImporter
                         if (loaded.ExitCode != 0)
                             throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure($"Offline appliance image import for {role}", loaded));
                     }
-                    catch (IOException error)
+                    catch (IOException error) when (error is not InsufficientImageStoreSpaceException)
                     {
                         throw new InvalidDataException($"The signed {role} image is missing from Podman and its staged archive is unavailable or unreadable.", error);
                     }
@@ -91,6 +98,34 @@ internal sealed class ApplianceRoleImageImporter
     }
 
 #pragma warning restore CA2000
+    private async Task<DriveInfo> ResolveImageStoreAsync(CancellationToken cancellationToken)
+    {
+        PodmanCommandResult result = await runner.RunAsync(
+            ["info", "--format", "{{.Store.GraphRoot}}"], 30, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        string path = result.StdOut.Trim();
+        if (result.ExitCode != 0 || !Path.IsPathFullyQualified(path) || !Directory.Exists(path))
+            throw new InvalidOperationException("Could not determine the appliance Podman image storage directory.");
+        return new DriveInfo(path);
+    }
+
+    internal static void CheckImageStoreSpace(long availableBytes, long archiveBytes)
+    {
+        // Check after staging, against the space left on the actual image device.
+        // Each import can reuse layers, so use its archive size as an estimate.
+        long requiredBytes = checked(archiveBytes + ImageStoreReserveBytes);
+        if (availableBytes < requiredBytes)
+            throw new InsufficientImageStoreSpaceException(
+                $"Appliance image storage needs {requiredBytes} free bytes and has {availableBytes}.");
+    }
+
+    internal sealed class InsufficientImageStoreSpaceException : IOException
+    {
+        public InsufficientImageStoreSpaceException() { }
+        public InsufficientImageStoreSpaceException(string message) : base(message) { }
+        public InsufficientImageStoreSpaceException(string message, Exception inner) : base(message, inner) { }
+    }
+
     internal static Dictionary<string, string> ReadInstalledImageIds(
         string json, IReadOnlyDictionary<string, string> references, string architecture, bool requireVerificationFence = false)
     {

@@ -885,8 +885,13 @@ internal sealed class UpdateCoordinator(
             var updates = new DirectoryInfo(Path.Combine(runtime.FullName, "updates"));
             var staging = new DirectoryInfo(Path.Combine(updates.FullName, "staging"));
             var release = new DirectoryInfo(Path.Combine(staging.FullName, tag));
-            var package = new FileInfo(Path.Combine(release.FullName, "kautuka-linux-amd64.tar.gz"));
-            if (package.FullName != prepared.PlatformPackagePath || runtime.LinkTarget is not null
+            string packageName = options.PlatformAssetName;
+            if (string.IsNullOrWhiteSpace(packageName) || Path.GetFileName(packageName) != packageName)
+                return;
+
+            var package = new FileInfo(Path.Combine(release.FullName, packageName));
+            if (package.DirectoryName != release.FullName || package.FullName != prepared.PlatformPackagePath
+                || runtime.LinkTarget is not null
                 || updates.LinkTarget is not null || staging.LinkTarget is not null || release.LinkTarget is not null
                 || package.LinkTarget is not null)
                 return;
@@ -936,7 +941,7 @@ internal sealed class UpdateCoordinator(
                 StagedRelease = null,
                 PreparedArtifacts = null,
                 PendingOperation = null,
-                LastError = "Update preflight checks failed: insufficient free space for safe update staging.",
+                LastError = "There is insufficient free space for the update. Free space on the disks that store Kautuka’s updates and container images, then retry.",
             };
             return true;
         }

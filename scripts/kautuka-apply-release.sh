@@ -1152,8 +1152,13 @@ stage_appliance_version() {
     if [[ -n "$selinux_state" && "$selinux_state" != 'Disabled' ]]; then
         restorecon -RF "$destination" || return 1
     fi
+    local image_status=0
     appliance_user env KAUTUKA_APPLIANCE_VERIFY=1 \
-        "$destination/kautuka-manager" --prepare-appliance-images --candidate-version "$target" || return 1
+        "$destination/kautuka-manager" --prepare-appliance-images --candidate-version "$target" || image_status=$?
+    if (( image_status != 0 )); then
+        [[ "$image_status" != 73 ]] || record_appliance_preflight_space_failure
+        return "$image_status"
+    fi
     stage_version_in_progress=''
 }
 

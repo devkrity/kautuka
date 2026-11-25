@@ -11,6 +11,17 @@ public sealed class ApplianceRoleImageImporterTests
     private const string Reference = "registry.example/kautuka-gateway@" + Digest;
 
     [Fact]
+    public void ColdImportRequiresAvailableImageSpaceAndCanRetry()
+    {
+        const long reserve = 256L * 1024 * 1024;
+        const long archive = 48L * 1024 * 1024;
+
+        Assert.Throws<ApplianceRoleImageImporter.InsufficientImageStoreSpaceException>(
+            () => ApplianceRoleImageImporter.CheckImageStoreSpace(reserve + archive - 1, archive));
+        ApplianceRoleImageImporter.CheckImageStoreSpace(reserve + archive, archive);
+    }
+
+    [Fact]
     public void IndexRequiresOneSignedManifest()
     {
         string index = "{\"schemaVersion\":2,\"manifests\":[{\"digest\":\"" + Digest + "\"}]}";
