@@ -49,6 +49,8 @@ jobs:
   build-linux-release-assets:
     name: Build Linux Release Assets
     runs-on: ubuntu-latest
+    env:
+      APPLIANCE_RUNTIME_BASE: quay.io/fedora/fedora-minimal@sha256:f04e34eae3415e94623793dea3ace05885a33b4e062d976dc3b293ebb14c289f
     environment:
       name: ${{ inputs.channel }}
     permissions:
@@ -173,6 +175,9 @@ jobs:
       - name: Install OCI archive tooling
         run: sudo apt-get update && sudo apt-get install -y podman skopeo
 
+      - name: Pull pinned appliance runtime base
+        run: podman pull "$APPLIANCE_RUNTIME_BASE"
+
       - name: Build Linux platform, WSL rootfs, and descriptor assets
         env:
           CHANNEL: ${{ inputs.channel }}
@@ -200,7 +205,7 @@ jobs:
             --channel "$CHANNEL" \
             --artifact-base-url "$artifact_base_url" \
             --appliance-image-prefix "ghcr.io/${GITHUB_REPOSITORY,,}/appliance" \
-            --appliance-runtime-base 'quay.io/fedora/fedora-minimal@sha256:51912d3c727c1ac964470150ba280b3a0192ced3c622c78b7b68fe8d55d73fee'
+            --appliance-runtime-base "$APPLIANCE_RUNTIME_BASE"
 
           # build-release-assets.sh keys its output directory on the manifest version.
           release_dir="publish/release-assets/$MANIFEST_VERSION"
