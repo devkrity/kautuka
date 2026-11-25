@@ -55,7 +55,7 @@ for role in "${roles[@]}"; do
         --build-arg "SERVICE_VERSION=$version" -t "$tag" "$payloads/$role" >&2
 
     archive="$work/$role.tar"
-    skopeo copy --preserve-digests "containers-storage:$tag" "oci-archive:$archive:$repository:$version" >&2
+    podman push --format oci "$tag" "oci-archive:$archive:$repository:$version" >&2
     digest="sha256:$(skopeo inspect --raw "oci-archive:$archive" | sha256sum | cut -d ' ' -f 1)"
     [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Invalid OCI manifest digest for $role." >&2; exit 1; }
     printf '%s\t%s@%s\n' "$role" "$repository" "$digest" >> "$work/service-images.tsv"

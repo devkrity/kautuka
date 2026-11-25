@@ -175,8 +175,13 @@ jobs:
       - name: Install OCI archive tooling
         run: sudo apt-get update && sudo apt-get install -y podman skopeo
 
-      - name: Pull pinned appliance runtime base
-        run: podman pull "$APPLIANCE_RUNTIME_BASE"
+      - name: Verify rootless OCI export with the pinned appliance base
+        run: |
+          podman pull "$APPLIANCE_RUNTIME_BASE"
+          archive="$RUNNER_TEMP/appliance-export-smoke.tar"
+          trap 'rm -f -- "$archive"' EXIT
+          podman push --format oci "$APPLIANCE_RUNTIME_BASE" "oci-archive:$archive:localhost/appliance-export-smoke:test"
+          skopeo inspect --raw "oci-archive:$archive" >/dev/null
 
       - name: Build Linux platform, WSL rootfs, and descriptor assets
         env:
