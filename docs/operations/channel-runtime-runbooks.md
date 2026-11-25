@@ -4,6 +4,8 @@ Sanitized operator procedures for the polling-only channel runtime. Never paste 
 
 ## Certificate and signing-key rotation
 
+On the appliance, host maintenance renews the local channel connection automatically. New messages stay queued during the final-day drain. If renewal fails, the message queue shows that Kautuka will retry. Check the `kautuka-channel-certificates.service` journal if retries keep failing. Admission resumes after Manager verifies readiness with the renewed identities.
+
 1. Issue replacement Gateway/ChannelHost workload certificates with the documented overlap window.
 2. Deploy current material; confirm readiness and a successful ChannelHost Ping.
 3. After overlap expires, revoke previous leaves and confirm stale-leaf rejection.

@@ -61,4 +61,23 @@ describe('Gateway session queue', () => {
       )
     );
   });
+
+  it('keeps the maintenance reason visible when the owner hides queued messages', async () => {
+    const maintenanceMessage = 'Kautuka couldn’t renew its channel connection. New messages are queued while Kautuka retries.';
+    vi.mocked(apiClient.get).mockResolvedValue({
+      data: { messages: [{ id: 'turn-446', order: 10, content: 'roll d446' }], throughOrder: 10, maintenanceMessage },
+    });
+    show();
+    fireEvent.click(await screen.findByRole('button', { name: 'Hide queued messages' }));
+    expect(screen.getByRole('status')).toHaveTextContent(maintenanceMessage);
+    expect(screen.queryByText('roll d446')).not.toBeInTheDocument();
+  });
+
+  it('explains the pause before the owner sends a message', async () => {
+    const maintenanceMessage = 'Kautuka is waiting for the active helper to finish before renewing its channel connection.';
+    vi.mocked(apiClient.get).mockResolvedValue({ data: { messages: [], throughOrder: 0, maintenanceMessage } });
+    show();
+    expect(await screen.findByRole('status')).toHaveTextContent(maintenanceMessage);
+    expect(screen.queryByRole('button', { name: /queued/i })).not.toBeInTheDocument();
+  });
 });

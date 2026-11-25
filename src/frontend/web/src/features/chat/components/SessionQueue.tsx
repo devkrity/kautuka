@@ -6,6 +6,7 @@ import apiClient from '@/lib/apiClient';
 type QueueSnapshot = {
   messages: { id: string; order: number; content: string }[];
   throughOrder: number;
+  maintenanceMessage?: string | null;
 };
 
 export function SessionQueue({ agentId, sessionId }: { agentId: string; sessionId: string }) {
@@ -27,10 +28,17 @@ export function SessionQueue({ agentId, sessionId }: { agentId: string; sessionI
         Unable to load waiting messages.
       </p>
     );
-  if (!queue.data?.messages.length) return null;
+  if (!queue.data?.messages.length) {
+    return queue.data?.maintenanceMessage
+      ? <p role="status" className="mb-2 px-1 text-xs text-muted-foreground">{queue.data.maintenanceMessage}</p>
+      : null;
+  }
   const count = queue.data.messages.length;
   return (
     <section aria-label="Message queue" className="mb-2 space-y-2">
+      {queue.data.maintenanceMessage && (
+        <p role="status" className="px-1 text-xs text-muted-foreground">{queue.data.maintenanceMessage}</p>
+      )}
       {expanded ? (
         <div className="overflow-hidden rounded-2xl border border-border/70 bg-background shadow-sm">
           <div className="flex items-center justify-between gap-3 px-3 pb-1 pt-2 text-xs text-muted-foreground">

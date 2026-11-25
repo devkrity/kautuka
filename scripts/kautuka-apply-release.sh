@@ -2272,10 +2272,14 @@ if [[ "$renew_channel_certificates" == 'true' ]]; then
                 exit 0
             fi ;;
         10|11|12) ;;
-        *) exit 1 ;;
+        *)
+            printf 2 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none || exit 1
+            exit 1 ;;
     esac
     if [[ "$certificate_status" == 11 || "$certificate_status" == 12 ]]; then
-        printf 1 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none || exit 1
+        if [[ "$(head -c 1 -- "$helper_run_lock")" != 2 ]]; then
+            printf 1 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none || exit 1
+        fi
     fi
     (
         exec 7<"$helper_run_lock" || exit 1
@@ -2286,7 +2290,14 @@ if [[ "$renew_channel_certificates" == 'true' ]]; then
             echo 'Deferred Channel certificate maintenance while a helper is active.'
             exit 0
         fi
-        renew_appliance_channel_certificates false || exit $?
+        renewal_status=0
+        renew_appliance_channel_certificates false || renewal_status=$?
+        if [[ "$renewal_status" != 0 ]]; then
+            if [[ "$certificate_status" != 10 || -f "$database_root/security/.channel-renewal-restart" ]]; then
+                printf 2 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none || exit 1
+            fi
+            exit "$renewal_status"
+        fi
         printf 0 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none
     )
     exit $?

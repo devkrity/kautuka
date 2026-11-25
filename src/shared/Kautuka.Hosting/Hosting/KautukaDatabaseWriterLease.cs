@@ -67,6 +67,27 @@ public sealed class KautukaDatabaseWriterLease : IDisposable
         catch { handle.Dispose(); throw; }
     }
 
+    public static string? ReadHelperRunMaintenanceMessage()
+    {
+        if (!OperatingSystem.IsLinux()) return null;
+        try
+        {
+            using SafeFileHandle handle = File.OpenHandle(HelperRunLockPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            Span<byte> flag = stackalloc byte[1];
+            if (RandomAccess.Read(handle, flag, 0) != 1) return null;
+            return flag[0] switch
+            {
+                (byte)'1' => "Kautuka is waiting for the active helper to finish before renewing its channel connection.",
+                (byte)'2' => "Kautuka couldn’t renew its channel connection. New messages are queued while Kautuka retries.",
+                _ => null,
+            };
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
     // Never block a Gateway startup or shutdown thread while the host is restarting it.
     public static async ValueTask<KautukaDatabaseWriterLease?> AcquireHelperRunAsync(CancellationToken cancellationToken)
     {

@@ -30,6 +30,8 @@ internal static class SessionQueueEndpoints
                         ["content"] = content.Length > 300 ? content[..300] + "…" : content };
                 })]),
                 ["throughOrder"] = waiting.Count == 0 ? 0 : waiting[^1].Order,
+                ["maintenanceMessage"] = string.Equals(Environment.GetEnvironmentVariable("Kautuka__Appliance__Enabled"), "true", StringComparison.OrdinalIgnoreCase)
+                    ? KautukaDatabaseWriterLease.ReadHelperRunMaintenanceMessage() : null,
             }, KautukaJsonContext.Default.JsonObject);
         });
         app.MapPost("/api/narad/v1/agents/{agentId}/sessions/{sessionId}/queue/remove", async (

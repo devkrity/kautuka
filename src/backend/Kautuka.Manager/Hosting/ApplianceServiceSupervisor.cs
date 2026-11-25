@@ -226,6 +226,9 @@ internal sealed partial class ApplianceServiceSupervisor(
             return new(reason, topology?.NextRecoveryRetryUtc);
         }
 
+        if (KautukaDatabaseWriterLease.ReadHelperRunMaintenanceMessage() is { } maintenanceMessage)
+            return new(maintenanceMessage);
+
         long next = Interlocked.Read(ref nextServiceRetryUtcTicks);
         return new(recoveringNetwork
                 ? "Network protection is ready. Kautuka is restarting its web interface."
