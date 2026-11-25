@@ -213,10 +213,10 @@ internal sealed partial class ApplianceServiceSupervisor(
             return new("Kautuka is completing or recovering an update. Your helpers are paused.");
         if (TrustedApplianceReleaseFiles.ReadRecoveryStatusOrRequireRecovery(
             Path.GetDirectoryName(KautukaMaintenanceMode.MarkerPath)!).RecoveryRequired)
-            return new("Kautuka couldnâ€™t recover from an update. Your helpers are paused.", NextStep: recoveryHelp);
+            return new("Kautuka couldn’t recover from an update. Your helpers are paused.", NextStep: recoveryHelp);
         if (topology?.IsStartupGateOpen != true)
         {
-            const string reason = "Your helpers are paused because Kautuka couldnâ€™t verify network protection.";
+            const string reason = "Your helpers are paused because Kautuka couldn’t verify network protection.";
             if (topology?.RequiresOperatorRecovery == true)
                 return new(reason, NextStep: recoveryHelp);
             if (topology?.IsRecoveryWaitingForNetworkResume == true)
@@ -231,7 +231,7 @@ internal sealed partial class ApplianceServiceSupervisor(
         long next = Interlocked.Read(ref nextServiceRetryUtcTicks);
         return new(recoveringNetwork
                 ? "Network protection is ready. Kautuka is restarting its web interface."
-                : "Kautukaâ€™s web interface is unavailable.",
+                : "Kautuka’s web interface is unavailable.",
             next > DateTimeOffset.UtcNow.UtcTicks ? new DateTimeOffset(next, TimeSpan.Zero) : null);
     }
 

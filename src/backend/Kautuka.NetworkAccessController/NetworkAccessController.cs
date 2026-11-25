@@ -86,6 +86,11 @@ public sealed class NetworkAccessController
         this.packageProxyAdmission = packageProxyAdmission;
         this.timeProvider = timeProvider ?? TimeProvider.System;
         ApplianceMode = applianceMode;
+
+        // Fail closed on startup if the stored policy cannot be read.
+        this.policyStore.EnsureLoaded();
+        this.registry.ContainerDeregistered += (_, args) => this.policyStore.ClearProbeContainer(args.ContainerId);
+        this.registry.ContainerIdPromoted += (_, args) => this.policyStore.PromoteProbeContainerId(args.PreviousContainerId, args.ActualContainerId);
     }
 
     public bool ApplianceMode { get; }

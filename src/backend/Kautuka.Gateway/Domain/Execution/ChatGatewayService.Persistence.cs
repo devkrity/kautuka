@@ -210,8 +210,8 @@ internal sealed partial class ChatGatewayService
                     Internal: string.Equals(source, "hitl", StringComparison.OrdinalIgnoreCase));
 
                 // Pause is a delivery boundary, not a root final. Do not persist pre-tool assistant
-                // prose as a completed answer â€” continuation will persist the real final, and keeping
-                // both surfaces as "final â†’ stop â†’ resume â†’ final again" on Chat / channel peers.
+                // prose as a completed answer — continuation will persist the real final, and keeping
+                // both surfaces as "final → stop → resume → final again" on Chat / channel peers.
                 bool awaitingApproval = result.Run is not null
                     && string.Equals(
                         result.Run.Phase,

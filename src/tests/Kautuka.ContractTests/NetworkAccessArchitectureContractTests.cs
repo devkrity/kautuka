@@ -162,7 +162,7 @@ public sealed class NetworkAccessArchitectureContractTests
         Assert.Contains("getent", productionSource, StringComparison.Ordinal);
         Assert.Contains("string.Equals(currentCorefile, corefile, StringComparison.Ordinal)", productionSource, StringComparison.Ordinal);
         Assert.DoesNotContain("File.WriteAllTextAsync(corefilePath", productionSource, StringComparison.Ordinal);
-        Assert.Contains("\"https://\" + lanHostName + \":8443/\"", productionSource, StringComparison.Ordinal);
+        Assert.Contains("string lanRetryUrl = $\"https://{lanHostName}:8443/explicit-retry\";", productionSource, StringComparison.Ordinal);
         Assert.Contains("PROD_LAN_NO_GRANT", productionSource, StringComparison.Ordinal);
         Assert.Contains("private_reject", productionSource, StringComparison.Ordinal);
         Assert.Contains("10.248.0.2", productionSource, StringComparison.Ordinal);

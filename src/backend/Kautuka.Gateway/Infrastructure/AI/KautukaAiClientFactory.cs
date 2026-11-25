@@ -28,7 +28,7 @@ internal sealed class KautukaAiClientFactory(
         .ToDictionary(provider => ProviderTypeCatalogSettings.NormalizeType(provider.ProviderType), provider => provider, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Sync path â€” extracts api_key directly from settings JSON (validation/test flow).
+    /// Sync path — extracts api_key directly from settings JSON (validation/test flow).
     /// </summary>
     public IChatClient? TryCreate(string providerType, JsonObject settings, string modelName)
     {
@@ -48,7 +48,7 @@ internal sealed class KautukaAiClientFactory(
     }
 
     /// <summary>
-    /// Async path â€” resolves api_key from CredentialsHost using the provider ID.
+    /// Async path — resolves api_key from CredentialsHost using the provider ID.
     /// Use this for all runtime paths (agent execution, probing, introspection).
     /// </summary>
     public async Task<IChatClient?> TryCreateAsync(

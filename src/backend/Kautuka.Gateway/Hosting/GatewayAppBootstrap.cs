@@ -127,7 +127,7 @@ internal static partial class GatewayAppBootstrap
         // Manager mTLS certs (stable CA + rotating client leaf)
         builder.Services.AddSingleton<WorkspaceMtlsCerts>();
 
-        // Manager gRPC channel (mTLS â€” DO NOT add Http2UnencryptedSupport for this channel)
+        // Manager gRPC channel (mTLS — DO NOT add Http2UnencryptedSupport for this channel)
         // Channel creation waits for the first call and keeps the channel only after the
         // certificate files load. A missing file is attempted again on the next call.
         builder.Services.AddSingleton<IManagerGrpcService>(sp =>
@@ -261,7 +261,7 @@ internal static partial class GatewayAppBootstrap
         // ChannelHost mTLS certs (stable CA + rotating client leaf)
         builder.Services.AddSingleton<ChannelHostMtlsCerts>();
 
-        // ChannelHost gRPC channel (mTLS â€” DO NOT add Http2UnencryptedSupport for this channel)
+        // ChannelHost gRPC channel (mTLS — DO NOT add Http2UnencryptedSupport for this channel)
         // Channel and certificate loading wait for the first call. A missing file is not
         // remembered, so a later call loads the material after it has been written.
         builder.Services.AddSingleton<IChannelHostGrpcService>(sp =>
@@ -312,7 +312,7 @@ internal static partial class GatewayAppBootstrap
         builder.Services.AddSingleton<CredentialsMtlsCerts>();
         builder.Services.AddHealthChecks().AddCheck<CredentialsHostDependencyHealthCheck>("credentialshost-ready", tags: ["ready"]);
 
-        // CredentialsHost gRPC channel (mTLS â€” DO NOT add Http2UnencryptedSupport for this channel)
+        // CredentialsHost gRPC channel (mTLS — DO NOT add Http2UnencryptedSupport for this channel)
         // Callers depend on Lazy<>. PublicationOnly does not remember a failed certificate load,
         // so a missing file is attempted again on the next call.
         builder.Services.AddSingleton(sp => new Lazy<Kautuka.Protos.CredentialsService.CredentialsServiceClient>(() =>
