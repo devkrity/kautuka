@@ -295,7 +295,7 @@ internal sealed partial class ChatGatewayService
             using IDisposable nacScope = NetworkAccessContext.BeginScope(
                 userId: ownerUserId,
                 agentId: string.Equals(session?.TargetType, "agent", StringComparison.OrdinalIgnoreCase) ? session?.TargetId : null,
-                purpose: "memory-extraction", service: "ai-model");
+                purpose: "memory-extraction", service: "ai-model", skipApprovalHold: true);
             IChatClient? client = await ResolveExtractionClientAsync(targetType, targetId, ct).ConfigureAwait(false);
             ChatGatewayServiceLog.FactExtractionClientResolved(logger, client is null ? "null" : "resolved", targetType, targetId);
 

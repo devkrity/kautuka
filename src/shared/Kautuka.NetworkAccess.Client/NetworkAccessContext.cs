@@ -29,7 +29,8 @@ public static class NetworkAccessContext
         string? purpose = null,
         string? service = null,
         string executionContext = "app",
-        string? correlationId = null)
+        string? correlationId = null,
+        bool skipApprovalHold = false)
     {
         var scope = new NetworkAccessScope(
             UserId: userId,
@@ -38,7 +39,8 @@ public static class NetworkAccessContext
             Purpose: purpose,
             Service: service,
             ExecutionContext: string.IsNullOrWhiteSpace(executionContext) ? "app" : executionContext,
-            CorrelationId: correlationId);
+            CorrelationId: correlationId,
+            SkipApprovalHold: skipApprovalHold);
 
         return BeginScope(scope);
     }

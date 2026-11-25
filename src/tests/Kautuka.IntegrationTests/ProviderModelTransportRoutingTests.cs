@@ -16,7 +16,7 @@ public sealed class ProviderModelTransportRoutingTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task RuntimeModelWaitsBeforeCallingProviderAndKeepsProbesImmediate(bool streaming)
+    public async Task RuntimeModelWaitsAndKeepsProbesAndBackgroundWorkImmediate(bool streaming)
     {
         var checker = new HoldingModelChecker();
         using var provider = new RecordingModelClient();
@@ -32,12 +32,14 @@ public sealed class ProviderModelTransportRoutingTests
 
         using (NetworkAccessContext.BeginScope("user-a", "agent-a", purpose: "ai-probe"))
             await SendAsync().WaitAsync(TimeSpan.FromSeconds(5), token);
-        Assert.Equal(1, provider.Calls);
+        using (NetworkAccessContext.BeginScope("user-a", "agent-a", purpose: "memory-extraction", skipApprovalHold: true))
+            await SendAsync().WaitAsync(TimeSpan.FromSeconds(5), token);
+        Assert.Equal(2, provider.Calls);
         Assert.False(pending.IsCompleted);
 
         checker.Approved.SetResult(NetworkAccessCheckResult.CreateAllowed("rule_agent"));
         await pending.WaitAsync(TimeSpan.FromSeconds(5), token);
-        Assert.Equal(2, provider.Calls);
+        Assert.Equal(3, provider.Calls);
         Assert.False(NetworkAccessContext.Current!.SkipApprovalHold);
 
         async Task SendAsync()
