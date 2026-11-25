@@ -152,10 +152,16 @@ describe('OnboardingWizard welcome step', () => {
   it('requires a new owner to review current service permissions before saving a helper', async () => {
     flowState.stage = 'setup';
     flowState.canManageServiceNetworkAccess = true;
-    api.get.mockResolvedValue({ data: { revision: 1, rules: [{
-      setupService: 'suffix-list', scopeKind: 'agent', userId: 'system', agentId: 'updateservice',
-      destination: 'publicsuffix.org', destKind: 'host', port: 443, allowed: true,
-    }] } });
+    api.get.mockResolvedValue({
+      data: {
+        revision: 1,
+        rules: [{
+          setupService: 'suffix-list', scopeKind: 'agent', userId: 'system', agentId: 'updateservice',
+          destination: 'publicsuffix.org', destKind: 'host', port: 443, allowed: true,
+        }],
+        services: [{ serviceId: 'suffix-list', total: 1, granted: 1, effective: 1 }],
+      },
+    });
     render(<OnboardingWizard />);
 
     const confirm = screen.getByRole('button', { name: 'Confirm permissions and continue' });
