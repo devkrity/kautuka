@@ -24,6 +24,103 @@ namespace Kautuka.IntegrationTests;
 public sealed class WorkspaceContainerConnectorExecutionServiceTests
 {
     [Theory]
+    [InlineData("matching")]
+    [InlineData("modified")]
+    [InlineData("malformed")]
+    public async Task VersionThreeSandboxManifestOnlyControlsReinstallation(string installedState)
+    {
+        string root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            string bundle = Path.Combine(root, "connector.mcpb");
+            var token = TestContext.Current.CancellationToken;
+            await File.WriteAllTextAsync(bundle, "bundle", token);
+            string image = "quay.io/devkrity/kautuka-base@sha256:" + new string('a', 64);
+            string workspacePath = Path.Combine(root, "users", "user", "agents", "agent");
+            Directory.CreateDirectory(workspacePath);
+            var workspace = new ContainerContext("agent", "agent", "user", workspacePath, "/workspace", image, 30, "512m", 1, [], new Dictionary<string, string>());
+            var connector = new WorkspaceMcpContainerConnectorDefinition("user::web", image, "manager-command", ["manager-arg"], true, false, bundle, "binary", [], 30, 600);
+            var desired = new WorkspaceDesiredStateStore();
+            _ = desired.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap,
+                new ManagerRuntimeSettings(new ManagerWorkspaceDefinition { BaseRoot = root }, new ManagerSandboxRuntimeDefinition { Image = image, DefaultTimeout = 30 }, new WorkspaceTelemetryDefinition()),
+                [workspace], [connector], [new("agent", "agent", [connector.ConnectorId])]);
+
+            // Frozen v0.1.27 values for this bundle and base image.
+            const string installRoot = "/home/node/.kautuka/connectors/by-digest/d9f3820066cd225f4407a643b1961bb39d4e356c8ef6c6a0e2c389dd20ea9c3b";
+            const string artifactDigest = "cda184e0acf69f4c84153a6eacbbc9dc5d0b4c220de5d4f19503b4f0d58c9552";
+            string legacyManifest = $$$"""
+                {"NormalizationVersion":3,"Contracts":[{"ConnectorId":"user::web","ArtifactDigest":"{{{artifactDigest}}}","RuntimeImage":"localhost/kautuka-mcpb-sandbox-binary:{{{artifactDigest}}}","ServerType":"binary","InstallRoot":"{{{installRoot}}}","ExecutablePath":"manager-command","ArgsTemplate":["manager-arg"],"EnvTemplate":[],"WorkingDirectory":"{{{installRoot}}}","NormalizationVersion":3}]}
+                """;
+            var modified = System.Text.Json.Nodes.JsonNode.Parse(legacyManifest)!;
+            var contract = modified["Contracts"]![0]!;
+            contract["ExecutablePath"] = "sandbox-command";
+            contract["ArgsTemplate"] = new System.Text.Json.Nodes.JsonArray("sandbox-arg");
+            contract["EnvTemplate"] = JsonSerializer.SerializeToNode(new[]
+            {
+                new KeyValuePair<string, string>("LD_PRELOAD", "sandbox-value"),
+                new KeyValuePair<string, string>("CONTAINERS_CONF", "sandbox-value"),
+                new KeyValuePair<string, string>("PATH", "sandbox-value")
+            });
+            string poison = modified.ToJsonString();
+            bool drifted = installedState != "matching";
+            string firstRead = installedState switch
+            {
+                "matching" => legacyManifest,
+                "modified" => poison,
+                _ => "{"
+            };
+            var sandbox = new ManifestSandbox(firstRead, poison);
+            List<string> commands = [];
+            var runner = new PodmanCommandRunner((args, _) =>
+            {
+                commands.Add(args[0]);
+                return Task.FromResult(new PodmanCommandResult(0, "", "", ProcessTerminationReason.Completed));
+            });
+            var materializer = new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance,
+                new RuntimeImageAllowlist(1, [new("kautuka-base", image, null)]));
+            string capture = Path.Combine(root, "launch.json");
+            const string recorder = "import json, os, sys; json.dump([sys.argv[2:], [os.getenv(k) for k in ('LD_PRELOAD','CONTAINERS_CONF','PATH')]], open(sys.argv[1],'w'))";
+            await using var service = new WorkspaceContainerConnectorExecutionService(desired, runner, materializer, sandbox,
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance, stdioCommand: "python3", stdioArgumentsPrefix: ["-c", recorder, capture]);
+            await service.CallToolAsync(connector.ConnectorId, null, "test", "{}", 30, false, workspace, WorkspaceMcpExecutionContext.AgentSandbox, token);
+            Assert.Equal(1, sandbox.ManifestReads);
+            Assert.Equal(drifted ? 1 : 0, sandbox.Replacements);
+            Assert.Equal(drifted ? new[] { "image", "create", "cp", "rm" } : ["image"], commands);
+            using var recorded = JsonDocument.Parse(await File.ReadAllTextAsync(capture, token));
+            Assert.Equal(new[] { "exec", "-i", "--workdir", installRoot, "sandbox", "manager-command", "manager-arg" },
+                recorded.RootElement[0].EnumerateArray().Select(value => value.GetString()));
+            Assert.DoesNotContain(recorded.RootElement[1].EnumerateArray(), value => value.GetString() == "sandbox-value");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private sealed class ManifestSandbox(string firstManifest, string laterManifest) : IContainerTool
+    {
+        public int ManifestReads { get; private set; }
+        public int Replacements { get; private set; }
+        public Task<OciSandboxSession> SpawnSandboxAsync(ContainerContext context, CancellationToken cancellationToken)
+            => Task.FromResult(new OciSandboxSession("sandbox", Replacements > 0, context.ScopeType, context.ScopeId, context.UserId));
+        public Task CloseSandboxAsync(ContainerContext context, CancellationToken cancellationToken)
+        {
+            Replacements++;
+            return Task.CompletedTask;
+        }
+        public Task<ContainerExecutionResult> RunShellAsync(ContainerContext context, string command, int? timeoutSeconds, CancellationToken cancellationToken)
+        {
+            string output = command.StartsWith("if [ -f ", StringComparison.Ordinal)
+                ? (++ManifestReads == 1 ? firstManifest : laterManifest) : "";
+            return Task.FromResult(new ContainerExecutionResult("ok", 0, output, ""));
+        }
+        public Task PrimeWorkspaceAsync(ContainerContext context, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<ContainerContext> RebuildWorkspaceAsync(ContainerContext context, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> DeleteWorkspaceAsync(ContainerContext context, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<OciSandboxSession> InspectSandboxAsync(ContainerContext context, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    [Theory]
     [InlineData("old", "one")]
     [InlineData("server", "old")]
     public async Task ChangedCommandOrArgumentsAreRejectedBeforeStartingConnector(string expectedCommand, string expectedArgument)
@@ -2229,7 +2326,7 @@ Egress: "normal", Attribution: "user", CompatProfile: null, DateTimeOffset.UtcNo
             false,
             null,
             "uv",
-            [new KeyValuePair<string, string>("PYTHONPATH", "/home/node/.kautuka/connectors/user-1--kautuka-web-tools/src")],
+            [new("CONNECTOR_ROOT", "/home/node/.kautuka/connectors/user-1--kautuka-web-tools"), new("PYTHONPATH", "/untrusted")],
             30,
             600);
 
@@ -2245,7 +2342,7 @@ Egress: "normal", Attribution: "user", CompatProfile: null, DateTimeOffset.UtcNo
                 "--workdir",
                 "/home/node/.kautuka/connectors/user-1--kautuka-web-tools",
                 "--env",
-                "PYTHONPATH",
+                "CONNECTOR_ROOT",
                 "test-container",
                 "/home/node/.kautuka/connectors/user-1--kautuka-web-tools/.venv/bin/python",
                 "-m",

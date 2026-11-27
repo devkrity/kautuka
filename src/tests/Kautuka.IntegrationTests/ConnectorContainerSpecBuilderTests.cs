@@ -236,6 +236,26 @@ public sealed class ConnectorContainerSpecBuilderTests
         }
     }
 
+    [Theory]
+    [InlineData("LD_PRELOAD")]
+    [InlineData("CONTAINERS_CONF")]
+    [InlineData("PATH")]
+    [InlineData("ld_custom")]
+    [InlineData("DYLD_CUSTOM")]
+    [InlineData("CONTAINERS_CUSTOM")]
+    [InlineData("CONTAINER_CUSTOM")]
+    [InlineData("DOCKER_CUSTOM")]
+    [InlineData("PODMAN_CUSTOM")]
+    [InlineData("GCONV_PATH")]
+    public void LaunchFiltersProcessControlsFromArgumentsAndTransport(string key)
+    {
+        var connector = CreateConnector() with { Environment = [new(key, "canary"), new("TOKEN", "allowed")] };
+        Assert.DoesNotContain(key, ConnectorContainerSpecBuilder.BuildExec(connector, "sandbox", null));
+        Assert.DoesNotContain(key, ConnectorContainerSpecBuilder.BuildRun(connector, "isolated",
+            WorkspaceMcpExecutionContext.Isolated, CreateWorkspaceContext(), false, "10.247.1.1", false));
+        Assert.Equal("TOKEN", Assert.Single(ConnectorContainerSpecBuilder.BuildTransportEnvironment(connector)).Key);
+    }
+
     [Fact]
     public void RuntimeEnvironmentOverrideCannotSetHostProcessControls()
     {

@@ -212,10 +212,14 @@ internal static class ConnectorContainerSpecBuilder
     };
 
     private static bool IsHostProcessSensitiveKey(string key)
-        => hostProcessSensitiveKeys.Contains(key);
+        => hostProcessSensitiveKeys.Contains(key)
+            || hostProcessSensitivePrefixes.Any(prefix => key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+
+    private static readonly string[] hostProcessSensitivePrefixes =
+        ["LD_", "DYLD_", "CONTAINERS_", "CONTAINER_", "DOCKER_", "PODMAN_", "GCONV_"];
 
     private static IEnumerable<KeyValuePair<string, string>> ForwardedEnvironment(WorkspaceMcpContainerConnectorDefinition connector)
-        => connector.Environment.Where(static pair => ForwardsEnvironmentKey(pair.Key));
+        => connector.Environment.Where(static pair => AllowsRuntimeEnvironmentOverride(pair.Key));
 
     private static bool IsPackageIndexBypassKey(string key)
     {

@@ -295,10 +295,10 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             : await workloadLaunchGate.AcquireLaunchLeaseAsync(workspaceContext.UserId, cancellationToken).ConfigureAwait(false);
         await using var leaseScope = lease.ConfigureAwait(false);
         using CancellationTokenSource launchCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.CancellationToken);
-        return await EnsureAgentSandboxProvisionedUnderLeaseAsync(workspaceContext, desiredConnectorIds, launchCancellation.Token).ConfigureAwait(false);
+        return (await EnsureAgentSandboxProvisionedUnderLeaseAsync(workspaceContext, desiredConnectorIds, launchCancellation.Token).ConfigureAwait(false)).Session;
     }
 
-    private async Task<OciSandboxSession> EnsureAgentSandboxProvisionedUnderLeaseAsync(
+    private async Task<(OciSandboxSession Session, AgentSandboxInstalledManifest DesiredManifest)> EnsureAgentSandboxProvisionedUnderLeaseAsync(
         ContainerContext workspaceContext,
         IReadOnlyList<string> desiredConnectorIds,
         CancellationToken cancellationToken)
@@ -312,9 +312,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         OciSandboxSession session = await containerTool.SpawnSandboxAsync(workspaceContext, cancellationToken).ConfigureAwait(false);
         if (!session.Created)
         {
-            AgentSandboxInstalledManifest? installedManifest = await TryReadAgentSandboxManifestAsync(workspaceContext, cancellationToken).ConfigureAwait(false);
-            if (AgentSandboxInstallContract.Equals(installedManifest, desiredManifest))
-                return session;
+            if (await HasDesiredSandboxManifestAsync(workspaceContext, desiredManifest, cancellationToken).ConfigureAwait(false))
+                return (session, desiredManifest);
 
             await containerTool.CloseSandboxAsync(workspaceContext, cancellationToken).ConfigureAwait(false);
             session = await containerTool.SpawnSandboxAsync(workspaceContext, cancellationToken).ConfigureAwait(false);
@@ -330,7 +329,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             }
 
             await WriteAgentSandboxManifestAsync(workspaceContext, desiredManifest, cancellationToken).ConfigureAwait(false);
-            return session;
+            return (session, desiredManifest);
         }
         catch
         {
@@ -842,13 +841,19 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     throw new InvalidOperationException("The connector base image must be pinned to a digest. Test the connection and start a new run.");
 
                 IReadOnlyList<string> desiredConnectorIds = ResolveDesiredSandboxConnectorIds(workspaceContext);
-                OciSandboxSession sandboxSession = await EnsureAgentSandboxProvisionedUnderLeaseAsync(workspaceContext, desiredConnectorIds, cancellationToken).ConfigureAwait(false);
-                AgentSandboxInstalledContract installedContract = await GetInstalledAgentSandboxContractAsync(workspaceContext, connector.ConnectorId, cancellationToken).ConfigureAwait(false);
-                WorkspaceMcpContainerConnectorDefinition sandboxConnector = ApplyInstalledAgentSandboxContract(connector, installedContract);
+                var (sandboxSession, desiredManifest) = await EnsureAgentSandboxProvisionedUnderLeaseAsync(workspaceContext, desiredConnectorIds, cancellationToken).ConfigureAwait(false);
+                AgentSandboxInstalledContract contract = desiredManifest.Contracts.FirstOrDefault(candidate => candidate.ConnectorId == connector.ConnectorId)
+                    ?? throw new InvalidOperationException($"Agent sandbox '{workspaceContext.ScopeId}' has no desired contract for connector '{connector.ConnectorId}'.");
+                var sandboxConnector = connector with
+                {
+                    Command = contract.ExecutablePath,
+                    Args = contract.ArgsTemplate,
+                    Environment = contract.EnvTemplate
+                };
                 List<string> sandboxArguments = ConnectorContainerSpecBuilder.BuildExec(
                     sandboxConnector,
                     sandboxSession.ContainerName,
-                    installedContract.WorkingDirectory ?? installedContract.InstallRoot);
+                    contract.WorkingDirectory ?? contract.InstallRoot);
 
                 var sandboxLaunch = new TransportLaunch(new StdioClientTransport(new StdioClientTransportOptions
                 {
@@ -1059,45 +1064,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             .OrderBy(static connectorId => connectorId, StringComparer.Ordinal)
             .ToArray();
 
-    private async Task<AgentSandboxInstalledContract> GetInstalledAgentSandboxContractAsync(
+    private async Task<bool> HasDesiredSandboxManifestAsync(
         ContainerContext workspaceContext,
-        string connectorId,
-        CancellationToken cancellationToken)
-    {
-        AgentSandboxInstalledManifest manifest = await TryReadAgentSandboxManifestAsync(workspaceContext, cancellationToken).ConfigureAwait(false)
-            ?? throw new InvalidOperationException($"Agent sandbox '{workspaceContext.ScopeId}' has no installed connector manifest.");
-
-        return manifest.Contracts.FirstOrDefault(contract => string.Equals(contract.ConnectorId, connectorId, StringComparison.Ordinal))
-            ?? throw new InvalidOperationException($"Agent sandbox '{workspaceContext.ScopeId}' is missing installed contract for connector '{connectorId}'.");
-    }
-
-    private static WorkspaceMcpContainerConnectorDefinition ApplyInstalledAgentSandboxContract(
-        WorkspaceMcpContainerConnectorDefinition connector,
-        AgentSandboxInstalledContract installedContract)
-    {
-        Dictionary<string, string> mergedEnvironment = installedContract.EnvTemplate
-            .ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.OrdinalIgnoreCase);
-
-        foreach (KeyValuePair<string, string> pair in connector.Environment)
-        {
-            if (string.IsNullOrWhiteSpace(pair.Key))
-            {
-                continue;
-            }
-
-            mergedEnvironment[pair.Key] = AgentSandboxInstallContract.RewriteRuntimePath(pair.Value, installedContract.InstallRoot);
-        }
-
-        return connector with
-        {
-            Command = installedContract.ExecutablePath,
-            Args = installedContract.ArgsTemplate,
-            Environment = [.. mergedEnvironment.Select(static pair => new KeyValuePair<string, string>(pair.Key, pair.Value))]
-        };
-    }
-
-    private async Task<AgentSandboxInstalledManifest?> TryReadAgentSandboxManifestAsync(
-        ContainerContext workspaceContext,
+        AgentSandboxInstalledManifest desiredManifest,
         CancellationToken cancellationToken)
     {
         ContainerExecutionResult result = await containerTool
@@ -1108,12 +1077,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false);
 
-        if (result.ExitCode != 0 || string.IsNullOrWhiteSpace(result.StdOut))
-        {
-            return null;
-        }
-
-        return JsonSerializer.Deserialize(result.StdOut, AgentSandboxContractJsonContext.Default.AgentSandboxInstalledManifest);
+        // The v0.1.27 installer wrote this same canonical JSON. Treat any other bytes as drift.
+        return result.ExitCode == 0 && result.StdOut.AsSpan().TrimEnd().SequenceEqual(
+            JsonSerializer.Serialize(desiredManifest, AgentSandboxContractJsonContext.Default.AgentSandboxInstalledManifest));
     }
 
     private async Task ResetAgentSandboxInstallRootAsync(

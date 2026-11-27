@@ -4,24 +4,6 @@ internal static class AgentSandboxInstallContract
 {
     private const string installRoot = "/home/node/.kautuka/connectors";
 
-    public static bool Equals(
-        WorkspaceContainerConnectorExecutionService.AgentSandboxInstalledManifest? left,
-        WorkspaceContainerConnectorExecutionService.AgentSandboxInstalledManifest right)
-        => left is not null
-            && left.NormalizationVersion == right.NormalizationVersion
-            && left.Contracts.Count == right.Contracts.Count
-            && left.Contracts.Zip(right.Contracts, static (l, r) => (Left: l, Right: r)).All(static pair =>
-                string.Equals(pair.Left.ConnectorId, pair.Right.ConnectorId, StringComparison.Ordinal)
-                && string.Equals(pair.Left.ArtifactDigest, pair.Right.ArtifactDigest, StringComparison.Ordinal)
-                && string.Equals(pair.Left.RuntimeImage, pair.Right.RuntimeImage, StringComparison.Ordinal)
-                && string.Equals(pair.Left.ServerType, pair.Right.ServerType, StringComparison.Ordinal)
-                && string.Equals(pair.Left.InstallRoot, pair.Right.InstallRoot, StringComparison.Ordinal)
-                && string.Equals(pair.Left.ExecutablePath, pair.Right.ExecutablePath, StringComparison.Ordinal)
-                && string.Equals(pair.Left.WorkingDirectory, pair.Right.WorkingDirectory, StringComparison.Ordinal)
-                && pair.Left.NormalizationVersion == pair.Right.NormalizationVersion
-                && pair.Left.ArgsTemplate.SequenceEqual(pair.Right.ArgsTemplate, StringComparer.Ordinal)
-                && pair.Left.EnvTemplate.SequenceEqual(pair.Right.EnvTemplate));
-
     public static string BuildInstallRoot(WorkspaceMcpContainerConnectorDefinition connector, string? bundleDigest = null)
     {
         ArgumentNullException.ThrowIfNull(connector);
@@ -34,11 +16,6 @@ internal static class AgentSandboxInstallContract
 
     public static string QuoteShell(string value)
         => $"'{value.Replace("'", "'\"'\"'", StringComparison.Ordinal)}'";
-
-    public static string RewriteRuntimePath(string value, string replacementRoot)
-        => string.IsNullOrWhiteSpace(value)
-            ? value
-            : value.Replace(McpbImageMaterializer.BundleWorkdir, replacementRoot, StringComparison.Ordinal);
 
     public static WorkspaceMcpContainerConnectorDefinition ApplyRuntime(
         WorkspaceMcpContainerConnectorDefinition connector,
