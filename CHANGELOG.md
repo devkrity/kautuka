@@ -11,6 +11,11 @@ upgrade path.
 
 ### Security
 
+- Upgrades from v0.1.27 reuse matching sandbox installations. Manager now builds connector commands from its desired state and filters host process controls.
+- Gateway moves existing agent-sandbox bindings with environment keys, credentials, or OAuth to isolated execution and records an agent revision.
+- Manager writes view files under the resolved agent workspace. Symlinks and files above the configured byte or count limits appear as unavailable.
+- Linux and Windows installers embed the same public key that verifies v0.1.27. Only the platform signing job reads the release private key.
+
 - Slack privacy hardening: DM-only, single-owner workspace binding, restricted setup scopes, and owner-pinned outbound delivery.
 
 ## [0.1.20] - 2026-10-27

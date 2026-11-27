@@ -740,10 +740,9 @@ jobs:
     permissions:
       contents: read
       packages: read
-      id-token: write
-      attestations: write
     uses: ./.github/workflows/release-build-platform-assets.yml
     with:
+      target: platform
       channel: ${{ needs.resolve-channel.outputs.channel }}
       release_version: ${{ needs.resolve-channel.outputs.version }}
       manifest_version: ${{ needs.resolve-channel.outputs.version }}
@@ -757,13 +756,40 @@ jobs:
     secrets:
       release_manifest_private_key: ${{ secrets.RELEASE_MANIFEST_PRIVATE_KEY }}
 
+  build-installer-assets:
+    name: Build Installer Assets
+    needs:
+      - resolve-channel
+      - validate-release
+      - resolve-release-image-inputs
+      - authorize-release-branch
+    if: ${{ always() && needs.resolve-channel.result == 'success' && needs.validate-release.result == 'success' && needs.resolve-release-image-inputs.result == 'success' && (needs.authorize-release-branch.result == 'success' || (needs.authorize-release-branch.result == 'skipped' && needs.resolve-channel.outputs.source_branch == 'main')) }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/release-build-platform-assets.yml
+    with:
+      target: installers
+      channel: ${{ needs.resolve-channel.outputs.channel }}
+      release_version: ${{ needs.resolve-channel.outputs.version }}
+      manifest_version: ${{ needs.resolve-channel.outputs.version }}
+      release_tag: ${{ needs.resolve-channel.outputs.release_tag }}
+      source_sha: ${{ needs.resolve-channel.outputs.source_sha }}
+      dry_run: ${{ needs.resolve-channel.outputs.dry_run }}
+      wsl_rootfs_asset_name: kautuka-wsl-appliance.tar.gz
+      kautuka_base_image: ${{ needs.resolve-release-image-inputs.outputs.image }}
+      release_builder_image: ${{ needs.resolve-release-image-inputs.outputs.release_builder_image }}
+      wsl_rootfs_image: ${{ needs.resolve-release-image-inputs.outputs.wsl_rootfs_image }}
+
   publish-assets:
     name: Publish Release Assets
     needs:
       - resolve-channel
       - build-platform-assets
+      - build-installer-assets
       - prepare-stable-draft
-    if: ${{ always() && needs.resolve-channel.result == 'success' && needs.build-platform-assets.result == 'success' && needs.prepare-stable-draft.result == 'success' && needs.resolve-channel.outputs.dry_run != 'true' }}
+    if: ${{ always() && needs.resolve-channel.result == 'success' && needs.build-platform-assets.result == 'success' && needs.build-installer-assets.result == 'success' && needs.prepare-stable-draft.result == 'success' && needs.resolve-channel.outputs.dry_run != 'true' }}
     permissions:
       actions: write
       contents: write

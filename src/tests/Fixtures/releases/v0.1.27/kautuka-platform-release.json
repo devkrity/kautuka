@@ -1,0 +1,87 @@
+{
+  "applianceDeployment": {
+    "hookAbi": 1,
+    "schemaVersion": 1,
+    "services": {
+      "channelhost": {
+        "image": "ghcr.io/devkrity/kautuka/appliance-channelhost@sha256:c976c94da87d591a3c5d70bd4e8b7777aad0d4c82cbe56387056d3c87e8755f4"
+      },
+      "credentialshost": {
+        "image": "ghcr.io/devkrity/kautuka/appliance-credentialshost@sha256:f7f5f7ba896f179a5a7cca316a41de9286df6ce2006f3086c79e8703a96a4d20"
+      },
+      "gateway": {
+        "image": "ghcr.io/devkrity/kautuka/appliance-gateway@sha256:f7e7addb6ee6f8464226cf0da21cd37a1dd20d39eb67186f52c08ef65a149ee5"
+      },
+      "updateservice": {
+        "image": "ghcr.io/devkrity/kautuka/appliance-updateservice@sha256:d1c0585fe7ff6fb98a662801f4f26481dfd3d0fdc8f489b77f96b95bec3c10b7"
+      },
+      "webhost": {
+        "image": "ghcr.io/devkrity/kautuka/appliance-webhost@sha256:b0f2d38a59edd3f9c358d1f5a36b6b22d32f6c25636d3b2525c02ca95a2a3b75"
+      }
+    }
+  },
+  "artifacts": [
+    {
+      "name": "kautuka-linux-amd64.tar.gz",
+      "path": "kautuka-linux-amd64.tar.gz",
+      "platform": "linux-x64",
+      "sha256": "33e479451bd14732d7dc7e98cb0f44fab9247e3714eaf5923ba37962f5a34f5a",
+      "size": 591212062,
+      "url": "https://github.com/devkrity/kautuka/releases/download/v0.1.27/kautuka-linux-amd64.tar.gz"
+    },
+    {
+      "name": "kautuka-wsl-appliance.tar.gz",
+      "path": "kautuka-wsl-appliance.tar.gz",
+      "platform": "wsl-amd64",
+      "sha256": "7debf94791c837e57591f0063eb93159f8a1632db12e6a4d3885734ac51bab95",
+      "size": 125285800,
+      "url": "https://github.com/devkrity/kautuka/releases/download/v0.1.27/kautuka-wsl-appliance.tar.gz"
+    }
+  ],
+  "channel": "stable",
+  "minimumUpdaterVersion": null,
+  "publishedAt": "2026-11-25T12:49:36Z",
+  "releaseId": "v0.1.27",
+  "releaseTag": "v0.1.27",
+  "runtimeImages": [
+    {
+      "archive": "kautuka-base.tar",
+      "id": "kautuka-base",
+      "image": "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839"
+    },
+    {
+      "archive": "openobserve.tar",
+      "id": "openobserve",
+      "image": "ghcr.io/devkrity/kautuka-observability@sha256:88fb692ac791d3eaff69653a4a4686f1c7eceb9e105491d58d29ac2739560b3b"
+    },
+    {
+      "archive": "git-pkgs-proxy.tar",
+      "id": "git-pkgs-proxy",
+      "image": "ghcr.io/devkrity/kautuka-package-proxy@sha256:3165aeeb7fbdd2160b4caf6f7022b1498ed564deb95b21bbd19ecc7c6e6f89a5"
+    },
+    {
+      "archive": "egress-boundary.tar",
+      "id": "egress-boundary",
+      "image": "ghcr.io/devkrity/kautuka-egress-boundary@sha256:fdf6b7b7e83dfafe5b390aa2e8d63e9d84f951bbd394c43c5984a225cb97c4e1"
+    },
+    {
+      "archive": "envoy.tar",
+      "id": "envoy",
+      "image": "docker.io/envoyproxy/envoy@sha256:16e0d4dac937ffa34103aa6ba1013dc2030b9de2a249273c8d23c7c5c2989664"
+    },
+    {
+      "archive": "coredns.tar",
+      "id": "coredns",
+      "image": "docker.io/coredns/coredns@sha256:1ba6f47265602e2e50a9c4669e3a955e4298a0d30dc82f39293d4bf1a851e0ff"
+    }
+  ],
+  "schemaVersion": 2,
+  "signature": {
+    "algorithm": "ecdsa-p256-sha256",
+    "format": "base64",
+    "path": "kautuka-platform-release.sig",
+    "url": "https://github.com/devkrity/kautuka/releases/download/v0.1.27/kautuka-platform-release.sig"
+  },
+  "sourceSha": "aa1784ced661ce1895eb870e4e64d371a864c800",
+  "version": "0.1.27"
+}

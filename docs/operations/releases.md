@@ -47,7 +47,7 @@ The update channel shown in advanced settings reflects UpdateService's effective
 
 Stable tags are plain SemVer (`vX.Y.Z`; product version `X.Y.Z`). Do not reuse published versions or move a release tag to different source. Fix a bad release forward with a new version.
 
-Both channel environments must use the common release signing key whose public key was provisioned by Preview 22. The build fails before publishing if any platform derives a different public-key fingerprint. Stable `0.1.20` was published with an older distinct key; its assets remain immutable, and it is not a supported automatic key transition to the common-key release. Do not expose signing private keys in logs or repository files.
+Both channel environments must use the common release signing key whose public key was provisioned by Preview 22. Only the Linux platform signing job enters the release channel environment. Both installers embed the repository public key after checking its DER SHA-256 fingerprint. Optional Authenticode credentials belong to the separate `windows-signing` environment. Stable `0.1.20` was published with an older distinct key; its assets remain immutable, and it is not a supported automatic key transition to the common-key release. Do not expose signing private keys in logs or repository files.
 
 ## Release recovery
 
@@ -67,8 +67,8 @@ WebHost remains running during the database snapshot and core service restart, s
 
 Release secrets belong in GitHub Environments, never repository-level secrets:
 
-- `preview`: `release_manifest_private_key`.
-- `stable`: `release_manifest_private_key`. Authenticode signing is performed when the Windows signing secrets are configured; otherwise `SIGNING-STATUS.txt` discloses that the installer is unsigned.
+- The `preview` and `stable` environments each provide `RELEASE_MANIFEST_PRIVATE_KEY` to the platform signing job.
+- The optional `windows-signing` environment provides `WINDOWS_SIGNING_CERT_BASE64`, `WINDOWS_SIGNING_CERT_PASSWORD`, and `WINDOWS_SIGNING_TIMESTAMP_URL` for Authenticode. The installer includes its signing status in `SIGNING-STATUS.txt`.
 
 The `preview` and `stable` environments apply to the canonical source repository's release workflows. Restrict deployments to the intended `main` branch; configure Stable to require owner approval before enabling publication. The source repository must have GitHub release immutability enabled. The workflow creates releases as drafts, validates the full asset set, publishes them, and checks the resulting `.immutable` field. The `GET /immutable-releases` readback requires `Administration: read`, which the contents-only workflow token does not have.
 
