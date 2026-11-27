@@ -604,7 +604,6 @@ public sealed partial class WorkspaceGrpcService(
                 workspaceContext,
                 request.ExecutionContext,
                 context.CancellationToken,
-                string.IsNullOrWhiteSpace(request.HostArtifactDirectory) ? null : request.HostArtifactDirectory,
                 string.IsNullOrWhiteSpace(request.ExpectedImageDigest) ? null : request.ExpectedImageDigest,
                 string.IsNullOrWhiteSpace(request.ExpectedSourceDigest) ? null : request.ExpectedSourceDigest,
                 request.VerifyExecutionCommand ? request.ExpectedCommand : null,

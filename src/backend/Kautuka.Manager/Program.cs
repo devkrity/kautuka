@@ -315,6 +315,7 @@ builder.Services.AddSingleton(sp => new WorkspaceSidecarSupervisor(
     applianceMode: applianceEnabled));
 builder.Services.AddSingleton<WorkspaceDesiredStateStore>();
 builder.Services.AddSingleton<McpbImageMaterializer>();
+builder.Services.Configure<ViewFileOptions>(builder.Configuration.GetSection("Kautuka:ViewFiles"));
 builder.Services.AddSingleton<WorkspaceContainerConnectorExecutionService>();
 builder.Services.AddSingleton<WorkspaceReadinessGate>();
 builder.Services.AddSingleton<WorkspaceExecTracker>();

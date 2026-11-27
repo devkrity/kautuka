@@ -36,7 +36,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     Kautuka.NetworkAccessController.NetworkAccessPolicyStore? probePolicyStore = null,
     string stdioCommand = PodmanCommandRunner.BinaryName,
     IReadOnlyList<string>? stdioArgumentsPrefix = null,
-    IHostApplicationLifetime? hostLifetime = null) : IAsyncDisposable
+    IHostApplicationLifetime? hostLifetime = null,
+    Microsoft.Extensions.Options.IOptions<ViewFileOptions>? viewFileOptions = null) : IAsyncDisposable
 {
     private const string agentSandboxInstallRoot = "/home/node/.kautuka/connectors";
     private const string agentSandboxManifestPath = "/home/node/.kautuka/connectors/.installed.json";
@@ -563,7 +564,6 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         ContainerContext? workspaceContext,
         WorkspaceMcpExecutionContext executionContext,
         CancellationToken cancellationToken,
-        string? hostArtifactDirectory = null,
         string? expectedImageDigest = null,
         string? expectedSourceDigest = null,
         string? expectedCommand = null,
@@ -637,9 +637,15 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                         Stopwatch.GetElapsedTime(callStarted).TotalMilliseconds);
                 }
 
+                string? hostWorkspacePath = workspaceContext is not null
+                    && !string.IsNullOrWhiteSpace(workspaceContext.ScopeType)
+                    && !string.IsNullOrWhiteSpace(workspaceContext.ScopeId)
+                    && desiredStateStore.TryResolveWorkspace(workspaceContext.ScopeType, workspaceContext.ScopeId, workspaceContext.UserId, out ContainerContext? resolvedWorkspace)
+                    ? resolvedWorkspace?.HostWorkspacePath
+                    : null;
                 string resultJson = ViewFileMaterializer.Materialize(
                     McpToolContractCodec.SerializeResult(result),
-                    hostArtifactDirectory);
+                    hostWorkspacePath, viewFileOptions?.Value);
 
                 _ = desiredStateStore.TryTransitionConnectorState(
                     connector.ConnectorId,

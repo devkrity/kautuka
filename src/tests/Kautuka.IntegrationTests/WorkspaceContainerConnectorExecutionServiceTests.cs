@@ -120,6 +120,64 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         public Task<OciSandboxSession> InspectSandboxAsync(ContainerContext context, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 
+    [Fact]
+    public async Task CallToolMaterializesViewFilesIntoDesiredWorkspaceOnly()
+    {
+        string root = Directory.CreateTempSubdirectory().FullName;
+        string outside = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var token = TestContext.Current.CancellationToken;
+            string bundle = Path.Combine(root, "connector.mcpb");
+            await File.WriteAllTextAsync(bundle, "bundle", token);
+            string script = Path.Combine(root, "mcp_view_server.py");
+            await File.WriteAllTextAsync(script, """
+                import json, sys
+                for line in sys.stdin:
+                    if not line.strip():
+                        continue
+                    req = json.loads(line)
+                    method = req.get("method")
+                    req_id = req.get("id")
+                    if method == "initialize":
+                        print(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}}, "serverInfo": {"name": "view", "version": "1"}}}), flush=True)
+                    elif method == "tools/call":
+                        structured = {"view": {"blocks": [{"type": "file", "fileId": "f1"}]}, "files": [{"fileId": "f1", "name": "report.txt", "base64": "aGVsbG8="}]}
+                        print(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": "ok"}], "structuredContent": structured, "isError": False}}), flush=True)
+                """, token);
+
+            string image = "quay.io/devkrity/kautuka-base@sha256:" + new string('a', 64);
+            string desiredWorkspacePath = Path.Combine(root, "users", "user", "agents", "agent");
+            Directory.CreateDirectory(desiredWorkspacePath);
+            var desiredWorkspace = new ContainerContext("agent", "agent", "user", desiredWorkspacePath, "/workspace", image, 30, "512m", 1, [], new Dictionary<string, string>());
+            var spoofedCallerWorkspace = desiredWorkspace with { HostWorkspacePath = outside };
+            var connector = new WorkspaceMcpContainerConnectorDefinition("user::web", image, "manager-command", ["manager-arg"], true, false, bundle, "binary", [], 30, 600);
+            var desired = new WorkspaceDesiredStateStore();
+            _ = desired.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap,
+                new ManagerRuntimeSettings(new ManagerWorkspaceDefinition { BaseRoot = root }, new ManagerSandboxRuntimeDefinition { Image = image, DefaultTimeout = 30 }, new WorkspaceTelemetryDefinition()),
+                [desiredWorkspace], [connector], [new("agent", "agent", [connector.ConnectorId])]);
+
+            var runner = new PodmanCommandRunner((_, _) => Task.FromResult(new PodmanCommandResult(0, "", "", ProcessTerminationReason.Completed)));
+            var materializer = new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance,
+                new RuntimeImageAllowlist(1, [new("kautuka-base", image, null)]));
+            var sandbox = new ManifestSandbox("{", "{");
+            await using var service = new WorkspaceContainerConnectorExecutionService(desired, runner, materializer, sandbox,
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance, stdioCommand: "python3", stdioArgumentsPrefix: ["-u", script]);
+
+            var call = await service.CallToolAsync(connector.ConnectorId, null, "render", "{}", 30, false, spoofedCallerWorkspace, WorkspaceMcpExecutionContext.AgentSandbox, token);
+            Assert.True(call.Ok, call.FailureMessage);
+            Assert.Contains("view-files/", call.Result, StringComparison.Ordinal);
+            string written = Assert.Single(Directory.GetFiles(desiredWorkspacePath, "report.txt", SearchOption.AllDirectories));
+            Assert.Equal("hello", await File.ReadAllTextAsync(written, token));
+            Assert.Empty(Directory.EnumerateFileSystemEntries(outside));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+            Directory.Delete(outside, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData("old", "one")]
     [InlineData("server", "old")]

@@ -466,6 +466,81 @@ public sealed class ConnectorContainerSpecBuilderTests
     }
 
     [Fact]
+    public void Version027ArtifactDirectoryIsAnUnknownField()
+    {
+        // Length-delimited field 10 followed by field 2 (connector_id) from the v0.1.27 wire contract.
+        byte[] legacy = [0x52, 4, (byte)'/', (byte)'t', (byte)'m', (byte)'p', 0x12, 1, (byte)'c'];
+        var request = WorkspaceMcpContainerCallRequest.Parser.ParseFrom(legacy);
+        Assert.Equal("c", request.ConnectorId);
+        Assert.Null(WorkspaceMcpContainerCallRequest.Descriptor.FindFieldByNumber(10));
+        Assert.Null(request.WorkspaceContext);
+    }
+
+    [Theory]
+    [InlineData("view-files")]
+    [InlineData("hash")]
+    [InlineData("file")]
+    public void ViewFileMaterializationRefusesSymbolicLinks(string component)
+    {
+        string root = Directory.CreateTempSubdirectory().FullName;
+        string outside = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            string hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData("f1"u8))[..12];
+            string views = Path.Combine(root, "view-files");
+            string folder = Path.Combine(views, hash);
+            string target = Path.Combine(outside, "notes.txt");
+            File.WriteAllText(target, "original");
+            if (component == "view-files")
+                Directory.CreateSymbolicLink(views, outside);
+            else if (component == "hash")
+            {
+                Directory.CreateDirectory(views);
+                Directory.CreateSymbolicLink(folder, outside);
+            }
+            else
+            {
+                Directory.CreateDirectory(folder);
+                File.CreateSymbolicLink(Path.Combine(folder, "notes.txt"), target);
+            }
+            string result = ViewFileMaterializer.Materialize(ViewFileResult, root);
+            Assert.Contains("\"unavailable\":true", result, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"path\"", result, StringComparison.Ordinal);
+            Assert.Equal("original", File.ReadAllText(target));
+            Assert.Single(Directory.EnumerateFileSystemEntries(outside));
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+            Directory.Delete(outside, true);
+        }
+    }
+
+    private const string ViewFileResult = """
+        {"structured_content":{"view":{"blocks":[{"type":"file","fileId":"f1"}]},"files":[{"fileId":"f1","name":"notes.txt","base64":"aGVsbG8="}]}}
+        """;
+
+    [Theory]
+    [InlineData(4, 1, false)]
+    [InlineData(5, 0, false)]
+    [InlineData(5, 1, true)]
+    public void Version027ViewFileObeysConfiguredLimitsAndReplacesExistingFile(int bytes, int count, bool accepted)
+    {
+        string root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            string result = ViewFileMaterializer.Materialize(ViewFileResult, root);
+            Assert.Contains("view-files/", result, StringComparison.Ordinal);
+            string path = Assert.Single(Directory.GetFiles(root, "*.txt", SearchOption.AllDirectories));
+            File.WriteAllText(path, "previous");
+            result = ViewFileMaterializer.Materialize(ViewFileResult, root, new ViewFileOptions { MaxFileBytes = bytes, MaxFilesPerResult = count });
+            Assert.Equal(accepted ? "hello" : "previous", File.ReadAllText(path));
+            Assert.Equal(!accepted, result.Contains("\"unavailable\":true", StringComparison.Ordinal));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Fact]
     public void MaterializerStoresBytesBesideTheView()
     {
         string root = Directory.CreateTempSubdirectory("kautuka-view-files-").FullName;

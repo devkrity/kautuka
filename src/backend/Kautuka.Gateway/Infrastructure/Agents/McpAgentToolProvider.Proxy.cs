@@ -300,7 +300,6 @@ internal sealed partial class McpAgentToolProvider
             TimeoutSeconds = serverDef.ReadinessTimeoutSeconds ?? 30,
             AllowInternalSystemConnector = allowInternalSystemConnector,
             ExecutionContext = binding.ExecutionContext,
-            HostArtifactDirectory = ResolveHostArtifactDirectory(context) ?? string.Empty,
             ExpectedImageDigest = expectedImageDigest,
             ExpectedSourceDigest = serverDef.LocalArtifactDigest ?? string.Empty,
             VerifyExecutionCommand = true,
