@@ -118,7 +118,7 @@ internal static class ConnectorDraftEndpointMappings
                 }
             }
             catch (RpcException ex) { return DraftFailure(ex); }
-            catch (InvalidOperationException ex) { return BadRequest(ex.Message); }
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException) { return BadRequest(ex.Message); }
         });
 
         app.MapPost("/api/connectors/drafts/{draftId}/test", async (string draftId, HttpContext context, IGatewayAuthGuard auth, IGatewayCatalogStore catalog, CredentialResolverService resolver, RemoteMcpCredentialRevisionTracker revisions, IGatewayUserStore users, IMcpConnectorTestService testService, CancellationToken ct) =>
@@ -183,7 +183,7 @@ internal static class ConnectorDraftEndpointMappings
                     [.. result.ToolNames ?? []], result.ToolDescriptions is null ? new Dictionary<string, string?>(StringComparer.Ordinal) : new Dictionary<string, string?>(result.ToolDescriptions, StringComparer.Ordinal)), KautukaJsonContext.Default.GatewayConnectorTestResponse);
             }
             catch (RpcException ex) { return DraftFailure(ex); }
-            catch (InvalidOperationException ex) { return BadRequest(ex.Message); }
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException) { return BadRequest(ex.Message); }
         });
 
         app.MapPost("/api/connectors/drafts/{draftId}/save", async (string draftId, HttpContext context, IGatewayAuthGuard auth, IGatewayCatalogStore catalog, CredentialResolverService resolver, RemoteMcpCredentialRevisionTracker revisions, IGatewayUserStore users, CancellationToken ct) =>
@@ -246,7 +246,7 @@ internal static class ConnectorDraftEndpointMappings
                 }
             }
             catch (RpcException ex) { return DraftFailure(ex); }
-            catch (InvalidOperationException ex) { return BadRequest(ex.Message); }
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException) { return BadRequest(ex.Message); }
         });
         return app;
     }

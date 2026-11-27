@@ -11,6 +11,7 @@ namespace Kautuka.Gateway.Domain.Stores;
 
 internal sealed partial class GatewayCatalogStore : IGatewayCatalogStore
 {
+    private readonly ConnectorAuthCatalog? authCatalog;
     private readonly GatewayState state;
     private readonly IAgentDefinitionStore agentDefinitionStore;
     private readonly ITopologyConfigurationWriter topologyWriter;
@@ -62,8 +63,9 @@ internal sealed partial class GatewayCatalogStore : IGatewayCatalogStore
         IProviderTypeCatalog? providerTypeCatalog = null,
         IRuntimeEventLifecycle? runtimeEventLifecycle = null,
         RemoteMcpCredentialRevisionTracker? remoteRevisions = null,
-        IConnectorUserEnablement? connectorEnablement = null)
+        IConnectorUserEnablement? connectorEnablement = null, ConnectorAuthCatalog? authCatalog = null)
     {
+        this.authCatalog = authCatalog;
         this.state = state;
         this.agentDefinitionStore = agentDefinitionStore;
         this.topologyWriter = topologyWriter;
@@ -81,6 +83,8 @@ internal sealed partial class GatewayCatalogStore : IGatewayCatalogStore
 
     public bool TryGetProvider(string id, out GatewayProvider? provider) =>
         state.Providers.TryGetValue(id, out provider);
+
+    public IReadOnlyList<string> StartupDriftNotes => state.StartupDriftNotes;
 
     public IReadOnlyList<GatewayProvider> ListProviders() =>
         [.. state.Providers.Values];

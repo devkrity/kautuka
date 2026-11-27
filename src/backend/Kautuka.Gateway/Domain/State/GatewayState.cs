@@ -1,3 +1,4 @@
+using Kautuka.Gateway.Domain.Connectors;
 using System.Collections.Concurrent;
 
 using Kautuka.Gateway.Domain.Memory;
@@ -84,6 +85,7 @@ internal sealed partial class GatewayState
     internal bool SetupCompleted { get; set; }
     internal KautukaDatabase Database => database;
     internal ILogger<GatewayState> Logger => logger;
+    internal List<string> StartupDriftNotes { get; } = [];
     internal object SettingsWriteSyncRoot => settingsWriteLock;
 
     private GatewayState(
@@ -114,13 +116,13 @@ internal sealed partial class GatewayState
         IGatewayMemoryStore memoryStore) =>
         new(database, logger, agentDefinitionStore, agentRuntimeSessionRepository, agentRuntimeRunRepository, agentMemoryFactRepository, memoryStore);
 
-    internal static void HydrateFromDatabase(SqliteConnection connection, GatewayState state, IWorkspaceRuntimeTool workspaceTool, IConfiguration configuration, IAgentDefinitionStore agentDefinitionStore)
+    internal static void HydrateFromDatabase(SqliteConnection connection, GatewayState state, IWorkspaceRuntimeTool workspaceTool, IConfiguration configuration, IAgentDefinitionStore agentDefinitionStore, ConnectorAuthCatalog? authCatalog)
     {
         LoadProviders(connection, state);
         LoadModels(connection, state);
-        LoadAgents(connection, state, agentDefinitionStore);
         LoadMcpServers(connection, state);
         LoadSkills(connection, state);
+        LoadAgents(connection, state, agentDefinitionStore, authCatalog);
 
         state.SystemSettings = LoadSettings(connection, configuration);
         state.OrganizationSettings = LoadOrganizationSettings(connection);
@@ -152,9 +154,9 @@ internal sealed partial class GatewayState
         IGatewayMemoryStore memoryStore,
         IAgentDefinitionStore agentDefinitionStore,
         IConfiguration configuration,
-        IWorkspaceRuntimeTool workspaceTool)
+        IWorkspaceRuntimeTool workspaceTool, ConnectorAuthCatalog? authCatalog = null)
     {
-        return GatewayStateFactory.FromDatabase(database, logger, memoryStore, agentDefinitionStore, configuration, workspaceTool);
+        return GatewayStateFactory.FromDatabase(database, logger, memoryStore, agentDefinitionStore, configuration, workspaceTool, authCatalog);
     }
 
     internal void EnsureRuntimeStateLoaded()

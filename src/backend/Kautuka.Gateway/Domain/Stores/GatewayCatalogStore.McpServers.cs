@@ -85,6 +85,10 @@ internal sealed partial class GatewayCatalogStore
         {
             if (!state.McpServers.TryGetValue(serverId, out GatewayMcpServer? current) || current.CredentialNamespace is null || !string.Equals(current.Transport, "http", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("Remote connector is unavailable.");
+            if (state.Agents.Values.Any(agent =>
+                (agent.McpBindings ?? []).Any(binding => binding.ConnectorId == serverId
+                    && McpAgentToolProvider.NormalizeBindingContext(binding.Context) == Kautuka.Manager.Protos.WorkspaceMcpExecutionContext.AgentSandbox)))
+                throw new ArgumentException(ToDefinition(current).IsolationMessage);
             (string association, string operation) = await stage(current, cancellationToken).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(association) || string.IsNullOrWhiteSpace(operation)) throw new InvalidOperationException("Credential association staging failed.");
             if (current.CredentialOperationId == operation && current.CredentialAssociationId == association) return current;
@@ -264,52 +268,14 @@ internal sealed partial class GatewayCatalogStore
             request.LocalArtifactDigest ?? (retainLocalTools ? existingServer!.LocalArtifactDigest : null),
             request.LocalImageDigest ?? (retainLocalTools ? existingServer!.LocalImageDigest : null));
 
-        McpTransport parsedTransport = ParsePersistedTransport(transport);
+        McpServerDefinition candidate = ToDefinition(server);
+        if (candidate.RequiresIsolation(authCatalog) && state.Agents.Values.Any(agent =>
+            (agent.McpBindings ?? []).Any(binding => binding.ConnectorId == serverId
+                && McpAgentToolProvider.NormalizeBindingContext(binding.Context) == Kautuka.Manager.Protos.WorkspaceMcpExecutionContext.AgentSandbox)))
+            throw new ArgumentException(candidate.IsolationMessage);
 
         using IDisposable? remoteChange = remoteRevisions?.BeginPolicyChange("connector", serverId);
-        topologyWriter.SaveMcpServer(new McpServerDefinition
-        {
-            Id = serverId,
-            Name = name,
-            Description = description,
-            IconUrl = Uri.TryCreate(iconUrl, UriKind.Absolute, out Uri? iconUri) ? iconUri : null,
-            PresetId = presetId,
-            Transport = parsedTransport,
-            HttpUrl = Uri.TryCreate(httpUrl, UriKind.Absolute, out Uri? httpUri) ? httpUri : null,
-            ContainerImage = containerImage,
-            ContainerCommand = containerCommand,
-            ContainerArgs = [.. containerArgs],
-            ContainerSidecarName = containerSidecarName,
-            BundlePath = bundlePath,
-            ServerType = serverType,
-            RuntimeArtifactType = runtimeArtifactType,
-            RuntimeArtifactSourceDigest = runtimeArtifactSourceDigest,
-            RuntimeArtifactBuildStatus = runtimeArtifactBuildStatus,
-            ReadinessTimeoutSeconds = readinessTimeoutSeconds,
-            JitCooldownSeconds = jitCooldownSeconds,
-            HealthcheckUrl = Uri.TryCreate(healthcheckUrl, UriKind.Absolute, out Uri? healthUri) ? healthUri : null,
-            HealthcheckIntervalMilliseconds = healthcheckIntervalMilliseconds,
-            McpProtocolVersion = mcpProtocolVersion,
-            Enabled = enabled,
-            IsInternalSystemConnector = isInternalSystemConnector,
-            Scope = scopeValue,
-            OwnerUserId = ownerUserIdValue,
-            CreatedAt = createdAt,
-            UpdatedAt = now,
-            ToolCount = toolCount,
-            ToolNames = toolNames,
-            EnvKeys = envKeysFinal ?? [],
-            Credentials = credentials,
-            HttpHeaders = headers,
-            CredentialNamespace = credentialNamespace,
-            CredentialAssociationId = server.CredentialAssociationId,
-            CredentialOperationId = server.CredentialOperationId,
-            CredentialSourceId = server.CredentialSourceId,
-            RequiresCredentialReentry = server.RequiresCredentialReentry,
-            LocalToolDefinitions = server.LocalToolDefinitions,
-            LocalArtifactDigest = server.LocalArtifactDigest,
-            LocalImageDigest = server.LocalImageDigest,
-        });
+        topologyWriter.SaveMcpServer(candidate);
 
         state.McpServers[serverId] = server;
 
@@ -488,7 +454,7 @@ internal sealed partial class GatewayCatalogStore
             ? []
             : [.. values.Where(static value => !string.IsNullOrWhiteSpace(value)).Select(static value => value.Trim())];
 
-    private static McpServerDefinition ToDefinition(GatewayMcpServer server)
+    internal static McpServerDefinition ToDefinition(GatewayMcpServer server)
         => new()
         {
             Id = server.Id,

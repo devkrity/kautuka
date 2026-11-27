@@ -15,7 +15,7 @@ internal sealed class WorkspaceRuntimeContextResolver(
     IPlatformConfigurationProvider configurationProvider,
     IConfiguration configuration,
     KautukaDatabase database,
-    ConnectorUserEnablement? connectorEnablement = null)
+    ConnectorUserEnablement? connectorEnablement = null, ConnectorAuthCatalog? authCatalog = null)
 {
     private static readonly EffectiveSkillManifestResolver skillResolver = new();
     private const string managerProxyModeKey = "ManagerProxy:Mode";
@@ -166,7 +166,7 @@ internal sealed class WorkspaceRuntimeContextResolver(
                     return [];
                 }
 
-                if (string.IsNullOrWhiteSpace(server.BundlePath))
+                if (string.IsNullOrWhiteSpace(server.BundlePath) || server.RequiresIsolation(authCatalog))
                 {
                     return [];
                 }

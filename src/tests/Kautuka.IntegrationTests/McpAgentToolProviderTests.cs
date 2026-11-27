@@ -83,6 +83,50 @@ public sealed class McpAgentToolProviderTests
             throw new InvalidOperationException();
         }
     }
+    [Theory]
+    [InlineData("env")]
+    [InlineData("credentials")]
+    [InlineData("oauth")]
+    [InlineData("association")]
+    public async Task CredentialedConnectorCannotInvokeInsideAgentSandbox(string sourceType)
+    {
+        string id = sourceType == "oauth" ? MailProfile().Id : "web";
+        string digest = "sha256:" + new string('a', 64);
+        var grpc = new CapturingWorkspaceGrpcService { RecordCalls = true };
+        var agent = new AgentDefinition { Id = "agent-alpha", Scope = "system", McpBindings = [new AgentMcpBindingDefinition { ConnectorId = id, Context = "AgentContext" }] };
+        var server = new McpServerDefinition
+        {
+            Id = id,
+            Name = "Web",
+            Transport = McpTransport.Container,
+            EnvKeys = sourceType == "env" ? ["TOKEN"] : [],
+            Credentials = sourceType == "credentials" ? [new("TOKEN", "Token", true)] : [],
+            CredentialAssociationId = sourceType == "association" ? "stored-association" : null,
+            Enabled = true,
+            Scope = "system",
+            ContainerImage = "example/image@" + digest,
+            LocalImageDigest = digest,
+            LocalToolDefinitions = [new ConnectorToolDefinition("fetch", "Fetch a URL", "{\"type\":\"object\"}")]
+        };
+        var source = new MutablePlatformConfigurationProvider { Current = new PlatformConfiguration { Agents = [agent], McpServers = [server] } };
+        var resolver = CreateNoOpCredentialResolver();
+        using var authClient = new ConnectorAuthorizationClient(new AccessTokenHandler("unused"));
+        var oauth = new ConnectorOAuthService(new ConnectorAuthCatalog([MailProfile()]), new CredentialsHostConnectorRefreshTokenStore(resolver),
+            authClient, new ConnectorOAuthSessionStore());
+        var provider = new McpAgentToolProvider(source, resolver, new CapturingMcpHttpClientFactory(), grpc,
+            new ToolExecutionPolicyService(), NullLogger<McpAgentToolProvider>.Instance, connectorOAuth: oauth);
+        AgentToolContext context = CreateContainerToolContext(agent, "user-alpha");
+        AgentToolSurfaceContribution result = await provider.ContributeAsync(context, TestContext.Current.CancellationToken);
+        AgentToolSurfaceEntry tool = Assert.Single(result.Entries);
+        Assert.Equal("fetch", tool.Name);
+        Assert.Equal("{\"type\":\"object\"}", tool.JsonSchema);
+        Assert.Equal(0, grpc.ListToolsCallCount);
+        var executable = Assert.Single(await provider.HydrateAsync(context, result.Entries, TestContext.Current.CancellationToken));
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => executable.InvokeAsync(new Microsoft.Extensions.AI.AIFunctionArguments(), TestContext.Current.CancellationToken).AsTask());
+        Assert.Contains("isolated execution", error.Message, StringComparison.Ordinal);
+        Assert.Null(grpc.LastCall);
+    }
+
     [Fact]
     public async Task LocalToolsUseSavedDefinitionsWithoutContactingManager()
     {

@@ -1,3 +1,4 @@
+using Kautuka.Gateway.Domain.Connectors;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -44,7 +45,10 @@ internal sealed partial class GatewayState
         }
     }
 
-    private static void LoadAgents(SqliteConnection connection, GatewayState state, IAgentDefinitionStore agentDefinitionStore)
+    [LoggerMessage(Level = LogLevel.Information, Message = "Migrated agent {AgentId} connector bindings to isolated execution at revision {Revision}: {Connectors}")]
+    private static partial void LogIsolatedBindings(ILogger logger, string agentId, long revision, string connectors);
+
+    private static void LoadAgents(SqliteConnection connection, GatewayState state, IAgentDefinitionStore agentDefinitionStore, ConnectorAuthCatalog? authCatalog)
     {
         foreach (DbAgent row in connection.Query<DbAgent>(
             """
@@ -84,7 +88,33 @@ internal sealed partial class GatewayState
                 continue;
             }
 
-            definition = ApplyRegistryMetadata(definition, row.Scope, row.Enabled != 0);
+            var migrated = new List<string>();
+            var bindings = definition.McpBindings.Select(binding =>
+            {
+                if (McpAgentToolProvider.NormalizeBindingContext(binding.Context) != Kautuka.Manager.Protos.WorkspaceMcpExecutionContext.AgentSandbox
+                    || !state.McpServers.TryGetValue(binding.ConnectorId, out var server)
+                    || !GatewayCatalogStore.ToDefinition(server).RequiresIsolation(authCatalog))
+                    return binding;
+
+                migrated.Add(binding.ConnectorId);
+                return new AgentMcpBindingDefinition { ConnectorId = binding.ConnectorId, Context = "OwnContext" };
+            }).ToArray();
+            definition = ApplyRegistryMetadata(definition, row.Scope, row.Enabled != 0, bindings);
+            if (migrated.Count > 0)
+            {
+                state.Models.TryGetValue(definition.ModelId, out GatewayModel? model);
+                var snapshotMetadata = new AgentDefinitionSnapshotMetadata(
+                    model?.ModelName,
+                    model?.ProviderId,
+                    state.McpServers.ToDictionary(static pair => pair.Key, static pair => pair.Value.Name, StringComparer.Ordinal),
+                    state.Skills.ToDictionary(static pair => pair.Key, static pair => pair.Value.Name, StringComparer.Ordinal));
+                revision = agentDefinitionStore.SaveDefinition(row.StorageLocatorKey, definition, snapshotMetadata);
+                foreach (string connectorId in migrated)
+                {
+                    LogIsolatedBindings(state.Logger, row.Id, revision, connectorId);
+                    state.StartupDriftNotes.Add($"Agent '{row.Id}' connector '{connectorId}' binding moved from agent sandbox to isolated execution at revision {revision}.");
+                }
+            }
 
             AgentDefinitionSerializer.SerializedAgentDefinition serialized = AgentDefinitionSerializer.Serialize(definition);
             var session = SafeCreateJsonObject(DeserializeJsonElement(serialized.SessionJson));
@@ -513,7 +543,7 @@ internal sealed partial class GatewayState
         }
     }
 
-    private static AgentDefinition ApplyRegistryMetadata(AgentDefinition definition, string scope, bool enabled)
+    private static AgentDefinition ApplyRegistryMetadata(AgentDefinition definition, string scope, bool enabled, IReadOnlyList<AgentMcpBindingDefinition> bindings)
         => new()
         {
             Id = definition.Id,
@@ -526,7 +556,7 @@ internal sealed partial class GatewayState
             ApprovalPolicy = definition.ApprovalPolicy,
             Session = definition.Session,
             Sandbox = definition.Sandbox,
-            McpBindings = definition.McpBindings,
+            McpBindings = bindings,
             SkillAttachments = definition.SkillAttachments,
             Persona = definition.Persona,
             ToolExposure = definition.ToolExposure,

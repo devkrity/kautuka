@@ -395,7 +395,8 @@ internal static class GatewayOperationsModule
             provider.GetRequiredService<IGatewayMemoryStore>(),
             provider.GetRequiredService<IAgentDefinitionStore>(),
             provider.GetRequiredService<IConfiguration>(),
-            provider.GetRequiredService<IWorkspaceRuntimeTool>()));
+            provider.GetRequiredService<IWorkspaceRuntimeTool>(),
+            provider.GetRequiredService<ConnectorAuthCatalog>()));
     }
 
     public static void MapEndpoints(WebApplication app)

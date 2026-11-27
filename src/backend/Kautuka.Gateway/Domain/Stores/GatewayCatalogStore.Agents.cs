@@ -409,6 +409,13 @@ internal sealed partial class GatewayCatalogStore
             {
                 throw new ArgumentException($"Connector '{binding.ConnectorId}' is not available to this user.");
             }
+
+            if (server is not null && McpAgentToolProvider.NormalizeBindingContext(binding.Context) == Kautuka.Manager.Protos.WorkspaceMcpExecutionContext.AgentSandbox)
+            {
+                McpServerDefinition definition = ToDefinition(server);
+                if (definition.RequiresIsolation(authCatalog))
+                    throw new ArgumentException(definition.IsolationMessage);
+            }
         }
 
         foreach (AgentSkillAttachmentDefinition attachment in skillAttachments)

@@ -1,3 +1,5 @@
+using Kautuka.Gateway.Domain.Connectors;
+
 namespace Kautuka.Gateway.Infrastructure.Configuration;
 
 /// <summary>
@@ -105,6 +107,14 @@ internal sealed class McpServerDefinition
     public IReadOnlyList<string> EnvKeys { get; init; } = [];
 
     // ── Metadata ────────────────────────────────────────────────────────────
+
+    internal bool RequiresIsolation(ConnectorAuthCatalog? auth)
+        => EnvKeys.Count > 0 || Credentials.Count > 0 || RequiresCredentialReentry
+            || !string.IsNullOrWhiteSpace(CredentialAssociationId)
+            || HttpHeaders.Any(header => !string.IsNullOrWhiteSpace(header.CredentialKey))
+            || auth?.Find(Id) is not null;
+
+    internal string IsolationMessage => $"Connector '{Id}' uses credentials. Choose isolated execution or isolated execution with agent files.";
 
     public string CreatedAt { get; init; } = string.Empty;
     public string UpdatedAt { get; init; } = string.Empty;

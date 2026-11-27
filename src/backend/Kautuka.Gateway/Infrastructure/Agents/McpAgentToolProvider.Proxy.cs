@@ -280,6 +280,9 @@ internal sealed partial class McpAgentToolProvider
                 $"Connector execution denied by policy ({executionDecision.ReasonCode}): {executionDecision.Message}");
         }
 
+        if (binding.ExecutionContext == WorkspaceMcpExecutionContext.AgentSandbox && serverDef.RequiresIsolation(connectorOAuth?.Catalog))
+            throw new InvalidOperationException(serverDef.IsolationMessage);
+
         Dictionary<string, string> env = await ResolveEnvAsync(serverDef, context.UserId ?? string.Empty, cancellationToken)
             .ConfigureAwait(false);
         ValidateRequiredEnv(serverDef, env);

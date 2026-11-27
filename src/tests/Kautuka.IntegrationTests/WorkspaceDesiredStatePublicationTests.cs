@@ -834,6 +834,70 @@ public sealed class WorkspaceDesiredStatePublicationTests
     }
 
     [Fact]
+    public void UpgradeIsolatesCredentialedBindingsOnceAndRejectsNewSandboxBindings()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        IConfiguration configuration = CreateConfiguration(temp.SqlitePath);
+        var database = new KautukaDatabase(configuration);
+        database.EnsureReady();
+        var definitionStore = new SqliteAgentDefinitionStore(configuration, database);
+        GatewayState state = GatewayState.FromDatabase(
+            database,
+            NullLogger<GatewayState>.Instance,
+            new GatewayMemoryStore(),
+            definitionStore,
+            configuration,
+            new NoOpWorkspaceRuntimeTool());
+        var topologyWriter = new SqliteTopologyConfigurationWriter(
+            database,
+            new SqlitePlatformConfigurationProvider(database, definitionStore));
+        var store = new GatewayCatalogStore(
+            state,
+            definitionStore,
+            topologyWriter,
+            new NoOpWorkspaceRuntimeTool(),
+            new NoOpSkillPackageService(),
+            new RecordingDesiredStatePublisher(),
+            new NoOpContinuationStore(),
+            new NoOpConversationAssetStore());
+
+        var request = new GatewayAgentUpsertRequest
+        {
+            Sandbox = new GatewayAgentSandboxPayload { Enabled = true },
+            McpBindings = [new GatewayAgentMcpBindingPayload { ConnectorId = "secret", Context = "AgentContext" }]
+        };
+        var previous = store.SaveAgent("agent", request, "owner");
+        topologyWriter.SaveMcpServer(new McpServerDefinition
+        {
+            Id = "secret",
+            Name = "Secret",
+            Transport = McpTransport.Container,
+            EnvKeys = ["TOKEN"]
+        });
+        GatewayState Reload() => GatewayState.FromDatabase(database, NullLogger<GatewayState>.Instance,
+            new GatewayMemoryStore(), definitionStore, configuration, new NoOpWorkspaceRuntimeTool());
+        var upgraded = Reload();
+        Assert.Equal("OwnContext", Assert.Single(upgraded.Agents["agent"].McpBindings!).Context);
+        Assert.Equal(previous.Revision + 1, upgraded.Agents["agent"].Revision);
+        Assert.Contains("isolated execution", Assert.Single(upgraded.StartupDriftNotes), StringComparison.Ordinal);
+        var secondReload = Reload();
+        Assert.Equal(upgraded.Agents["agent"].Revision, secondReload.Agents["agent"].Revision);
+        Assert.Empty(secondReload.StartupDriftNotes);
+        var upgradedStore = new GatewayCatalogStore(upgraded, definitionStore, topologyWriter, new NoOpWorkspaceRuntimeTool(),
+            new NoOpSkillPackageService(), new RecordingDesiredStatePublisher(), new NoOpContinuationStore(), new NoOpConversationAssetStore());
+        Assert.Contains("isolated execution", Assert.Throws<ArgumentException>(() => upgradedStore.SaveAgent("agent", request, "owner")).Message, StringComparison.Ordinal);
+
+        upgradedStore.SaveMcpServer("plain", new GatewayConnectorUpsertRequest { Name = "Plain", Transport = "container", ContainerImage = "example/plain@sha256:" + new string('a', 64) }, "user", "owner");
+        upgradedStore.SaveAgent("agent", new GatewayAgentUpsertRequest
+        {
+            Sandbox = new GatewayAgentSandboxPayload { Enabled = true },
+            McpBindings = [new GatewayAgentMcpBindingPayload { ConnectorId = "plain", Context = "AgentContext" }]
+        }, "owner");
+        Assert.Contains("isolated execution", Assert.Throws<ArgumentException>(() =>
+            upgradedStore.SaveMcpServer("plain", new GatewayConnectorUpsertRequest { Name = "Plain", Transport = "container", ContainerImage = "example/plain@sha256:" + new string('a', 64), EnvKeys = ["API_KEY"] }, "user", "owner")).Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task DeleteSkillPersistsAgentAttachmentRemovalAcrossRestart()
     {
         using var temp = new TemporaryGatewayStateDirectory();

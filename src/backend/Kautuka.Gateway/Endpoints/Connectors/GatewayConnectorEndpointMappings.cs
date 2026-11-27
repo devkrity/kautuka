@@ -156,7 +156,7 @@ internal static class GatewayConnectorEndpointMappings
                 {
                     await catalog.SaveVerifiedLocalToolsAsync(saved.Id, saved.UpdatedAt, result.ToolDefinitions, digest, result.ImageDigest!, ct).ConfigureAwait(false);
                 }
-                catch (InvalidOperationException ex)
+                catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
                 {
                     return Results.Json(new GatewayErrorResponse(ex.Message), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status409Conflict);
                 }
@@ -222,7 +222,7 @@ internal static class GatewayConnectorEndpointMappings
             {
                 inspection = await mcpbPackageService.InspectAsync(stream, archive.FileName, ct).ConfigureAwait(false);
             }
-            catch (InvalidOperationException ex)
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
             {
                 return Results.Json(
                     new GatewayConnectorMcpbImportResponse(
@@ -382,7 +382,7 @@ internal static class GatewayConnectorEndpointMappings
                     visible = await catalog.SaveVerifiedLocalToolsAsync(serverId, visible.UpdatedAt, result.ToolDefinitions,
                         sourceDigest, result.ImageDigest!, ct).ConfigureAwait(false);
                 }
-                catch (InvalidOperationException ex) { return ConnectorEnablementConflict(ex.Message); }
+                catch (Exception ex) when (ex is InvalidOperationException or ArgumentException) { return ConnectorEnablementConflict(ex.Message); }
             }
 
             bool saved = false;
@@ -400,7 +400,7 @@ internal static class GatewayConnectorEndpointMappings
                     return Task.CompletedTask;
                 }, ct).ConfigureAwait(false);
             }
-            catch (InvalidOperationException ex) { return ConnectorEnablementConflict(ex.Message); }
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException) { return ConnectorEnablementConflict(ex.Message); }
             if (!saved) return ConnectorEnablementConflict("Connector settings changed. Try again.");
 
             if (string.Equals(visible.Transport, "container", StringComparison.OrdinalIgnoreCase))
@@ -496,7 +496,7 @@ internal static class GatewayConnectorEndpointMappings
                 if (discovery?.NetworkApprovalRequired == true)
                     saved = await catalog.SaveMcpServerDiscoveryAsync(serverId, null, null, ct).ConfigureAwait(false);
             }
-            catch (InvalidOperationException ex)
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
             {
                 if (string.Equals(request.Transport, "http", StringComparison.OrdinalIgnoreCase))
                     RemoteMcpAudit.Write(context, hasExisting ? "connector.updated" : "connector.created",

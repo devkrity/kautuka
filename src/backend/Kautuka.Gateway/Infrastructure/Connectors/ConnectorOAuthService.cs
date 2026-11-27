@@ -10,6 +10,8 @@ internal sealed class ConnectorOAuthService(
     ConnectorAuthEndpoint? authEndpoint = null,
     BrokerMailCoordinator? mailCoordinator = null)
 {
+    internal ConnectorAuthCatalog Catalog => catalog;
+
     private readonly object beginAttemptsLock = new();
     private readonly Dictionary<string, (DateTimeOffset WindowStart, int Count)> beginAttempts = new(StringComparer.Ordinal);
     private readonly ConnectorAuthEndpoint endpoint = authEndpoint ?? ConnectorAuthEndpoint.Local;
