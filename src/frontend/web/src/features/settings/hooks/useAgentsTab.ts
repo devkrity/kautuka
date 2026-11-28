@@ -362,6 +362,7 @@ export function useAgentsTab() {
         systemPrompt: agent.systemPrompt,
         superExecMode: agent.superExecMode,
         mcpBindings: agent.mcpBindings ?? [],
+        acknowledgedNotices: agent.acknowledgedNotices ?? [],
         skillAttachments: agent.skillAttachments ?? [],
         approvalConfig,
         persona: normalizePersonaProfile(agent.persona, personaDefinitions),

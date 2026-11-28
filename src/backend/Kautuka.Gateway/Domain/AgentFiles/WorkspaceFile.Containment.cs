@@ -6,6 +6,59 @@ namespace Kautuka.Gateway.Domain.AgentFiles;
 
 internal static partial class WorkspaceFile
 {
+    private static int OpenUnixNoLinks(string path, int flags)
+        => OperatingSystem.IsMacOS() ? OpenMacNoLinks(path, flags) : OpenLinuxNoLinks(path, flags);
+
+    private static int OpenMacNoLinks(string path, int flags)
+    {
+        if (RuntimeInformation.ProcessArchitecture is not (Architecture.X64 or Architecture.Arm64))
+            throw new IOException("Secure workspace file access is unavailable on this device.");
+        const int directoryFlags = 0x100000 | 0x100 | 0x1000000; // O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        int fd = OpenUnix("/", directoryFlags, 0);
+        if (fd < 0) return -1;
+        using var root = new SafeFileHandle(fd, ownsHandle: true);
+        string[] parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0) throw new IOException("Requested path is not accessible.");
+        return OpenMacRelative(root, parts, 0, flags);
+    }
+
+    private static int OpenMacRelative(SafeFileHandle parent, string[] parts, int index, int flags)
+    {
+        if (index == parts.Length - 1)
+            return RuntimeInformation.ProcessArchitecture == Architecture.Arm64
+                ? OpenMacAtArm(parent, parts[index], flags | 4, 0, 0, 0, 0, 0, (flags & oCreat) != 0 ? 0x180u : 0u)
+                : OpenMacAt(parent, parts[index], flags | 4, (flags & oCreat) != 0 ? 0x180u : 0u);
+        int fd = OpenMacAt(parent, parts[index], 0x100000 | 0x100 | 0x1000000);
+        if (fd < 0) return -1;
+        using var next = new SafeFileHandle(fd, ownsHandle: true);
+        return OpenMacRelative(next, parts, index + 1, flags);
+    }
+
+    private static int ReadMacStat(SafeFileHandle handle, out DarwinStat stat)
+        => RuntimeInformation.ProcessArchitecture == Architecture.X64
+            ? FStatMacIntel(handle, out stat) : FStatMacArm(handle, out stat);
+
+    [StructLayout(LayoutKind.Explicit, Size = 144)]
+    private struct DarwinStat
+    {
+        [FieldOffset(4)] public ushort Mode;
+        [FieldOffset(6)] public ushort NumLinks;
+    }
+
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    [LibraryImport("libc", EntryPoint = "openat", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+    private static partial int OpenMacAt(SafeFileHandle parent, string name, int flags, uint mode = 0);
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    [LibraryImport("libc", EntryPoint = "openat", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+    private static partial int OpenMacAtArm(SafeFileHandle parent, string name, int flags,
+        nint pad3, nint pad4, nint pad5, nint pad6, nint pad7, uint mode);
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    [LibraryImport("libc", EntryPoint = "fstat$INODE64", SetLastError = true)]
+    private static partial int FStatMacIntel(SafeFileHandle handle, out DarwinStat stat);
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    [LibraryImport("libc", EntryPoint = "fstat", SetLastError = true)]
+    private static partial int FStatMacArm(SafeFileHandle handle, out DarwinStat stat);
+
     // Unlike O_NOFOLLOW, openat2 rejects links in every component in one kernel lookup.
     // Open the filesystem root first: even ancestors of the authorized workspace must
     // not be redirected. There is deliberately no path-based fallback on older kernels.
@@ -16,7 +69,7 @@ internal static partial class WorkspaceFile
             throw new IOException("Secure workspace file access is unsupported on this architecture.");
         }
 
-        int rootDescriptor = OpenUnix("/", oRdonly | oCloexec | 0x10000, 0);
+        int rootDescriptor = OpenUnix("/", oRdonly | oCloexec | (RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? 0x4000 : 0x10000), 0);
         if (rootDescriptor < 0)
         {
             throw new IOException("Requested path is not accessible.");

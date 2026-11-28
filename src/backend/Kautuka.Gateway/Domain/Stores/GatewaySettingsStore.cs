@@ -1,3 +1,4 @@
+using Kautuka.Gateway.Domain.Connectors;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -61,6 +62,7 @@ internal sealed class GatewaySettingsStore : IGatewaySettingsStore
         int sandboxCpus = state.SystemSettings.SandboxDefaultCpus;
         string? sandboxMemory = state.SystemSettings.SandboxDefaultMemory;
         int sandboxTimeout = state.SystemSettings.SandboxDefaultTimeout;
+        IReadOnlyDictionary<string, string> sandboxEnvironment = configurationProvider.GetCurrent().Kautuka.Sandbox.ContainerEnvironment;
         bool documentIngestionEnabled = state.SystemSettings.DocumentIngestionEnabled;
         string documentIngestionInternalParserConnectorId = state.SystemSettings.DocumentIngestionInternalParserConnectorId;
         string documentIngestionInternalParserToolName = state.SystemSettings.DocumentIngestionInternalParserToolName;
@@ -124,6 +126,24 @@ internal sealed class GatewaySettingsStore : IGatewaySettingsStore
                 sandboxCpus = sandbox.GetIntProperty("defaultCpus", sandboxCpus);
                 sandboxMemory = sandbox.GetNullableStringProperty("defaultMemory") ?? sandboxMemory;
                 sandboxTimeout = sandbox.GetIntProperty("defaultTimeout", sandboxTimeout);
+                if (sandbox.TryGetProperty("containerEnvironment", out JsonElement environment))
+                {
+                    if (environment.ValueKind != JsonValueKind.Object)
+                        throw new ArgumentException("Sandbox settings must be a list of setting names and text values.");
+                    var validated = new Dictionary<string, string>(StringComparer.Ordinal);
+                    foreach (JsonProperty entry in environment.EnumerateObject())
+                    {
+                        if (!ConnectorEnvironmentKeyPolicy.IsPortableIdentifier(entry.Name) || entry.Value.ValueKind != JsonValueKind.String)
+                            throw new ArgumentException("Sandbox settings need valid setting names and text values.");
+                        string value = entry.Value.GetString()!;
+                        if (value.IndexOfAny(['\0', '\r', '\n']) >= 0)
+                            throw new ArgumentException($"Sandbox setting '{entry.Name}' contains a line break or unsupported character.");
+                        if (ConnectorEnvironmentKeyPolicy.IsManagedNetworkSetting(entry.Name))
+                            throw new ArgumentException($"Sandbox setting '{entry.Name}' is managed by Kautuka. Change the network settings instead.");
+                        validated[entry.Name] = value;
+                    }
+                    sandboxEnvironment = validated;
+                }
             }
 
             if (kautuka.TryGetProperty("documentIngestion", out JsonElement documentIngestion)
@@ -221,6 +241,9 @@ internal sealed class GatewaySettingsStore : IGatewaySettingsStore
             ["runtime.allow_multiple_tool_calls"] = allowMultipleToolCalls ? "true" : "false",
             ["runtime.allow_concurrent_invocation"] = allowConcurrentInvocation ? "true" : "false",
             ["runtime.max_parallel_tools"] = maxParallelTools.ToString(CultureInfo.InvariantCulture),
+        }, new Dictionary<string, string>
+        {
+            ["infra.sandbox.container_env_json"] = JsonSerializer.Serialize(new Dictionary<string, string>(sandboxEnvironment), KautukaJsonContext.Default.DictionaryStringString),
         });
 
         state.SystemSettings = newSettings;
@@ -264,7 +287,7 @@ internal sealed class GatewaySettingsStore : IGatewaySettingsStore
                 state.SystemSettings.SandboxImage,
                 state.SystemSettings.SandboxDefaultCpus,
                 state.SystemSettings.SandboxDefaultMemory,
-                state.SystemSettings.SandboxDefaultTimeout),
+                state.SystemSettings.SandboxDefaultTimeout, configurationProvider.GetCurrent().Kautuka.Sandbox.ContainerEnvironment),
             new GatewayDocumentIngestionSettingsPayload(
                 state.SystemSettings.DocumentIngestionEnabled,
                 state.SystemSettings.DocumentIngestionInternalParserConnectorId,

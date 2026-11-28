@@ -43,6 +43,17 @@ const mail = {
   isInternalSystemConnector: true,
 } as Connector;
 
+it('shows refused-setting guidance where the connector owner manages it', () => {
+  const connector = connectorSchema.parse({
+    id: 'personal', name: 'Family calendar', transport: 'container', scope: 'user',
+    ownerUserId: 'owner', enabled: true,
+    notices: ["Setting 'HTTPS_PROXY' is managed by Kautuka. Edit this connector to choose a supported setting."],
+  });
+  render(<ConnectorCard connector={connector} canManage onToggle={vi.fn()} onEdit={vi.fn()}
+    onDelete={vi.fn()} toggling={false} />);
+  expect(screen.getByRole('alert')).toHaveTextContent("HTTPS_PROXY");
+});
+
 describe('ConnectorCard managed sign-in connector', () => {
   it('lets a regular user enable and disable a shared connector without granting deletion', () => {
     const connector = connectorSchema.parse({

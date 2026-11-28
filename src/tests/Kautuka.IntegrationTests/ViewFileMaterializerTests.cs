@@ -44,6 +44,38 @@ public sealed class ViewFileMaterializerTests
         }
     }
 
+    [Theory]
+    [InlineData("view-files")]
+    [InlineData("hash")]
+    public async Task ViewFileMaterializationRefusesWindowsJunction(string component)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows junction validation.");
+        string root = CreateWorkspaceDirectory();
+        string outside = CreateWorkspaceDirectory();
+        string? junction = null;
+        try
+        {
+            string hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData("f1"u8))[..12];
+            string views = Path.Combine(root, "view-files");
+            if (component == "hash") Directory.CreateDirectory(views);
+            string link = component == "hash" ? Path.Combine(views, hash) : views;
+            junction = link;
+            using var process = FileSystemLinkFixture.Start(link, outside, directoryLink: true)!;
+            await process.WaitForExitAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(0, process.ExitCode);
+            string result = ViewFileMaterializer.Materialize(ViewFileResult, root);
+            Assert.Contains("\"unavailable\":true", result, StringComparison.Ordinal);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(outside));
+        }
+        finally
+        {
+            if (junction is not null && new DirectoryInfo(junction).LinkTarget is not null)
+                Directory.Delete(junction);
+            Directory.Delete(root, true);
+            Directory.Delete(outside, true);
+        }
+    }
+
     private const string ViewFileResult = """
         {"structured_content":{"view":{"blocks":[{"type":"file","fileId":"f1"}]},"files":[{"fileId":"f1","name":"notes.txt","base64":"aGVsbG8="}]}}
         """;
@@ -134,6 +166,7 @@ public sealed class ViewFileMaterializerTests
     {
         if (!OperatingSystem.IsLinux())
         {
+            Assert.Skip("Sandbox user-namespace read permissions are verified on Linux.");
             return;
         }
 
@@ -212,20 +245,16 @@ public sealed class ViewFileMaterializerTests
                 """);
             startInfo.ArgumentList.Add(filePath);
 
-            using var process = System.Diagnostics.Process.Start(startInfo);
-            if (process is not null)
-            {
-                string stdout = await process.StandardOutput.ReadToEndAsync(TestContext.Current.CancellationToken);
-                string stderr = await process.StandardError.ReadToEndAsync(TestContext.Current.CancellationToken);
-                await process.WaitForExitAsync(TestContext.Current.CancellationToken);
-                if (process.ExitCode == 0)
-                {
-                    Assert.True(
-                        stdout.Contains("SANDBOX_READ_OK", StringComparison.Ordinal)
-                        || stdout.Contains("SKIP_SUBUID", StringComparison.Ordinal),
-                        $"Unexpected userns output: stdout={stdout}; stderr={stderr}");
-                }
-            }
+            using var process = System.Diagnostics.Process.Start(startInfo)
+                ?? throw new InvalidOperationException("The sandbox permission check could not start.");
+            string stdout = await process.StandardOutput.ReadToEndAsync(TestContext.Current.CancellationToken);
+            string stderr = await process.StandardError.ReadToEndAsync(TestContext.Current.CancellationToken);
+            await process.WaitForExitAsync(TestContext.Current.CancellationToken);
+            if (stdout.Contains("SKIP_SUBUID", StringComparison.Ordinal)
+                || stderr.Contains("Operation not permitted", StringComparison.Ordinal))
+                Assert.Skip("The host does not permit the user namespace and subordinate IDs required for the sandbox permission check.");
+            Assert.True(process.ExitCode == 0, $"Sandbox permission check failed: stdout={stdout}; stderr={stderr}");
+            Assert.Contains("SANDBOX_READ_OK", stdout, StringComparison.Ordinal);
         }
         finally
         {

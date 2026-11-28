@@ -123,7 +123,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
     [Fact]
     public async Task CallToolMaterializesViewFilesIntoDesiredWorkspaceOnly()
     {
-        string root = Directory.CreateTempSubdirectory().FullName;
+        string root = Directory.CreateDirectory(Path.Combine(OperatingSystem.IsMacOS() ? "/private/tmp" : Path.GetTempPath(), "native-call-" + Guid.NewGuid().ToString("N"))).FullName;
         string outside = Directory.CreateTempSubdirectory().FullName;
         try
         {
@@ -132,7 +132,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             await File.WriteAllTextAsync(bundle, "bundle", token);
             string script = Path.Combine(root, "mcp_view_server.py");
             await File.WriteAllTextAsync(script, """
-                import json, sys
+                import json, sys, pathlib
                 for line in sys.stdin:
                     if not line.strip():
                         continue
@@ -142,6 +142,9 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                     if method == "initialize":
                         print(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}}, "serverInfo": {"name": "view", "version": "1"}}}), flush=True)
                     elif method == "tools/call":
+                        if "--env-file" in sys.argv:
+                            env_file = pathlib.Path(sys.argv[sys.argv.index("--env-file") + 1])
+                            assert not env_file.exists(), "Connector settings file remained after initialization"
                         structured = {"view": {"blocks": [{"type": "file", "fileId": "f1"}]}, "files": [{"fileId": "f1", "name": "report.txt", "base64": "aGVsbG8="}]}
                         print(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": "ok"}], "structuredContent": structured, "isError": False}}), flush=True)
                 """, token);
@@ -151,7 +154,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             Directory.CreateDirectory(desiredWorkspacePath);
             var desiredWorkspace = new ContainerContext("agent", "agent", "user", desiredWorkspacePath, "/workspace", image, 30, "512m", 1, [], new Dictionary<string, string>());
             var spoofedCallerWorkspace = desiredWorkspace with { HostWorkspacePath = outside };
-            var connector = new WorkspaceMcpContainerConnectorDefinition("user::web", image, "manager-command", ["manager-arg"], true, false, bundle, "binary", [], 30, 600);
+            var connector = new WorkspaceMcpContainerConnectorDefinition("user::web", image, "manager-command", ["manager-arg"], true, false, bundle, "binary", [new("TOKEN", "runtime-secret")], 30, 600);
             var desired = new WorkspaceDesiredStateStore();
             _ = desired.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap,
                 new ManagerRuntimeSettings(new ManagerWorkspaceDefinition { BaseRoot = root }, new ManagerSandboxRuntimeDefinition { Image = image, DefaultTimeout = 30 }, new WorkspaceTelemetryDefinition()),

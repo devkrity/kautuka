@@ -3,7 +3,7 @@ import type { Connector } from '@/features/connectors';
 import { AgentConnectorsEditor } from '@/features/settings/components/AgentConnectorsEditor';
 import type { AgentSettingsEntry } from '@/features/settings/types/settingsTypes';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/features/connectors', async (importOriginal) => {
@@ -86,6 +86,7 @@ function createBundleConnector(id: string, name: string, envKeys: string[]): Con
 describe('AgentConnectorsEditor credentialed connector execution context', () => {
   it('shows owner safety notices and omits Within Agent Sandbox for credentialed connectors while keeping it for plain bundles', () => {
     const agent = createAgent();
+    const onPatch = vi.fn<(updater: (previous: AgentSettingsEntry) => AgentSettingsEntry) => void>();
     const connectors = [
       createBundleConnector('secret-bundle', 'Secret Bundle', ['API_TOKEN']),
       createBundleConnector('plain-bundle', 'Plain Bundle', []),
@@ -105,7 +106,7 @@ describe('AgentConnectorsEditor credentialed connector execution context', () =>
             getConnectorMode={() => 'on'}
             getToolMode={() => 'on'}
             getAgentToolMode={() => 'off'}
-            onPatch={vi.fn()}
+            onPatch={onPatch}
             onModeChange={vi.fn()}
             onTogglePanel={vi.fn()}
             onToolModeChange={vi.fn()}
@@ -129,5 +130,9 @@ describe('AgentConnectorsEditor credentialed connector execution context', () =>
     expect(
       screen.getAllByRole('button', { name: 'Isolated with access to Agent Files' })
     ).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Got it — dismiss when saved' }));
+    const acknowledged = onPatch.mock.calls[0]?.[0](agent);
+    expect(acknowledged?.acknowledgedNotices).toEqual(agent.notices);
+    expect(acknowledged?.notices).toEqual([]);
   });
 });

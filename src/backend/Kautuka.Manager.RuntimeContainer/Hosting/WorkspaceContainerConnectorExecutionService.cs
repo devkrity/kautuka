@@ -621,6 +621,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             McpClient client = await McpClient.CreateAsync(transportLaunch.Transport, ClientOptionsFor(connector.McpProtocolVersion), cancellationToken: launchCancellation.Token).ConfigureAwait(false);
             await using (client.ConfigureAwait(false))
             {
+                transportLaunch.CleanupEnvironmentFile();
                 long initialized = Stopwatch.GetTimestamp();
                 await ReleaseLaunchLeaseAsync(transportLaunch).ConfigureAwait(false);
                 var toolInput = McpToolContractCodec.ParseInput(toolInputJson);
@@ -2477,6 +2478,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         McpClient client = await McpClient.CreateAsync(launch.Transport, clientOptions, cancellationToken: launchCancellation.Token).ConfigureAwait(false);
         await using (client.ConfigureAwait(false))
         {
+            launch.CleanupEnvironmentFile();
             await ReleaseLaunchLeaseAsync(launch).ConfigureAwait(false);
             IList<McpClientTool> tools = await client.ListToolsAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
             return [.. tools];

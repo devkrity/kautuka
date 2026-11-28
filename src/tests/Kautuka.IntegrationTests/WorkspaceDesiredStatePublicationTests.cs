@@ -551,6 +551,8 @@ public sealed class WorkspaceDesiredStatePublicationTests
         string note = Assert.Single(reloaded.StartupDriftNotes);
         Assert.Contains("Legacy Proxy Connector", note, StringComparison.Ordinal);
         Assert.Contains("HTTPS_PROXY", note, StringComparison.Ordinal);
+        var ownerPayload = Kautuka.Gateway.Endpoints.Connectors.GatewayConnectorEndpointMappings.ToConnectorPayload(reloaded.McpServers["legacy-proxy-connector"]);
+        Assert.Contains("HTTPS_PROXY", Assert.Single(ownerPayload.Notices!), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1063,6 +1065,21 @@ public sealed class WorkspaceDesiredStatePublicationTests
         {
             Sandbox = new GatewayAgentSandboxPayload { Enabled = true },
             McpBindings = [new GatewayAgentMcpBindingPayload { ConnectorId = "plain", Context = "AgentContext" }]
+        }, "owner");
+        upgradedStore.SaveAgent("agent", new GatewayAgentUpsertRequest
+        {
+            Name = "Updated by administrator",
+            AcknowledgedNotices = [.. upgradedStore.GetAgentOwnerNotices("agent")],
+            Sandbox = new GatewayAgentSandboxPayload { Enabled = true }
+        }, "administrator");
+        Assert.True(upgradedStore.TryGetAgent("agent", out var ownerPreserved));
+        Assert.Equal("owner", ownerPreserved!.OwnerUserId);
+        Assert.Single(upgradedStore.GetAgentOwnerNotices("agent"));
+        upgradedStore.SaveAgent("agent", new GatewayAgentUpsertRequest
+        {
+            Sandbox = new GatewayAgentSandboxPayload { Enabled = true },
+            McpBindings = [new GatewayAgentMcpBindingPayload { ConnectorId = "plain", Context = "AgentContext" }],
+            AcknowledgedNotices = [.. upgradedStore.GetAgentOwnerNotices("agent")]
         }, "owner");
         Assert.Empty(upgradedStore.GetAgentOwnerNotices("agent"));
         Assert.Contains("isolated execution", Assert.Throws<ArgumentException>(() =>
@@ -2546,6 +2563,39 @@ public sealed class WorkspaceDesiredStatePublicationTests
         Assert.Equal(0, workspaceTool.RebuildCalls);
         Assert.NotEqual("stale-topology-hash", hydratedState.TopologyHash);
         Assert.Equal(hydratedState.ComputeTopologyHashFromState(), hydratedState.TopologyHash);
+    }
+
+    [Fact]
+    public void SandboxEnvironmentSettingsRoundTripAndRefuseUnsafeEntriesBeforeSaving()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        IConfiguration configuration = CreateConfiguration(temp.SqlitePath);
+        var database = new KautukaDatabase(configuration);
+        database.EnsureReady();
+        var definitions = new SqliteAgentDefinitionStore(configuration, database);
+        var provider = new SqlitePlatformConfigurationProvider(database, definitions);
+        var state = CreateState(temp.SqlitePath);
+        var store = new GatewaySettingsStore(state, new KautukaLogLevelSwitch(LogLevel.Warning),
+            new RecordingDesiredStatePublisher(), new NoOpUpdateServiceGrpcService(), configuration, provider);
+        using var supported = JsonDocument.Parse("""
+            {"kautuka":{"sandbox":{"containerEnvironment":{"PATH":"/custom/bin","PYTHONPATH":"/custom/python","DOCKER_HOST":"tcp://connector:2375","EMPTY":""}}}}
+            """);
+        store.Save(supported.RootElement);
+        var environment = provider.GetCurrent().Kautuka.Sandbox.ContainerEnvironment;
+        Assert.Equal("/custom/bin", environment["PATH"]);
+        Assert.Equal("/custom/python", environment["PYTHONPATH"]);
+        Assert.Equal("tcp://connector:2375", environment["DOCKER_HOST"]);
+        Assert.Equal("", environment["EMPTY"]);
+        foreach (string invalid in new[] { """{"HTTP_PROXY":"bad"}""", """{"BAD-KEY":"bad"}""", """{"VALID":"bad\nline"}""" })
+        {
+            using var request = JsonDocument.Parse("""{"kautuka":{"sandbox":{"containerEnvironment":""" + invalid + "}}}");
+            Assert.Throws<ArgumentException>(() => store.Save(request.RootElement));
+            Assert.Equal("/custom/bin", provider.GetCurrent().Kautuka.Sandbox.ContainerEnvironment["PATH"]);
+        }
+        // Existing v0.1.27 container_env_json storage keeps its names and values on unrelated saves.
+        using var unrelated = JsonDocument.Parse("""{"system":{"logLevel":"INFO"}}""");
+        store.Save(unrelated.RootElement);
+        Assert.Equal(environment.OrderBy(pair => pair.Key), provider.GetCurrent().Kautuka.Sandbox.ContainerEnvironment.OrderBy(pair => pair.Key));
     }
 
     [Fact]

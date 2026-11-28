@@ -11,6 +11,10 @@ upgrade path.
 
 ### Security
 
+- Preserve sandbox environment settings through private files, remove connector settings files before tool calls, and report refused settings to their owners.
+- Keep moved-connector notices until their owner acknowledges them.
+- Support safe native macOS agent-file downloads and use the correct Linux arm64 file flags for hook, policy, certificate, and workspace files.
+
 - Restore safe connector view-file saving when running from source on Windows, Linux x64/arm64, and macOS Intel/Apple silicon. Existing file formats and configurable limits are preserved.
 
 - Upgrades from v0.1.27 reuse matching sandbox installations. Manager now builds connector commands from its desired state and filters host process controls.

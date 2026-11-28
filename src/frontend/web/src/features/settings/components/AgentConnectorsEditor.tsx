@@ -1,3 +1,4 @@
+import { Button } from '@/components/ui/button';
 import { Alert } from '@/components/ui/alert';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { TabsContent } from '@/components/ui/tabs';
@@ -154,6 +155,9 @@ export function AgentConnectorsEditor({
           {agent.notices?.map((notice) => (
             <p key={notice}>{notice}</p>
           ))}
+          <Button type="button" variant="outline" size="sm" onClick={() => onPatch((previous) => ({
+            ...previous, acknowledgedNotices: previous.notices ?? [], notices: [],
+          }))}>Got it — dismiss when saved</Button>
         </Alert>
       ) : null}
       <div className="settings-subpanel-compact">

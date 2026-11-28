@@ -88,7 +88,7 @@ internal sealed partial class GatewayCatalogStore
             planning,
             sandbox,
             skillAttachments,
-            ownerUserId,
+            existingAgent?.OwnerUserId ?? ownerUserId,
             Timestamp(),
             approvalConfig,
             toolExposure,
@@ -127,7 +127,11 @@ internal sealed partial class GatewayCatalogStore
         state.AgentStorageLocators[agentId] = storageLocatorKey;
 
         state.Agents[agentId] = agent;
-        state.ClearAgentOwnerNotices(agentId);
+        if (existingAgent is not null
+            && string.Equals(existingAgent.OwnerUserId, ownerUserId, StringComparison.Ordinal)
+            && request.AcknowledgedNotices is { Length: > 0 }
+            && request.AcknowledgedNotices.SequenceEqual(GetAgentOwnerNotices(agentId), StringComparer.Ordinal))
+            state.ClearAgentOwnerNotices(agentId);
         await RebuildAgentWorkspacesForAllUsersAsync(agentId, cancellationToken).ConfigureAwait(false);
         state.TopologyHash = state.ComputeTopologyHashFromState();
         await desiredStatePublisher.TryPublishCurrentAsync("agent-save", cancellationToken).ConfigureAwait(false);

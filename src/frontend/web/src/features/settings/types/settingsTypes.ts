@@ -165,6 +165,7 @@ export interface AgentSettingsEntry {
   runtime?: AgentRuntimeSettings;
   revision?: number;
   notices?: string[] | null;
+  acknowledgedNotices?: string[];
   session: {
     historyEnabled: boolean;
     maxHistoryRuns: number;
@@ -249,6 +250,7 @@ export interface KautukaSandboxSettingsEntry {
   defaultCpus: number;
   defaultMemory: string;
   defaultTimeout: number;
+  containerEnvironment?: Record<string, string>;
 }
 
 export interface KautukaDocumentIngestionSettingsEntry {

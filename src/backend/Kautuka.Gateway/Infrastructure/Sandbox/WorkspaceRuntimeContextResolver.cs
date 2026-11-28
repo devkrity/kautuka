@@ -331,7 +331,7 @@ internal sealed class WorkspaceRuntimeContextResolver(
 
         foreach ((string key, string value) in baseEnvironment)
         {
-            if (!string.IsNullOrWhiteSpace(key) && !string.IsNullOrWhiteSpace(value))
+            if (!string.IsNullOrWhiteSpace(key) && value is not null)
             {
                 mergedEnvironment[key] = value;
             }

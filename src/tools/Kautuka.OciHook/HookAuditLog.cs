@@ -9,7 +9,7 @@ namespace Kautuka.OciHook;
 internal static partial class HookAuditLog
 {
     private const int LogLimit = 5 * 1024 * 1024;
-    private const int OpenFlags = 1 | 0x40 | 0x400 | 0x800 | 0x20000 | 0x80000;
+    private static readonly int OpenFlags = 1 | 0x40 | 0x400 | 0x800 | (RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? 0x8000 : 0x20000) | 0x80000;
     private const int LockExclusiveNonblocking = 2 | 4;
     private const uint OwnerReadWrite = 0x180;
 

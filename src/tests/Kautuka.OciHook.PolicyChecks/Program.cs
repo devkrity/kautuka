@@ -165,6 +165,26 @@ if (OperatingSystem.IsLinux())
         File.Delete(ownerPath);
         File.CreateSymbolicLink(ownerPath, lockPath);
         if (OwnerRegistry.Read(ownerPath).Valid) throw new InvalidOperationException("Registry symlink accepted.");
+        File.Delete(ownerPath);
+        File.Delete(lockPath);
+        string sentinel = Path.Combine(dir, "sentinel");
+        File.WriteAllText(sentinel, "outside");
+        File.SetUnixFileMode(sentinel, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        File.CreateSymbolicLink(lockPath, sentinel);
+        Reject(() => OwnerRegistry.Claim(ownerPath, lockPath, identity.NetworkNamespaceInode, "one", identity.Pid, identity.StartTicks));
+        File.Delete(lockPath);
+        HookAuditLog.Write(dir, workload, [], identity.NetworkNamespaceInode, false, "test", "", DateTimeOffset.UtcNow, TimeSpan.Zero);
+        string audit = Path.Combine(dir, "hook.log");
+        if (File.ReadAllLines(audit).Length != 1) throw new InvalidOperationException("Audit write failed.");
+        File.Delete(audit);
+        File.CreateSymbolicLink(audit, sentinel);
+        Reject(() => HookAuditLog.Write(dir, workload, [], null, false, "test", "", DateTimeOffset.UtcNow, TimeSpan.Zero));
+        File.Delete(audit);
+        File.Delete(audit + ".lock");
+        File.CreateSymbolicLink(audit + ".lock", sentinel);
+        Reject(() => HookAuditLog.Write(dir, workload, [], null, false, "test", "", DateTimeOffset.UtcNow, TimeSpan.Zero));
+        if (File.ReadAllText(sentinel) != "outside") throw new InvalidOperationException("Unsafe hook file modified the symlink target.");
+
     }
     finally { Directory.Delete(dir, true); }
 }

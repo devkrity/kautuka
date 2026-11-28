@@ -88,7 +88,10 @@ internal static class ConnectorEnvironmentKeyPolicy
         }
     }
 
-    private static bool IsPortableIdentifier(string key)
+    internal static bool IsManagedNetworkSetting(string key)
+        => proxySettingNames.Contains(key) || managedSettingNames.Contains(key) && !key.Equals("HOME", StringComparison.OrdinalIgnoreCase);
+
+    internal static bool IsPortableIdentifier(string key)
     {
         if (string.IsNullOrWhiteSpace(key) || !(char.IsAsciiLetter(key[0]) || key[0] == '_'))
         {

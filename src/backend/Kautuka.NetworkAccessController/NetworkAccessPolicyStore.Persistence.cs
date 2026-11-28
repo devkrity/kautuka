@@ -9,6 +9,8 @@ namespace Kautuka.NetworkAccessController;
 
 public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDisposable
 {
+    private static readonly int LinuxDirectoryFlags = (RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? 0x4000 : 0x10000) | 0x80000;
+
     public const int MaxPendingRequests = 500;
     public const int DefaultMaxPendingRequestsPerUser = 64;
     public const int MaxRules = 10000;
@@ -436,7 +438,7 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
             return;
         }
 
-        int handle = open(directory, 0x10000 | 0x80000); // O_RDONLY | O_DIRECTORY | O_CLOEXEC
+        int handle = open(directory, LinuxDirectoryFlags); // O_RDONLY | O_DIRECTORY | O_CLOEXEC
         if (handle < 0)
         {
             throw new Win32Exception(Marshal.GetLastPInvokeError(), "Could not open network policy directory for durability.");

@@ -800,7 +800,9 @@ internal static class GatewayConnectorEndpointMappings
         [.. server.HttpHeaders ?? []],
         server.RequiresCredentialReentry,
         server.Enabled,
-        GatewayCatalogStore.ToDefinition(server).RequiresIsolation(connectorAuth));
+        GatewayCatalogStore.ToDefinition(server).RequiresIsolation(connectorAuth),
+        [.. (server.EnvKeys ?? []).Where(key => !ConnectorEnvironmentKeyPolicy.IsSupported(key, out _))
+            .Select(key => { _ = ConnectorEnvironmentKeyPolicy.IsSupported(key, out string message); return message + " Edit this connector to choose a supported setting."; })]);
 
     private static bool HasCurrentLocalTools(GatewayMcpServer server)
         => !string.Equals(server.Transport, "container", StringComparison.OrdinalIgnoreCase)

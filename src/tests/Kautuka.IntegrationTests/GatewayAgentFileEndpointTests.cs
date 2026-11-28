@@ -223,6 +223,29 @@ public sealed class GatewayAgentFileEndpointTests
     }
 
     [Fact]
+    public async Task NativeConnectorViewFilesAndOrdinaryAgentFilesCanBeDownloaded()
+    {
+        await using var fixture = await AgentFilesApiFixture.CreateAsync();
+        string accessToken = await fixture.LoginAsBootstrapAdminAsync();
+        const string agentId = "native-files";
+        await fixture.CreateAgentAsync(agentId, sandboxEnabled: true);
+        fixture.WriteWorkspaceFile(agentId, "notes.txt", "agent-notes");
+        string result = Kautuka.Manager.RuntimeContainer.Hosting.ViewFileMaterializer.Materialize(
+            """{"structured_content":{"view":{"blocks":[{"type":"file","fileId":"native"}]},"files":[{"fileId":"native","name":"returned.txt","base64":"aGVsbG8="}]}}""",
+            fixture.WorkspacePath(agentId, null));
+        using JsonDocument document = JsonDocument.Parse(result);
+        string relative = document.RootElement.GetProperty("structured_content").GetProperty("view").GetProperty("blocks")[0].GetProperty("path").GetString()!;
+        foreach (var item in new[] { (Path: relative, Expected: "hello"), (Path: "notes.txt", Expected: "agent-notes") })
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"/api/agents/{agentId}/files/content?path={Uri.EscapeDataString(item.Path)}");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+            using var response = await fixture.Client.SendAsync(request, TestContext.Current.CancellationToken);
+            Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+            Assert.Equal(item.Expected, await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+        }
+    }
+
+    [Fact]
     public async Task DownloadEndpointServesHostViewFilesWhenSandboxDisabled()
     {
         await using var fixture = await AgentFilesApiFixture.CreateAsync();
@@ -851,7 +874,7 @@ public sealed class GatewayAgentFileEndpointTests
 
         public static async Task<AgentFilesApiFixture> CreateAsync()
         {
-            string root = Path.Combine(Path.GetTempPath(), "kautuka-agent-files-tests", Guid.NewGuid().ToString("N"));
+            string root = Path.Combine(OperatingSystem.IsMacOS() ? "/private/tmp" : Path.GetTempPath(), "kautuka-agent-files-tests", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
 
             string sqlitePath = Path.Combine(root, "gateway.db");

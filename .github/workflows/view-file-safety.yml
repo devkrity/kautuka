@@ -3,8 +3,15 @@ name: View File Safety
 on:
   push:
     paths:
-      - 'src/backend/Kautuka.Manager.RuntimeContainer/Hosting/**'
+      - 'src/backend/**'
+      - 'src/shared/**'
+      - 'src/tools/Kautuka.OciHook/**'
       - 'src/tests/Kautuka.IntegrationTests/**'
+      - 'src/tests/Kautuka.OciHook.PolicyChecks/**'
+      - 'src/frontend/web/src/features/settings/**'
+      - 'src/frontend/web/src/features/connectors/**'
+      - 'src/frontend/web/src/test/AgentConnectorsEditor.test.tsx'
+      - 'src/frontend/web/src/test/ConnectorCard.managed.test.tsx'
       - '.github/workflows/view-file-safety.yml'
   pull_request:
   workflow_dispatch:
@@ -20,6 +27,11 @@ jobs:
       matrix:
         runner: [windows-latest, ubuntu-24.04, ubuntu-24.04-arm, macos-15-intel, macos-15]
     runs-on: ${{ matrix.runner }}
+    env:
+      Kautuka__Telemetry__Otlp__MetricsEndpoint: http://127.0.0.1:9/v1/metrics
+      Kautuka__Telemetry__Otlp__TracesEndpoint: http://127.0.0.1:9/v1/traces
+      Kautuka__Telemetry__Otlp__LogsEndpoint: http://127.0.0.1:9/v1/logs
+      OTEL_EXPORTER_OTLP_TIMEOUT: '1000'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -28,4 +40,24 @@ jobs:
         with:
           global-json-file: global.json
       - name: Save, open, replace, limit, and refuse links
-        run: dotnet test --project src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj -- --filter-class '*ViewFileMaterializerTests'
+        run: dotnet test --project src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj -- --filter-class '*ViewFileMaterializerTests' --filter-class '*WorkspaceFileContainmentTests' --filter-class '*GatewayConnectCertificateMaterialTests' --filter-class '*U2_PolicyStoreTests' --filter-class '*NativeDirectoryFlagTests'
+
+      - name: Settings, notices, secret-file lifetime, and native downloads
+        run: dotnet test --project src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj --no-build -- --filter-method '*SandboxEnvironmentSettingsRoundTripAndRefuseUnsafeEntriesBeforeSaving' --filter-method '*SandboxStartupFiltersHostSensitiveEnvironmentAndReusesExistingV0127Sandbox' --filter-method '*EphemeralEnvironmentFileIsRestrictedToTheProcessOwner' --filter-method '*UnsupportedConnectorSettingsAreRefusedOnSaveAndFlaggedAtStartup' --filter-method '*UpgradeIsolatesCredentialedBindingsOnceAndRejectsNewSandboxBindings' --filter-method '*CallToolMaterializesViewFilesIntoDesiredWorkspaceOnly' --filter-method '*NativeConnectorViewFilesAndOrdinaryAgentFilesCanBeDownloaded' --filter-method '*DownloadRejectsHardLinkThatLeavesTheWorkspace' --filter-method '*DownloadRejectsJunctionThatLeavesTheWorkspace'
+      - name: Hook allowlist, owner registry, lock, and audit files
+        if: runner.os == 'Linux'
+        run: dotnet run --project src/tests/Kautuka.OciHook.PolicyChecks/Kautuka.OciHook.PolicyChecks.csproj
+
+      - name: Set up Node for owner-notice UI tests
+        if: matrix.runner == 'ubuntu-24.04'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Owner-notice UI tests
+        if: matrix.runner == 'ubuntu-24.04'
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.2 --activate
+          pnpm --dir src/frontend install --frozen-lockfile
+          pnpm --dir src/frontend/web exec vitest run src/test/AgentConnectorsEditor.test.tsx src/test/ConnectorCard.managed.test.tsx

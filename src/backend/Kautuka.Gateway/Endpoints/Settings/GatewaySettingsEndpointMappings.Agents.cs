@@ -73,7 +73,7 @@ internal static partial class GatewaySettingsEndpointMappings
     return Results.Json(
         new GatewayAgentResponse(GatewayAgentSettingsMapper.ToListItem(
             agent,
-            settings.GetAgentPersonaProfile(agent.Id))),
+            settings.GetAgentPersonaProfile(agent.Id), catalog.GetAgentOwnerNotices(agent.Id))),
         KautukaJsonContext.Default.GatewayAgentResponse);
 });
 

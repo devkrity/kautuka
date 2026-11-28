@@ -36,6 +36,7 @@ type AdvancedSettingsDraft = {
   sandboxCpus: string;
   sandboxMemory: string;
   sandboxTimeout: string;
+  sandboxEnvironment: string;
   documentIngestionEnabled: boolean;
   internalParserConnectorId: string;
   internalParserToolName: string;
@@ -129,6 +130,7 @@ function buildDraft(settings: AdvancedSettingsEntry): AdvancedSettingsDraft {
     sandboxCpus: String(settings.kautuka.sandbox.defaultCpus ?? 2),
     sandboxMemory: settings.kautuka.sandbox.defaultMemory ?? '4g',
     sandboxTimeout: String(settings.kautuka.sandbox.defaultTimeout ?? 120),
+    sandboxEnvironment: Object.entries(settings.kautuka.sandbox.containerEnvironment ?? {}).map(([key, value]) => key + '=' + value).join('\n'),
     documentIngestionEnabled: Boolean(settings.kautuka.documentIngestion.enabled),
     internalParserConnectorId:
       settings.kautuka.documentIngestion.internalParserConnectorId ?? 'markitdown',
@@ -202,6 +204,7 @@ export function useAdvancedTab() {
   const [sandboxCpus, setSandboxCpus] = useState('2');
   const [sandboxMemory, setSandboxMemory] = useState('4g');
   const [sandboxTimeout, setSandboxTimeout] = useState('120');
+  const [sandboxEnvironment, setSandboxEnvironment] = useState('');
   const [documentIngestionEnabled, setDocumentIngestionEnabled] = useState(true);
   const [internalParserConnectorId, setInternalParserConnectorId] = useState('markitdown');
   const [internalParserToolName, setInternalParserToolName] = useState('convert_to_markdown');
@@ -247,6 +250,7 @@ export function useAdvancedTab() {
     setSandboxCpus(draft.sandboxCpus);
     setSandboxMemory(draft.sandboxMemory);
     setSandboxTimeout(draft.sandboxTimeout);
+    setSandboxEnvironment(draft.sandboxEnvironment);
     setDocumentIngestionEnabled(draft.documentIngestionEnabled);
     setInternalParserConnectorId(draft.internalParserConnectorId);
     setInternalParserToolName(draft.internalParserToolName);
@@ -300,6 +304,7 @@ export function useAdvancedTab() {
       sandboxCpus,
       sandboxMemory,
       sandboxTimeout,
+      sandboxEnvironment,
       documentIngestionEnabled,
       internalParserConnectorId,
       internalParserToolName,
@@ -359,6 +364,7 @@ export function useAdvancedTab() {
       sandboxImage,
       sandboxMemory,
       sandboxTimeout,
+      sandboxEnvironment,
       sessionCompactionModelId,
       structuredJsonMinObservations,
       structuredJsonStrictPromotionThreshold,
@@ -378,6 +384,7 @@ export function useAdvancedTab() {
         'sandboxCpus',
         'sandboxMemory',
         'sandboxTimeout',
+        'sandboxEnvironment',
       ]),
       'document-ingestion': haveFieldsChanged(baselineDraft, currentDraft, [
         'documentIngestionEnabled',
@@ -471,6 +478,7 @@ export function useAdvancedTab() {
         defaultCpus: Number.parseInt(sandboxCpus, 10) || 2,
         defaultMemory: sandboxMemory,
         defaultTimeout: Number.parseInt(sandboxTimeout, 10) || 120,
+        containerEnvironment: parseSandboxEnvironment(sandboxEnvironment),
       },
       documentIngestion: {
         enabled: documentIngestionEnabled,
@@ -624,6 +632,7 @@ export function useAdvancedTab() {
     sandboxCpus,
     sandboxMemory,
     sandboxTimeout,
+    sandboxEnvironment,
     documentIngestionEnabled,
     internalParserConnectorId,
     internalParserToolName,
@@ -671,6 +680,7 @@ export function useAdvancedTab() {
     setSandboxCpus,
     setSandboxMemory,
     setSandboxTimeout,
+    setSandboxEnvironment,
     setDocumentIngestionEnabled,
     setInternalParserConnectorId,
     setInternalParserToolName,
@@ -699,4 +709,16 @@ export function useAdvancedTab() {
     save,
     resetChanges,
   };
+}
+
+
+function parseSandboxEnvironment(value: string): Record<string, string> {
+  const entries = new Map<string, string>();
+  for (const line of value.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const separator = line.indexOf('=');
+    if (separator <= 0) throw new Error('Use NAME=value, with one sandbox setting per line.');
+    entries.set(line.slice(0, separator), line.slice(separator + 1));
+  }
+  return Object.fromEntries(entries);
 }

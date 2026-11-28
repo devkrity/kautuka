@@ -269,17 +269,27 @@ public sealed class PodmanContainerTool(
             throw new InvalidOperationException($"Sandbox '{containerName}' could not claim its allocated workload address without replacing another registry identity.");
         }
 
-        IReadOnlyList<string> runArguments = BuildRunArguments(
+        List<string> runArguments = BuildRunArguments(
             context,
             containerName,
             allocatedIp,
-            workloadLaunchGate?.IsBraked(context.UserId) ?? true);
-        ContainerExecutionResult createResult = await RunPodmanAsync(
-            runArguments,
-            context.DefaultTimeoutSeconds,
-            cancellationToken,
-            containerName,
-            Hosting.ConnectorContainerSpecBuilder.FilterHostProcessEnvironment(context.ContainerEnvironment)).ConfigureAwait(false);
+            workloadLaunchGate?.IsBraked(context.UserId) ?? true).ToList();
+        string? environmentFile = null;
+        ContainerExecutionResult createResult;
+        try
+        {
+            if (context.ContainerEnvironment.Count > 0)
+            {
+                environmentFile = await WriteEphemeralEnvironmentFileAsync(context.ContainerEnvironment, cancellationToken).ConfigureAwait(false);
+                runArguments.InsertRange(1, ["--env-file", environmentFile]);
+            }
+            createResult = await RunPodmanAsync(runArguments, context.DefaultTimeoutSeconds,
+                cancellationToken, containerName).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (environmentFile is not null) DeleteSecretFile(environmentFile);
+        }
 
         bool hasCreatedId = Hosting.PodmanContainerIdentity.TryReadCanonicalLaunchOutput(createResult.StdOut, out string createdId);
         if (hasCreatedId && workloadRegistry is not null
@@ -601,7 +611,7 @@ public sealed class PodmanContainerTool(
 
             content = Encoding.UTF8.GetBytes(builder.ToString());
             using FileStream stream = CreateOwnerOnlyFile(path);
-            RestrictSecretFile(path);
+
 
             await stream.WriteAsync(content, cancellationToken).ConfigureAwait(false);
             await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -627,6 +637,16 @@ public sealed class PodmanContainerTool(
 
     private static FileStream CreateOwnerOnlyFile(string path)
     {
+        if (OperatingSystem.IsWindows())
+        {
+            var security = new FileSecurity();
+            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            security.AddAccessRule(new FileSystemAccessRule(WindowsIdentity.GetCurrent().User!,
+                FileSystemRights.FullControl, AccessControlType.Allow));
+            return new FileInfo(path).Create(FileMode.CreateNew, FileSystemRights.FullControl,
+                FileShare.None, 4096, FileOptions.Asynchronous | FileOptions.WriteThrough, security);
+        }
+
         var options = new FileStreamOptions
         {
             Mode = FileMode.CreateNew,
@@ -641,25 +661,6 @@ public sealed class PodmanContainerTool(
         }
 
         return new FileStream(path, options);
-    }
-
-    private static void RestrictSecretFile(string path)
-    {
-        if (OperatingSystem.IsWindows())
-        {
-            var security = new FileSecurity();
-            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-            security.AddAccessRule(new FileSystemAccessRule(
-                WindowsIdentity.GetCurrent().User!,
-                FileSystemRights.Read | FileSystemRights.Write,
-                InheritanceFlags.None,
-                PropagationFlags.None,
-                AccessControlType.Allow));
-            new FileInfo(path).SetAccessControl(security);
-            return;
-        }
-
-        File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
     }
 
     private static void ValidateEnvironmentEntry(string key, string value)
@@ -874,17 +875,6 @@ public sealed class PodmanContainerTool(
 
         ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
         string ip = allocatedIp;
-        var envList = new List<KeyValuePair<string, string>>();
-        foreach (KeyValuePair<string, string> kv in context.ContainerEnvironment)
-        {
-            if (Hosting.ConnectorContainerSpecBuilder.AllowsHostProcessEnvironment(kv.Key)
-                && !string.IsNullOrWhiteSpace(kv.Value))
-            {
-                // Pass --env KEY (without value) so Podman inherits values from ProcessStartInfo.Environment without CLI exposure.
-                envList.Add(new KeyValuePair<string, string>(kv.Key, string.Empty));
-            }
-        }
-
         string image = QualifyLocalImage(context.Image);
         bool hasUserAgentIdentity = !string.IsNullOrWhiteSpace(context.UserId)
             && HasAgentIdentity(context)
@@ -913,7 +903,7 @@ public sealed class PodmanContainerTool(
             CpuLimit = context.DefaultCpuLimit,
             MemoryLimit = !string.IsNullOrWhiteSpace(context.DefaultMemoryLimit) ? context.DefaultMemoryLimit : null,
             PidsLimit = 256,
-            Environment = envList,
+            Environment = [],
             AddHosts = [$"kautuka-pkgs-proxy:{Kautuka.NetworkAccessController.NetworkAddressClassifier.PackageProxyServiceAddress}"],
         };
 

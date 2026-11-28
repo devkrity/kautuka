@@ -379,6 +379,8 @@ internal sealed class GatewayAgentUpsertRequest
     public GatewayAgentToolExposurePayload? ToolExposure { get; init; }
 
     public GatewayAgentRuntimePayload? Runtime { get; init; }
+    public string[]? AcknowledgedNotices { get; init; }
+
 }
 
 internal sealed class GatewayUserRoleUpdateRequest
@@ -698,7 +700,7 @@ internal sealed record GatewaySandboxSettingsPayload(
     string? Image,
     int DefaultCpus,
     string? DefaultMemory,
-    int DefaultTimeout);
+    int DefaultTimeout, IReadOnlyDictionary<string, string>? ContainerEnvironment = null);
 
 internal sealed record GatewayDocumentIngestionSettingsPayload(
     bool Enabled,
@@ -881,7 +883,7 @@ internal sealed record GatewayConnectorListItem(
     RemoteMcpHeader[]? HttpHeaders = null,
     bool RequiresCredentialReentry = false,
     bool? DefaultEnabled = null,
-    bool UsesCredentials = false);
+    bool UsesCredentials = false, string[]? Notices = null);
 
 internal sealed record GatewayConnectorsResponse(GatewayConnectorListItem[] Connectors);
 

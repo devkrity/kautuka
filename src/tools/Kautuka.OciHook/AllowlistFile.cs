@@ -7,7 +7,7 @@ namespace Kautuka.OciHook;
 /// <summary>Reads the allowlist using one verified Linux file descriptor.</summary>
 internal static partial class AllowlistFile
 {
-    private const int ReadOnlyNoFollowCloseOnExec = 0x20000 | 0x80000 | 0x800; // O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK
+    private static readonly int ReadOnlyNoFollowCloseOnExec = (RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? 0x8000 : 0x20000) | 0x80000 | 0x800; // O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK
     private const int AtEmptyPath = 0x1000;
     private const uint BasicStats = 0x7ff;
     private const int NotFound = 2;

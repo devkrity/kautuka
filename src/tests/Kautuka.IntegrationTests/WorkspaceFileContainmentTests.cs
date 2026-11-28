@@ -159,7 +159,7 @@ public sealed class WorkspaceFileContainmentTests
 
     private sealed class FileFixture : IDisposable
     {
-        private readonly string root = Path.Combine(Path.GetTempPath(), "kautuka-file-containment-" + Guid.NewGuid().ToString("N"));
+        private readonly string root = Path.Combine(OperatingSystem.IsMacOS() ? "/private/tmp" : Path.GetTempPath(), "kautuka-file-containment-" + Guid.NewGuid().ToString("N"));
 
         public FileFixture()
         {

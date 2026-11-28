@@ -11,6 +11,7 @@
   <ItemGroup>
     <Compile Include="../../tools/Kautuka.OciHook/HookPolicy.cs" Link="HookPolicy.cs" />
     <Compile Include="../../tools/Kautuka.OciHook/HookInput.cs" Link="HookInput.cs" />
+    <Compile Include="../../tools/Kautuka.OciHook/HookAuditLog.cs" Link="HookAuditLog.cs" />
     <Compile Include="../../tools/Kautuka.OciHook/AllowlistFile.cs" Link="AllowlistFile.cs" />
     <Compile Include="../../tools/Kautuka.OciHook/HookProcess.cs" Link="HookProcess.cs" />
     <Compile Include="../../tools/Kautuka.OciHook/ProcessIdentity.cs" Link="ProcessIdentity.cs" />
