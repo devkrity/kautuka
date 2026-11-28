@@ -1,3 +1,4 @@
+using Kautuka.Gateway.Domain.Connectors;
 using Kautuka.Gateway.Domain.Memory;
 using Kautuka.Gateway.Domain.Sandbox;
 
@@ -13,7 +14,7 @@ internal static partial class GatewayStateFactory
         IGatewayMemoryStore memoryStore,
         IAgentDefinitionStore agentDefinitionStore,
         IConfiguration configuration,
-        IWorkspaceRuntimeTool workspaceTool)
+        IWorkspaceRuntimeTool workspaceTool, ConnectorAuthCatalog? authCatalog = null)
     {
         if (!database.IsInitialized())
         {
@@ -33,7 +34,7 @@ internal static partial class GatewayStateFactory
             new SqliteAgentRuntimeRunRepository(agentStoreDatabase),
             new SqliteAgentMemoryFactRepository(agentStoreDatabase),
             memoryStore);
-        GatewayState.HydrateFromDatabase(connection, state, workspaceTool, configuration, agentDefinitionStore);
+        GatewayState.HydrateFromDatabase(connection, state, workspaceTool, configuration, agentDefinitionStore, authCatalog);
         state.PersistRawSettingsAuthoritatively(new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["topology_hash"] = state.TopologyHash ?? string.Empty,

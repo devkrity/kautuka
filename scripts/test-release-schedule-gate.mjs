@@ -95,6 +95,7 @@ const publish = jobs.get('publish-assets');
 if (!publish?.includes('always()')
   || !publish.includes("needs.resolve-channel.result == 'success'")
   || !publish.includes("needs.build-platform-assets.result == 'success'")
+  || !publish.includes("needs.build-installer-assets.result == 'success'")
   || !publish.includes("needs.prepare-stable-draft.result == 'success'")) {
   throw new Error('Publication must run after an optional approval is skipped while requiring all publication dependencies to succeed.');
 }

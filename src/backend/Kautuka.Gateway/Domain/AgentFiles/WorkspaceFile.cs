@@ -15,10 +15,10 @@ internal static partial class WorkspaceFile
     private const uint fileFlagOpenReparsePoint = 0x00200000;
     private const int oRdonly = 0;
     private const int oWronly = 1;
-    private const int oCreat = 0x40;
-    private const int oExcl = 0x80;
-    private const int oNofollow = 0x20000;
-    private const int oCloexec = 0x80000;
+    private static readonly int oCreat = OperatingSystem.IsMacOS() ? 0x200 : 0x40;
+    private static readonly int oExcl = OperatingSystem.IsMacOS() ? 0x800 : 0x80;
+    private static readonly int oNofollow = OperatingSystem.IsMacOS() ? 0x100 : RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? 0x8000 : 0x20000;
+    private static readonly int oCloexec = OperatingSystem.IsMacOS() ? 0x1000000 : 0x80000;
     private const int atEmptyPath = 0x1000;
     private const uint statxNlink = 0x4;
 
@@ -69,26 +69,17 @@ internal static partial class WorkspaceFile
             return OpenWindowsNoLinks(path, write, mode, out truncateAfterValidation);
         }
 
-        if (!OperatingSystem.IsLinux())
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
         {
             throw new IOException("Secure workspace file access is unsupported on this platform.");
         }
 
         int flags = (write ? oWronly : oRdonly) | oNofollow | oCloexec;
-        if (mode == FileMode.CreateNew)
-        {
-            flags |= oCreat | oExcl;
-        }
+        if (mode is FileMode.CreateNew or FileMode.Create) flags |= oCreat;
+        if (mode == FileMode.CreateNew) flags |= oExcl;
 
-        int descriptor = OpenLinuxNoLinks(path, flags);
-        if (descriptor < 0 && mode == FileMode.Create && Marshal.GetLastPInvokeError() == 2)
-        {
-            descriptor = OpenLinuxNoLinks(path, flags | oCreat | oExcl);
-        }
-        else if (descriptor >= 0 && mode == FileMode.Create)
-        {
-            truncateAfterValidation = true;
-        }
+        int descriptor = OpenUnixNoLinks(path, flags);
+        truncateAfterValidation = descriptor >= 0 && mode == FileMode.Create;
 
         if (descriptor < 0)
         {
@@ -288,6 +279,11 @@ internal static partial class WorkspaceFile
                 || information.NumberOfLinks != 1;
         }
 
+        if (OperatingSystem.IsMacOS())
+        {
+            int result = ReadMacStat(handle, out DarwinStat stat);
+            return result != 0 || stat.NumLinks != 1 || (stat.Mode & 0xf000) != 0x8000;
+        }
         return !TryGetLinuxLinkCount(handle, out uint links) || links != 1;
     }
 

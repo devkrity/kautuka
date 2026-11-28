@@ -280,6 +280,9 @@ internal sealed partial class McpAgentToolProvider
                 $"Connector execution denied by policy ({executionDecision.ReasonCode}): {executionDecision.Message}");
         }
 
+        if (binding.ExecutionContext == WorkspaceMcpExecutionContext.AgentSandbox && serverDef.RequiresIsolation(connectorOAuth?.Catalog))
+            throw new InvalidOperationException(serverDef.IsolationMessage);
+
         Dictionary<string, string> env = await ResolveEnvAsync(serverDef, context.UserId ?? string.Empty, cancellationToken)
             .ConfigureAwait(false);
         ValidateRequiredEnv(serverDef, env);
@@ -297,7 +300,6 @@ internal sealed partial class McpAgentToolProvider
             TimeoutSeconds = serverDef.ReadinessTimeoutSeconds ?? 30,
             AllowInternalSystemConnector = allowInternalSystemConnector,
             ExecutionContext = binding.ExecutionContext,
-            HostArtifactDirectory = ResolveHostArtifactDirectory(context) ?? string.Empty,
             ExpectedImageDigest = expectedImageDigest,
             ExpectedSourceDigest = serverDef.LocalArtifactDigest ?? string.Empty,
             VerifyExecutionCommand = true,

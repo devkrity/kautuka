@@ -1,3 +1,5 @@
+import { Alert } from '@/components/ui/alert';
+import { Textarea } from '@/components/ui/textarea';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -10,6 +12,7 @@ export const WorkspaceAndSandboxSection: React.FC<{
   sandboxCpus: string;
   sandboxMemory: string;
   sandboxTimeout: string;
+  sandboxEnvironment?: string;
   hideDocumentIngestion?: boolean;
   documentIngestionEnabled: boolean;
   internalParserConnectorId: string;
@@ -22,6 +25,7 @@ export const WorkspaceAndSandboxSection: React.FC<{
   onSandboxCpusChange(value: string): void;
   onSandboxMemoryChange(value: string): void;
   onSandboxTimeoutChange(value: string): void;
+  onSandboxEnvironmentChange?(value: string): void;
   onDocumentIngestionEnabledChange(value: boolean): void;
   onInternalParserConnectorIdChange(value: string): void;
   onInternalParserToolNameChange(value: string): void;
@@ -35,6 +39,7 @@ export const WorkspaceAndSandboxSection: React.FC<{
   sandboxCpus,
   sandboxMemory,
   sandboxTimeout,
+  sandboxEnvironment,
   hideDocumentIngestion = false,
   documentIngestionEnabled,
   internalParserConnectorId,
@@ -47,6 +52,7 @@ export const WorkspaceAndSandboxSection: React.FC<{
   onSandboxCpusChange,
   onSandboxMemoryChange,
   onSandboxTimeoutChange,
+  onSandboxEnvironmentChange,
   onDocumentIngestionEnabledChange,
   onInternalParserConnectorIdChange,
   onInternalParserToolNameChange,
@@ -110,6 +116,17 @@ export const WorkspaceAndSandboxSection: React.FC<{
         </div>
       </div>
 
+      <div className="space-y-2">
+        {kautukaSettings?.sandbox.notices?.map((notice) => <Alert key={notice} variant="info">{notice}</Alert>)}
+        <Label htmlFor="sandbox-environment">Sandbox environment settings</Label>
+        <Textarea id="sandbox-environment" value={sandboxEnvironment ?? ''}
+          onChange={(event) => onSandboxEnvironmentChange?.(event.target.value)}
+          aria-describedby="sandbox-environment-help" />
+        <p id="sandbox-environment-help" className="text-xs text-muted-foreground">
+          Use NAME=value, with one setting per line. These apply inside the sandbox.
+          Kautuka will explain any setting it cannot accept when you save.
+        </p>
+      </div>
       <div className="grid grid-cols-1 gap-3 text-sm text-muted-foreground md:grid-cols-2">
         <div>
           <p className="font-medium text-foreground">Effective Workspace Root</p>

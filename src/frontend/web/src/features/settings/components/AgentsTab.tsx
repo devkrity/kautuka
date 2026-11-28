@@ -1,6 +1,7 @@
 import { AddEntityTile } from '@/components/layout/AddEntityTile';
 import { PageState } from '@/components/layout/PageState';
 import { StatusPanels } from '@/components/layout/StatusPanels';
+import { AgentUpgradeNotices } from './AgentUpgradeNotices';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -176,6 +177,7 @@ export function AgentsTab({
                 </div>
               </CardHeader>
               <CardContent className="space-y-1 pt-0 text-sm text-muted-foreground">
+                <AgentUpgradeNotices agent={agent} className="mb-2" />
                 <div className="mb-2 flex flex-wrap gap-2">
                   <Badge variant="muted">Model {agent.modelId}</Badge>
                   <Badge variant="muted">Retain {agent.session.maxHistoryRuns} sessions</Badge>
@@ -238,6 +240,7 @@ export function AgentsTab({
           </DialogHeader>
           {editingAgent ? (
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
+              <AgentUpgradeNotices agent={editingAgent} className="mb-3" />
               <AgentForm
                 agent={editingAgent}
                 agents={agents}

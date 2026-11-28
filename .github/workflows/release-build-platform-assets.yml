@@ -38,9 +38,14 @@ on:
         required: false
         type: string
         default: ''
+      target:
+        description: Asset group to build (all, platform, or installers).
+        required: false
+        type: string
+        default: all
     secrets:
       release_manifest_private_key:
-        required: true
+        required: false
 env:
   # SHA-256 of the canonical preview/common ECDSA public key in DER SubjectPublicKeyInfo form.
   KAUTUKA_RELEASE_SIGNING_KEY_SHA256: 3271c8e7e8f8ec5382b27a52a6da2877abaedd7d55bec8387eb847d629ad1e20 # gitleaks:allow -- public-key fingerprint
@@ -48,6 +53,7 @@ env:
 jobs:
   build-linux-release-assets:
     name: Build Linux Release Assets
+    if: ${{ inputs.target == 'all' || inputs.target == 'platform' }}
     runs-on: ubuntu-latest
     env:
       APPLIANCE_RUNTIME_BASE: quay.io/fedora/fedora-minimal@sha256:f04e34eae3415e94623793dea3ace05885a33b4e062d976dc3b293ebb14c289f
@@ -157,21 +163,6 @@ jobs:
           path: .cache/release-build/wsl-rootfs/*.tar.gz
           key: kautuka-wsl-rootfs-${{ hashFiles('scripts/build-wsl-rootfs.sh', 'src/images/wsl-rootfs/rootfs.json') }}
 
-      - name: Write manifest signing key
-        env:
-          RELEASE_MANIFEST_PRIVATE_KEY: ${{ secrets.release_manifest_private_key }}
-        run: |
-          private_key_path="$RUNNER_TEMP/manifest-signing-key.pem"
-          public_key_path="$RUNNER_TEMP/manifest-signing-public.pem"
-          printf '%s\n' "$RELEASE_MANIFEST_PRIVATE_KEY" > "$private_key_path"
-          chmod 600 "$private_key_path"
-          openssl pkey -in "$private_key_path" -pubout -out "$public_key_path"
-          actual="$(openssl pkey -pubin -in "$public_key_path" -outform DER | openssl dgst -sha256 -r | awk '{print $1}')"
-          [[ "$actual" == "$KAUTUKA_RELEASE_SIGNING_KEY_SHA256" ]] || { echo 'error: release signing key does not match the common trusted key.' >&2; exit 1; }
-          chmod 644 "$public_key_path"
-          printf 'RELEASE_MANIFEST_PRIVATE_KEY_PATH=%s\n' "$private_key_path" >> "$GITHUB_ENV"
-          printf 'RELEASE_MANIFEST_PUBLIC_KEY_PATH=%s\n' "$public_key_path" >> "$GITHUB_ENV"
-
       - name: Install OCI archive tooling
         run: sudo apt-get update && sudo apt-get install -y podman skopeo
 
@@ -182,6 +173,22 @@ jobs:
           trap 'rm -f -- "$archive"' EXIT
           podman push --format oci "$APPLIANCE_RUNTIME_BASE" "oci-archive:$archive:localhost/appliance-export-smoke:test"
           skopeo inspect --raw "oci-archive:$archive" >/dev/null
+
+      - name: Write manifest signing key
+        env:
+          RELEASE_MANIFEST_PRIVATE_KEY: ${{ secrets.release_manifest_private_key }}
+        run: |
+          private_key_path="$RUNNER_TEMP/manifest-signing-key.pem"
+          public_key_path="$RUNNER_TEMP/manifest-signing-public.pem"
+          umask 077
+          printf '%s\n' "$RELEASE_MANIFEST_PRIVATE_KEY" > "$private_key_path"
+          chmod 600 "$private_key_path"
+          openssl pkey -in "$private_key_path" -pubout -out "$public_key_path"
+          actual="$(openssl pkey -pubin -in "$public_key_path" -outform DER | openssl dgst -sha256 -r | awk '{print $1}')"
+          [[ "$actual" == "$KAUTUKA_RELEASE_SIGNING_KEY_SHA256" ]] || { echo 'error: release signing key does not match the common trusted key.' >&2; exit 1; }
+          chmod 644 "$public_key_path"
+          printf 'RELEASE_MANIFEST_PRIVATE_KEY_PATH=%s\n' "$private_key_path" >> "$GITHUB_ENV"
+          printf 'RELEASE_MANIFEST_PUBLIC_KEY_PATH=%s\n' "$public_key_path" >> "$GITHUB_ENV"
 
       - name: Build Linux platform, WSL rootfs, and descriptor assets
         env:
@@ -212,6 +219,14 @@ jobs:
             --appliance-image-prefix "ghcr.io/${GITHUB_REPOSITORY,,}/appliance" \
             --appliance-runtime-base "$APPLIANCE_RUNTIME_BASE"
 
+      - name: Remove manifest signing key
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/manifest-signing-key.pem"
+
+      - name: Record release artifacts
+        env:
+          MANIFEST_VERSION: ${{ inputs.manifest_version }}
+        run: |
           # build-release-assets.sh keys its output directory on the manifest version.
           release_dir="publish/release-assets/$MANIFEST_VERSION"
           if [[ ! -d "$release_dir" ]]; then
@@ -289,9 +304,9 @@ jobs:
 
   build-windows-installer-assets:
     name: Build Windows Installer Assets
+    if: ${{ inputs.target == 'all' || inputs.target == 'installers' }}
     runs-on: windows-latest
-    environment:
-      name: ${{ inputs.channel }}
+    environment: windows-signing
     permissions:
       contents: read
     steps:
@@ -328,17 +343,12 @@ jobs:
             src/Directory.Packages.props
             src/Directory.Build.props
 
-      - name: Write manifest signing public key
-        env:
-          RELEASE_MANIFEST_PRIVATE_KEY: ${{ secrets.release_manifest_private_key }}
+      - name: Verify installer manifest public key
         shell: bash
         run: |
-          printf '%s\n' "$RELEASE_MANIFEST_PRIVATE_KEY" > manifest-signing-key.pem
-          chmod 600 manifest-signing-key.pem
-          openssl pkey -in manifest-signing-key.pem -pubout -out manifest-signing-public.pem
+          set -euo pipefail
           actual="$(openssl pkey -pubin -in manifest-signing-public.pem -outform DER | openssl dgst -sha256 -r | awk '{print $1}')"
-          [[ "$actual" == "$KAUTUKA_RELEASE_SIGNING_KEY_SHA256" ]] || { echo 'error: release signing key does not match the common trusted key.' >&2; exit 1; }
-          chmod 644 manifest-signing-public.pem
+          [[ "$actual" == "$KAUTUKA_RELEASE_SIGNING_KEY_SHA256" ]] || { echo 'error: installer manifest key fingerprint mismatch.' >&2; exit 1; }
 
       - name: Publish Windows appliance installer
         shell: bash
@@ -408,6 +418,7 @@ jobs:
       - name: Sign Windows appliance installer
         shell: pwsh
         env:
+          RELEASE_CHANNEL: ${{ inputs.channel }}
           WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
           WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
           WINDOWS_SIGNING_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGNING_TIMESTAMP_URL }}
@@ -417,6 +428,11 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_BASE64) -or
               [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PASSWORD)) {
             Write-Host 'Skipping Authenticode signing because Windows signing secrets are not configured.'
+            if ($env:RELEASE_CHANNEL -eq 'stable') {
+              Write-Warning 'The stable Windows installer is unsigned. Configure Authenticode credentials in windows-signing.'
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '## Unsigned stable Windows installer'
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value 'Windows could not verify the publisher for this release. Configure the Authenticode certificate and password in the windows-signing environment before publishing a signed installer.'
+            }
             Set-Content -LiteralPath $signingStatusPath -Value @'
           UNSIGNED
 
@@ -485,9 +501,8 @@ jobs:
 
   build-linux-installer-assets:
     name: Build Linux Installer Assets
+    if: ${{ inputs.target == 'all' || inputs.target == 'installers' }}
     runs-on: ubuntu-latest
-    environment:
-      name: ${{ inputs.channel }}
     permissions:
       contents: read
       id-token: write
@@ -518,16 +533,12 @@ jobs:
 
           echo "artifact_scope=$artifact_scope" >> "$GITHUB_OUTPUT"
 
-      - name: Write manifest signing key
-        env:
-          RELEASE_MANIFEST_PRIVATE_KEY: ${{ secrets.release_manifest_private_key }}
+      - name: Verify installer manifest public key
+        shell: bash
         run: |
-          printf '%s\n' "$RELEASE_MANIFEST_PRIVATE_KEY" > manifest-signing-key.pem
-          chmod 600 manifest-signing-key.pem
-          openssl pkey -in manifest-signing-key.pem -pubout -out manifest-signing-public.pem
+          set -euo pipefail
           actual="$(openssl pkey -pubin -in manifest-signing-public.pem -outform DER | openssl dgst -sha256 -r | awk '{print $1}')"
-          [[ "$actual" == "$KAUTUKA_RELEASE_SIGNING_KEY_SHA256" ]] || { echo 'error: release signing key does not match the common trusted key.' >&2; exit 1; }
-          chmod 644 manifest-signing-public.pem
+          [[ "$actual" == "$KAUTUKA_RELEASE_SIGNING_KEY_SHA256" ]] || { echo 'error: installer manifest key fingerprint mismatch.' >&2; exit 1; }
 
       - name: Create Linux installer release asset
         env:

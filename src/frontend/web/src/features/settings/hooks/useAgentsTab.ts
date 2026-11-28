@@ -156,6 +156,7 @@ export function useAgentsTab() {
         scope: agent.scope === 'system' ? 'system' : 'user',
         enabled: Boolean(agent.enabled ?? true),
         ownerUserId: agent.ownerUserId ?? '',
+        notices: Array.isArray(agent.notices) ? agent.notices : [],
         mcpBindings: normalizeAgentBindings((agent as AgentSettingsEntry).mcpBindings),
         session: {
           historyEnabled: Boolean(agent.session?.historyEnabled ?? true),
@@ -361,6 +362,7 @@ export function useAgentsTab() {
         systemPrompt: agent.systemPrompt,
         superExecMode: agent.superExecMode,
         mcpBindings: agent.mcpBindings ?? [],
+        acknowledgedNotices: agent.acknowledgedNotices ?? [],
         skillAttachments: agent.skillAttachments ?? [],
         approvalConfig,
         persona: normalizePersonaProfile(agent.persona, personaDefinitions),

@@ -200,7 +200,8 @@ internal static partial class GatewayRuntimeEndpointMappings
             HttpContext context,
             IManagerGrpcService workspaceGrpcService,
             IChannelHostGrpcService channelHostGrpcService,
-            CancellationToken cancellationToken) =>
+            CancellationToken cancellationToken,
+            IGatewayCatalogStore? catalogStore = null) =>
         {
             ServiceHealthResponse runtime = new(
                 Status: "healthy",
@@ -229,7 +230,7 @@ internal static partial class GatewayRuntimeEndpointMappings
             // The route stays open for status words. Drift notes name containers, so only an
             // administrator receives them.
             IReadOnlyList<string>? driftActions = context.User.IsInRole("admin")
-                ? managerStatus.DriftActions
+                ? [.. (catalogStore?.StartupDriftNotes ?? []), .. managerStatus.DriftActions]
                 : null;
 
             return Results.Json(

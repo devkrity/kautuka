@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -1190,20 +1191,16 @@ internal sealed partial class SqliteAgentDefinitionStore : IAtomicAgentDefinitio
 
     private static IReadOnlyList<string> GetDefaultSqliteVecPaths()
     {
-        if (OperatingSystem.IsWindows())
+        string platform = OperatingSystem.IsWindows() ? "win" : OperatingSystem.IsLinux() ? "linux" : OperatingSystem.IsMacOS() ? "osx"
+            : throw new PlatformNotSupportedException("The SQLite vector extension is unavailable on this platform.");
+        string architecture = RuntimeInformation.ProcessArchitecture switch
         {
-            return
-            [
-                Path.Combine(AppContext.BaseDirectory, "sqlite-vec", "win-x64", "vec0.dll"),
-                Path.Combine(AppContext.BaseDirectory, "sqlite-vec", "linux-x64", "vec0.so")
-            ];
-        }
-
-        return
-        [
-            Path.Combine(AppContext.BaseDirectory, "sqlite-vec", "linux-x64", "vec0.so"),
-            Path.Combine(AppContext.BaseDirectory, "sqlite-vec", "win-x64", "vec0.dll")
-        ];
+            Architecture.X64 => "x64",
+            Architecture.Arm64 => "arm64",
+            _ => throw new PlatformNotSupportedException("The SQLite vector extension is unavailable on this architecture."),
+        };
+        string fileName = OperatingSystem.IsWindows() ? "vec0.dll" : OperatingSystem.IsMacOS() ? "vec0.dylib" : "vec0.so";
+        return [Path.Combine(AppContext.BaseDirectory, "sqlite-vec", $"{platform}-{architecture}", fileName)];
     }
 
     private static void ExecuteNonQuery(SqliteConnection connection, SqliteTransaction transaction, string sql)

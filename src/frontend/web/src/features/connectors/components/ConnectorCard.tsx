@@ -161,6 +161,9 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
                 : 'This remote connector needs its key entered again. Ask the connector owner or an administrator to update it.'}
             </p>
           ) : null}
+          {canManage && connector.notices?.map((notice) => (
+            <p key={notice} role="status" className="mt-1 text-sm text-muted-foreground">{notice}</p>
+          ))}
           {commandSummary ? (
             <p
               className="mt-1 truncate font-mono text-[10px] text-muted-foreground/70"

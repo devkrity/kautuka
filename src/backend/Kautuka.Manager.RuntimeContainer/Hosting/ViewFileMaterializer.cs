@@ -7,7 +7,7 @@ namespace Kautuka.Manager.RuntimeContainer.Hosting;
 /// </summary>
 public static class ViewFileMaterializer
 {
-    public static string Materialize(string resultJson, string? hostDirectory)
+    public static string Materialize(string resultJson, string? hostDirectory, ViewFileOptions? options = null)
     {
         if (string.IsNullOrWhiteSpace(resultJson))
         {
@@ -32,6 +32,8 @@ public static class ViewFileMaterializer
         }
 
         JsonArray? blocks = structured["view"]?["blocks"] as JsonArray;
+        options ??= new ViewFileOptions();
+        int fileCount = 0;
         foreach (JsonNode? node in files)
         {
             if (node is not JsonObject file)
@@ -44,39 +46,44 @@ public static class ViewFileMaterializer
             string? base64 = file["base64"]?.GetValue<string>();
             file.Remove("base64");
             JsonObject? block = FindBlock(blocks, fileId);
-            if (string.IsNullOrWhiteSpace(base64) || string.IsNullOrWhiteSpace(hostDirectory))
+            if (++fileCount > options.MaxFilesPerResult || string.IsNullOrWhiteSpace(base64) || string.IsNullOrWhiteSpace(hostDirectory))
             {
                 if (block is not null)
                 {
+                    block.Remove("path");
                     block["unavailable"] = true;
-                }
-
-                continue;
-            }
-
-            byte[] bytes;
-            try
-            {
-                bytes = Convert.FromBase64String(base64);
-            }
-            catch (FormatException)
-            {
-                if (block is not null)
-                {
-                    block["unavailable"] = true;
+                    block["unavailableReason"] = "This file could not be saved safely. Check the workspace and file limits, then try again.";
                 }
 
                 continue;
             }
 
             string folder = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(fileId)))[..12];
-            string relative = Path.Combine("view-files", folder, name);
-            string fullPath = Path.Combine(hostDirectory, relative);
-            Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
-            File.WriteAllBytes(fullPath, bytes);
-            if (block is not null)
+            try
             {
-                block["path"] = relative.Replace('\\', '/');
+                long encodedLength = base64.Count(static ch => ch is not (' ' or '\t' or '\n' or '\r'));
+                if (options.MaxFileBytes < 0 || encodedLength > ((long)options.MaxFileBytes + 2) / 3 * 4)
+                    throw new InvalidDataException("View file exceeds the configured size limit.");
+                byte[] bytes = Convert.FromBase64String(base64);
+                if (bytes.Length > options.MaxFileBytes || name.Contains('\0', StringComparison.Ordinal))
+                    throw new InvalidDataException("Invalid view file size or name.");
+                if (OperatingSystem.IsWindows())
+                    WindowsViewFiles.Write(hostDirectory, folder, name, bytes);
+                else if (DescriptorFiles.IsSupportedPlatform())
+                    DescriptorFiles.WriteViewFile(hostDirectory, folder, name, bytes);
+                else
+                    throw new IOException("Secure file saving is unavailable on this device.");
+                if (block is not null)
+                    block["path"] = $"view-files/{folder}/{name}";
+            }
+            catch (Exception ex) when (ex is FormatException or IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException)
+            {
+                if (block is not null)
+                {
+                    block.Remove("path");
+                    block["unavailable"] = true;
+                    block["unavailableReason"] = "This file could not be saved safely. Check the workspace and file limits, then try again.";
+                }
             }
         }
 
@@ -109,4 +116,10 @@ public static class ViewFileMaterializer
         string leaf = Path.GetFileName(name.Replace('\\', '/'));
         return string.IsNullOrWhiteSpace(leaf) || leaf is "." or ".." ? "file" : leaf;
     }
+}
+
+public sealed class ViewFileOptions
+{
+    public long MaxFileBytes { get; set; } = 25L * 1024 * 1024;
+    public int MaxFilesPerResult { get; set; } = 20;
 }

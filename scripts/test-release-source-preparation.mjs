@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
+import { createHash, createPublicKey, verify } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, readdir, rm, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -194,8 +195,26 @@ try {
     'Windows release publishing must emit a runnable native executable app host');
   assert.match(complianceGenerator, /validateReleaseRuntimeImages\(runtime\.images, catalog\.components, args\['base-image'\]\)/u,
     'release compliance must validate the sidecars and the separately pinned base image');
-  assert.match(workflow, /workflow_call:[\s\S]*?secrets:[\s\S]*?release_manifest_private_key:\s*\n\s+required:\s*true/u,
-    'the reusable platform workflow must require the manifest signing key');
+  const publicKey = createPublicKey(await readFile(path.join(root, 'manifest-signing-public.pem')));
+  const fingerprint = createHash('sha256').update(publicKey.export({ format: 'der', type: 'spki' })).digest('hex');
+  assert.ok(workflow.includes('KAUTUKA_RELEASE_SIGNING_KEY_SHA256: ' + fingerprint));
+  const baseline = path.join(root, 'src/tests/Fixtures/releases/v0.1.27');
+  assert.ok(verify('sha256', await readFile(path.join(baseline, 'kautuka-platform-release.json')), publicKey,
+    Buffer.from(await readFile(path.join(baseline, 'kautuka-platform-release.sig'), 'utf8'), 'base64')),
+    'the committed installer key must authenticate the published v0.1.27 manifest');
+  for (const job of [windowsBuildJob, workflow.slice(linuxInstallerStart)]) {
+    assert.doesNotMatch(job, /manifest_private_key|manifest-signing-key\.pem|environment:\s*(?:name:\s*)?\$\{\{ inputs.channel/iu);
+    assert.match(job, /openssl pkey -pubin -in manifest-signing-public\.pem -outform DER/u);
+    assert.match(job, /\[\[ "\$actual" == "\$KAUTUKA_RELEASE_SIGNING_KEY_SHA256" \]\] \|\|.*exit 1/u);
+  }
+  assert.match(windowsBuildJob, /-p:InstallerManifestPublicKeyPath="\$\(pwd\)\/manifest-signing-public\.pem"/u);
+  assert.match(workflow.slice(linuxInstallerStart), /--manifest-public-key manifest-signing-public\.pem/u);
+  assert.match(workflow.split('jobs:')[0], /release_manifest_private_key:\s*\r?\n\s+required:\s*false/u,
+    'the reusable workflow must make release_manifest_private_key optional so installer calls omit it');
+  assert.match(linuxBuildJob, /if:\s*\$\{\{\s*inputs\.target == 'all' \|\| inputs\.target == 'platform'\s*\}\}/u);
+  assert.match(windowsBuildJob, /if:\s*\$\{\{\s*inputs\.target == 'all' \|\| inputs\.target == 'installers'\s*\}\}/u);
+  assert.match(workflow.slice(linuxInstallerStart), /if:\s*\$\{\{\s*inputs\.target == 'all' \|\| inputs\.target == 'installers'\s*\}\}/u);
+  assert.match(linuxBuildJob, /--appliance-runtime-base "\$APPLIANCE_RUNTIME_BASE"\s+- name: Remove manifest signing key\s+if: always\(\)\s+run: rm -f -- "\$RUNNER_TEMP\/manifest-signing-key\.pem"/u);
 
   const pnpmCacheJobs = [
     ['PR Narad validation', qualityWorkflow, '  quality-narad:\n', '  quality-frontend:\n'],
@@ -222,8 +241,14 @@ try {
       `${label} must restore the pnpm store before installing dependencies`);
   }
 
-  assert.match(releasePipeline, /build-platform-assets:[\s\S]*?secrets:\s*\n\s+release_manifest_private_key:\s*\$\{\{\s*secrets\.RELEASE_MANIFEST_PRIVATE_KEY\s*\}\}/u,
-    'the caller must pass its Preview or Stable environment signing key into the reusable platform workflow');
+  const platformCaller = releasePipeline.match(/^  build-platform-assets:\r?\n([\s\S]*?)(?=^  build-installer-assets:)/mu)?.[1];
+  const installerCaller = releasePipeline.match(/^  build-installer-assets:\r?\n([\s\S]*?)(?=^  publish-assets:)/mu)?.[1];
+  assert.ok(platformCaller && installerCaller, 'release pipeline must separate platform signing and installer caller jobs');
+  assert.match(platformCaller, /target:\s*platform[\s\S]*?secrets:\s*\r?\n\s+release_manifest_private_key:\s*\$\{\{\s*secrets\.RELEASE_MANIFEST_PRIVATE_KEY\s*\}\}/u);
+  assert.match(installerCaller, /target:\s*installers/u);
+  assert.doesNotMatch(installerCaller, /secrets:/iu,
+    'the installer caller job must not pass release_manifest_private_key or any secrets');
+  assert.match(linuxBuildJob, /secrets\.release_manifest_private_key/u);
   assert.match(linuxBuildJob, /\$RUNNER_TEMP\/manifest-signing-key\.pem/u,
     'the Linux build job must keep its private signing key outside the checked-out workspace');
   assert.match(linuxBuildJob, /RELEASE_MANIFEST_PRIVATE_KEY_PATH=%s\\n.*\$GITHUB_ENV/u,

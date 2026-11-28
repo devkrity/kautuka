@@ -27,8 +27,23 @@ internal sealed partial class SkillPackageService : ISkillPackageService
     private readonly string temporaryRoot;
 
     public SkillPackageService(KautukaDatabase database)
-        : this(database, Path.GetTempPath())
+        : this(database, GetServiceTemporaryRoot())
     {
+    }
+
+    private static string GetServiceTemporaryRoot()
+    {
+        string temporaryPath = Path.GetTempPath();
+        if (!OperatingSystem.IsMacOS()) return temporaryPath;
+        // macOS's service temporary root may use /var, an OS-owned alias of /private/var.
+        // Resolve only this service-owned root; workspace paths still refuse every link.
+        string resolved = "/";
+        foreach (string part in temporaryPath.Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var directory = new DirectoryInfo(Path.Combine(resolved, part));
+            resolved = directory.ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? directory.FullName;
+        }
+        return resolved;
     }
 
     internal SkillPackageService(KautukaDatabase database, string temporaryRoot)

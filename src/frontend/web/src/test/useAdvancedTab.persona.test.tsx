@@ -14,6 +14,7 @@ vi.mock('@/features/settings', () => ({
   },
 }));
 
+import type { AdvancedSettingsEntry } from '@/features/settings/types/settingsTypes';
 import { useAdvancedTab } from '@/features/settings/hooks/useAdvancedTab';
 
 describe('useAdvancedTab persona definitions behavior', () => {
@@ -208,4 +209,38 @@ describe('useAdvancedTab persona definitions behavior', () => {
     );
     expect(result.current.dirtyTabs['provider-catalog']).toBe(false);
   });
+  it('leaves legacy sandbox entries visible and omits them from unrelated saves until edited', async () => {
+    const response = await getAdvancedSettingsMock() as { data: AdvancedSettingsEntry };
+    const legacy = { HTTP_PROXY: 'http://legacy.invalid', 'BAD-NAME': 'old', BROKEN: 'one\nline' };
+    response.data.kautuka.sandbox.containerEnvironment = legacy;
+    response.data.kautuka.sandbox.notices = ['Remove HTTP_PROXY from Sandbox environment settings.'];
+    getAdvancedSettingsMock.mockResolvedValue(response);
+    saveAdvancedSettingsMock.mockImplementation(async (body: AdvancedSettingsEntry) => ({
+      data: {
+        ...body,
+        kautuka: { ...body.kautuka, sandbox: {
+          ...body.kautuka.sandbox,
+          containerEnvironment: body.kautuka.sandbox.containerEnvironment ?? legacy,
+          notices: body.kautuka.sandbox.containerEnvironment ? [] : response.data.kautuka.sandbox.notices,
+        } },
+      },
+    }));
+    const { result } = renderHook(() => useAdvancedTab());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.setLocale('en-GB'));
+    await act(async () => { await result.current.save(); });
+    expect(saveAdvancedSettingsMock).toHaveBeenCalledTimes(1);
+    const submitted = saveAdvancedSettingsMock.mock.calls[0]?.[0] as AdvancedSettingsEntry;
+    expect(submitted.kautuka.sandbox).not.toHaveProperty('containerEnvironment');
+    expect(result.current.sandboxEnvironment).toContain('BAD-NAME=old');
+    expect(result.current.sandboxEnvironment).toContain('BROKEN=one\nline');
+    expect(result.current.kautukaSettings?.sandbox.notices).toHaveLength(1);
+
+    act(() => result.current.setSandboxEnvironment('PYTHONPATH=/custom/python'));
+    await act(async () => { await result.current.save(); });
+    const edited = saveAdvancedSettingsMock.mock.calls[1]?.[0] as AdvancedSettingsEntry;
+    expect(edited.kautuka.sandbox.containerEnvironment).toEqual({ PYTHONPATH: '/custom/python' });
+    expect(result.current.kautukaSettings?.sandbox.notices).toEqual([]);
+  });
+
 });

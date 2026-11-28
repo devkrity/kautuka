@@ -11,6 +11,26 @@ upgrade path.
 
 ### Security
 
+- Sandbox proxy settings are now ignored because all outbound traffic goes through Kautuka's network access control. Admins can remove them from Sandbox environment settings on the Workspace tab in Advanced.
+
+- Unchanged legacy sandbox settings no longer block unrelated Advanced settings saves. Upgrade notices use the on-screen tab and field names, and ignored connector settings appear as a gentle heads-up.
+
+- Saving an agent preserves its owner. Upgrade notices explain who can dismiss them and stay visible until saving succeeds.
+- Existing sandbox settings are checked at startup; refused entries are reported in Advanced settings and skipped during launch. Uploading with overwrite enabled also creates a missing file safely on every supported platform.
+
+- Preserve sandbox environment settings through private files, remove connector settings files before tool calls, and report refused settings to their owners.
+- Keep moved-connector notices until their owner acknowledges them.
+- Include the matching existing SQLite vector extension on native Linux arm64 and macOS, and resolve macOS service temporary imports safely. No stored data format changes.
+- Support safe native macOS agent-file downloads and use the correct Linux arm64 file flags for hook, policy, certificate, and workspace files.
+
+- Restore safe connector view-file saving when running from source on Windows, Linux x64/arm64, and macOS Intel/Apple silicon. Existing file formats and configurable limits are preserved.
+
+- Upgrades from v0.1.27 reuse matching sandbox installations. Manager now builds connector commands from its desired state and filters host process controls.
+- Container connector settings such as `PYTHONPATH`, `NODE_PATH`, `PATH`, and `DOCKER_*` now reach the connector inside its container through a temporary owner-only environment file without touching the host Podman process or command lines. Network proxy and package-registry settings managed by Kautuka are refused when saving a connector and flagged at startup if already stored.
+- Gateway moves existing agent-sandbox bindings with environment keys, credentials, or OAuth to isolated execution (preserving read-only access to the agent's files when the agent sandbox was enabled), notifies the agent's owner in plain language, and stops offering the agent sandbox option for credentialed connectors in agent settings.
+- Manager writes view files under the resolved agent workspace with group read-only permissions (`0750`/`0640`) so the agent can still open them inside its sandbox without modifying them. Symlinks and files above the configured byte or count limits appear as unavailable.
+- Linux and Windows installers embed the same public key that verifies v0.1.27. Only the platform signing job reads the release private key.
+
 - Slack privacy hardening: DM-only, single-owner workspace binding, restricted setup scopes, and owner-pinned outbound delivery.
 
 ## [0.1.20] - 2026-10-27

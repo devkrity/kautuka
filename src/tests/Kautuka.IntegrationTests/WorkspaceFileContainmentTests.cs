@@ -51,6 +51,10 @@ public sealed class WorkspaceFileContainmentTests
     public void OrdinaryReadCreateAndOverwriteStillWork()
     {
         using var fixture = new FileFixture();
+        string missing = Path.Combine(fixture.Parent, "overwrite-missing.txt");
+        using (FileStream stream = WorkspaceFile.OpenWrite(missing, FileMode.Create))
+            stream.Write("created"u8);
+        Assert.Equal("created", File.ReadAllText(missing));
         string created = Path.Combine(fixture.Parent, "new.txt");
         using (FileStream stream = WorkspaceFile.OpenWrite(created, FileMode.CreateNew))
         {
@@ -159,7 +163,7 @@ public sealed class WorkspaceFileContainmentTests
 
     private sealed class FileFixture : IDisposable
     {
-        private readonly string root = Path.Combine(Path.GetTempPath(), "kautuka-file-containment-" + Guid.NewGuid().ToString("N"));
+        private readonly string root = Path.Combine(OperatingSystem.IsMacOS() ? "/private/tmp" : Path.GetTempPath(), "kautuka-file-containment-" + Guid.NewGuid().ToString("N"));
 
         public FileFixture()
         {

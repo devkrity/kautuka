@@ -28,6 +28,14 @@ internal static class GatewayConnectorEndpointMappings
             }
 
             bool hasCallerEnvironment = request.TestEnv is { Count: > 0 };
+            if (hasCallerEnvironment && !ConnectorEnvironmentKeyPolicy.TryValidate(request.TestEnv!.Keys, out string testEnvError))
+            {
+                return Results.Json(
+                    new GatewayErrorResponse(testEnvError),
+                    KautukaJsonContext.Default.GatewayErrorResponse,
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
+
             string revisionKey = request.Id ?? string.Empty;
             string initialUserRevision = revisions.Get(revisionKey, user.Id, includeSystem: false);
             string initialCombinedRevision = revisions.Get(revisionKey, user.Id, includeSystem: true);
@@ -156,7 +164,7 @@ internal static class GatewayConnectorEndpointMappings
                 {
                     await catalog.SaveVerifiedLocalToolsAsync(saved.Id, saved.UpdatedAt, result.ToolDefinitions, digest, result.ImageDigest!, ct).ConfigureAwait(false);
                 }
-                catch (InvalidOperationException ex)
+                catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
                 {
                     return Results.Json(new GatewayErrorResponse(ex.Message), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status409Conflict);
                 }
@@ -222,7 +230,7 @@ internal static class GatewayConnectorEndpointMappings
             {
                 inspection = await mcpbPackageService.InspectAsync(stream, archive.FileName, ct).ConfigureAwait(false);
             }
-            catch (InvalidOperationException ex)
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
             {
                 return Results.Json(
                     new GatewayConnectorMcpbImportResponse(
@@ -333,24 +341,24 @@ internal static class GatewayConnectorEndpointMappings
             return Results.Json(ToConnectorPayload(saved), KautukaJsonContext.Default.GatewayConnectorListItem);
         });
 
-        app.MapGet("/api/connectors", (IGatewayCatalogStore catalog, ConnectorUserEnablement enablement, IGatewayAuthGuard auth, HttpContext context) =>
+        app.MapGet("/api/connectors", (IGatewayCatalogStore catalog, ConnectorUserEnablement enablement, ConnectorAuthCatalog connectorAuth, IGatewayAuthGuard auth, HttpContext context) =>
         {
             if (!auth.TryAuthorize(context, out GatewayUser? user) || user is null)
                 return Results.Unauthorized();
 
             return Results.Json(
                 new GatewayConnectorsResponse([.. catalog.ListMcpServers().Where(server => GatewayOwnershipAccess.CanAccessConnector(user, server))
-                    .Select(server => ToConnectorPayload(server) with { Enabled = enablement.IsEnabled(user.Id, server.Id, server.Enabled) })]),
+                    .Select(server => ToConnectorPayload(server, connectorAuth) with { Enabled = enablement.IsEnabled(user.Id, server.Id, server.Enabled) })]),
                 KautukaJsonContext.Default.GatewayConnectorsResponse);
         });
 
-        app.MapGet("/api/connectors/{serverId}", (string serverId, IGatewayCatalogStore catalog, ConnectorUserEnablement enablement, IGatewayAuthGuard auth, HttpContext context) =>
+        app.MapGet("/api/connectors/{serverId}", (string serverId, IGatewayCatalogStore catalog, ConnectorUserEnablement enablement, ConnectorAuthCatalog connectorAuth, IGatewayAuthGuard auth, HttpContext context) =>
         {
             if (!auth.TryAuthorize(context, out GatewayUser? user) || user is null)
                 return Results.Unauthorized();
 
             return catalog.TryGetMcpServer(serverId, out GatewayMcpServer? server) && server is not null && GatewayOwnershipAccess.CanAccessConnector(user, server)
-                ? Results.Json(ToConnectorPayload(server) with { Enabled = enablement.IsEnabled(user.Id, serverId, server.Enabled) }, KautukaJsonContext.Default.GatewayConnectorListItem)
+                ? Results.Json(ToConnectorPayload(server, connectorAuth) with { Enabled = enablement.IsEnabled(user.Id, serverId, server.Enabled) }, KautukaJsonContext.Default.GatewayConnectorListItem)
                 : Results.Json(new GatewayErrorResponse("Connector not found"), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status404NotFound);
         });
 
@@ -382,7 +390,7 @@ internal static class GatewayConnectorEndpointMappings
                     visible = await catalog.SaveVerifiedLocalToolsAsync(serverId, visible.UpdatedAt, result.ToolDefinitions,
                         sourceDigest, result.ImageDigest!, ct).ConfigureAwait(false);
                 }
-                catch (InvalidOperationException ex) { return ConnectorEnablementConflict(ex.Message); }
+                catch (Exception ex) when (ex is InvalidOperationException or ArgumentException) { return ConnectorEnablementConflict(ex.Message); }
             }
 
             bool saved = false;
@@ -400,7 +408,7 @@ internal static class GatewayConnectorEndpointMappings
                     return Task.CompletedTask;
                 }, ct).ConfigureAwait(false);
             }
-            catch (InvalidOperationException ex) { return ConnectorEnablementConflict(ex.Message); }
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException) { return ConnectorEnablementConflict(ex.Message); }
             if (!saved) return ConnectorEnablementConflict("Connector settings changed. Try again.");
 
             if (string.Equals(visible.Transport, "container", StringComparison.OrdinalIgnoreCase))
@@ -472,6 +480,15 @@ internal static class GatewayConnectorEndpointMappings
             string scope = GatewayOwnershipAccess.ResolveCatalogScope(user, request.Scope);
             string? ownerUserId = GatewayOwnershipAccess.ResolveCatalogOwnerUserId(scope, user);
 
+            if (request.EnvKeys is { Length: > 0 }
+                && !ConnectorEnvironmentKeyPolicy.TryValidate(request.EnvKeys.Where(static key => !string.IsNullOrWhiteSpace(key)).Select(static key => key.Trim()), out string envKeyError))
+            {
+                return Results.Json(
+                    new GatewayErrorResponse(envKeyError),
+                    KautukaJsonContext.Default.GatewayErrorResponse,
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
+
             McpConnectorTestResult? discovery = null;
             bool disablingExisting = hasExisting && existing!.Enabled && request.Enabled == false;
             if (!disablingExisting && !string.Equals(request.Transport, "http", StringComparison.OrdinalIgnoreCase))
@@ -496,7 +513,7 @@ internal static class GatewayConnectorEndpointMappings
                 if (discovery?.NetworkApprovalRequired == true)
                     saved = await catalog.SaveMcpServerDiscoveryAsync(serverId, null, null, ct).ConfigureAwait(false);
             }
-            catch (InvalidOperationException ex)
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
             {
                 if (string.Equals(request.Transport, "http", StringComparison.OrdinalIgnoreCase))
                     RemoteMcpAudit.Write(context, hasExisting ? "connector.updated" : "connector.created",
@@ -748,7 +765,7 @@ internal static class GatewayConnectorEndpointMappings
             AllowPrivateDestination = true,
         };
 
-    internal static GatewayConnectorListItem ToConnectorPayload(GatewayMcpServer server) => new(
+    internal static GatewayConnectorListItem ToConnectorPayload(GatewayMcpServer server, ConnectorAuthCatalog? connectorAuth = null) => new(
         server.Id,
         server.Name,
         server.Description,
@@ -782,7 +799,10 @@ internal static class GatewayConnectorEndpointMappings
         [.. server.Credentials ?? []],
         [.. server.HttpHeaders ?? []],
         server.RequiresCredentialReentry,
-        server.Enabled);
+        server.Enabled,
+        GatewayCatalogStore.ToDefinition(server).RequiresIsolation(connectorAuth),
+        [.. (server.EnvKeys ?? []).Where(key => !ConnectorEnvironmentKeyPolicy.IsSupported(key, out _))
+            .Select(key => $"This connector still works without '{key}'. Select the pencil Edit button on this card, remove the setting from Environment credentials, then select Save changes.")]);
 
     private static bool HasCurrentLocalTools(GatewayMcpServer server)
         => !string.Equals(server.Transport, "container", StringComparison.OrdinalIgnoreCase)

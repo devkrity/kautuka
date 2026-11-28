@@ -15,8 +15,8 @@ internal static partial class OwnerRegistry
     {
         internal IReadOnlyDictionary<string, string?> Ids => Entries.ToDictionary(static pair => pair.Key, static pair => OwnerId(pair.Value), StringComparer.Ordinal);
     }
-    private const int ReadFlags = 0x20000 | 0x80000 | 0x800;
-    private const int CreateLockFlags = ReadFlags | 0x40 | 0x2;
+    private static readonly int ReadFlags = (RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? 0x8000 : 0x20000) | 0x80000 | 0x800;
+    private static readonly int CreateLockFlags = ReadFlags | 0x40 | 0x2;
     private const int MaxBytes = 1024 * 1024;
 
     internal static Result Read(string path)

@@ -6,25 +6,37 @@ namespace Kautuka.Manager.RuntimeContainer.Hosting;
 public sealed class PodmanCommandRunner
 {
     public const string BinaryName = "podman";
-    private readonly Func<IReadOnlyList<string>, int, CancellationToken, Stream?, Task<PodmanCommandResult>>? commandHandler;
+    private readonly Func<IReadOnlyList<string>, int, IReadOnlyDictionary<string, string>, CancellationToken, Stream?, Task<PodmanCommandResult>>? commandHandler;
 
     public PodmanCommandRunner()
     {
     }
 
     internal PodmanCommandRunner(Func<IReadOnlyList<string>, CancellationToken, Task<PodmanCommandResult>> commandHandler)
-        : this((args, token, _) => commandHandler(args, token))
+        : this((args, _, _, token, _) => commandHandler(args, token))
+    {
+        ArgumentNullException.ThrowIfNull(commandHandler);
+    }
+
+    internal PodmanCommandRunner(Func<IReadOnlyList<string>, IReadOnlyDictionary<string, string>, CancellationToken, Task<PodmanCommandResult>> commandHandler)
+        : this((args, _, env, token, _) => commandHandler(args, env, token))
     {
         ArgumentNullException.ThrowIfNull(commandHandler);
     }
 
     internal PodmanCommandRunner(Func<IReadOnlyList<string>, CancellationToken, Stream?, Task<PodmanCommandResult>> commandHandler)
-        : this((args, _, token, input) => commandHandler(args, token, input))
+        : this((args, _, _, token, input) => commandHandler(args, token, input))
     {
         ArgumentNullException.ThrowIfNull(commandHandler);
     }
 
     internal PodmanCommandRunner(Func<IReadOnlyList<string>, int, CancellationToken, Stream?, Task<PodmanCommandResult>> commandHandler)
+        : this((args, timeout, _, token, input) => commandHandler(args, timeout, token, input))
+    {
+        ArgumentNullException.ThrowIfNull(commandHandler);
+    }
+
+    private PodmanCommandRunner(Func<IReadOnlyList<string>, int, IReadOnlyDictionary<string, string>, CancellationToken, Stream?, Task<PodmanCommandResult>> commandHandler)
     {
         ArgumentNullException.ThrowIfNull(commandHandler);
         this.commandHandler = commandHandler;
@@ -38,9 +50,10 @@ public sealed class PodmanCommandRunner
         Stream? standardInput = null)
     {
         ArgumentNullException.ThrowIfNull(args);
+        Dictionary<string, string> hostEnvironment = ConnectorContainerSpecBuilder.FilterHostProcessEnvironment(environment);
         if (commandHandler is not null)
         {
-            return await commandHandler(args, timeoutSeconds, cancellationToken, standardInput).ConfigureAwait(false);
+            return await commandHandler(args, timeoutSeconds, hostEnvironment, cancellationToken, standardInput).ConfigureAwait(false);
         }
 
         var startInfo = new ProcessStartInfo
@@ -60,12 +73,9 @@ public sealed class PodmanCommandRunner
             startInfo.ArgumentList.Add(arg);
         }
 
-        if (environment is not null)
+        foreach ((string key, string value) in hostEnvironment)
         {
-            foreach ((string key, string value) in environment)
-            {
-                startInfo.Environment[key] = value;
-            }
+            startInfo.Environment[key] = value;
         }
 
         using var process = new Process { StartInfo = startInfo };

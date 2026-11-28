@@ -246,7 +246,7 @@ internal sealed class AgentFileExchangeService(
         }
         catch (IOException)
         {
-            return new AgentFileDownloadOperationResult(AgentFileOperationStatus.InvalidPath, ErrorMessage: "Requested path is not accessible.");
+            return new AgentFileDownloadOperationResult(AgentFileOperationStatus.InvalidPath, ErrorMessage: "This file is unavailable because it could not be opened safely.");
         }
         finally
         {

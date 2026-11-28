@@ -15,7 +15,7 @@ internal sealed class WorkspaceRuntimeContextResolver(
     IPlatformConfigurationProvider configurationProvider,
     IConfiguration configuration,
     KautukaDatabase database,
-    ConnectorUserEnablement? connectorEnablement = null)
+    ConnectorUserEnablement? connectorEnablement = null, ConnectorAuthCatalog? authCatalog = null)
 {
     private static readonly EffectiveSkillManifestResolver skillResolver = new();
     private const string managerProxyModeKey = "ManagerProxy:Mode";
@@ -166,7 +166,7 @@ internal sealed class WorkspaceRuntimeContextResolver(
                     return [];
                 }
 
-                if (string.IsNullOrWhiteSpace(server.BundlePath))
+                if (string.IsNullOrWhiteSpace(server.BundlePath) || server.RequiresIsolation(authCatalog))
                 {
                     return [];
                 }
@@ -323,32 +323,6 @@ internal sealed class WorkspaceRuntimeContextResolver(
         return uri.Host;
     }
 
-    private static readonly HashSet<string> unsafeProbeEnvironmentOverrides = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "PATH", "PATHEXT",
-        "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
-        "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
-        "NODE_OPTIONS", "NODE_PATH",
-        "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
-        "BASH_ENV", "SHELLOPTS",
-        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-        "SSLKEYLOGFILE",
-        "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
-        "TMPDIR", "TEMP", "TMP",
-        "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "XDG_DATA_HOME", "XDG_CACHE_HOME",
-        "APPDATA", "LOCALAPPDATA",
-        "COMSPEC", "SYSTEMROOT", "WINDIR",
-        "CONTAINERS_CONF", "CONTAINERS_CONF_OVERRIDE", "CONTAINERS_STORAGE_CONF", "CONTAINERS_REGISTRIES_CONF",
-        "CONTAINERS_HELPER_BINARY_DIR",
-        "CONTAINER_HOST", "CONTAINER_SSHKEY", "CONTAINER_PASSPHRASE", "CONTAINER_CONNECTION",
-        "DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY", "DOCKER_CONTEXT",
-        "REGISTRY_AUTH_FILE", "PODMAN_TMPDIR",
-        "STORAGE_OPTS",
-    };
-
-    private static bool IsUnsafeProbeEnvironmentOverride(string key)
-        => unsafeProbeEnvironmentOverrides.Contains(key);
-
     private Dictionary<string, string> BuildResolvedContainerEnvironment(
         IReadOnlyDictionary<string, string> baseEnvironment,
         IReadOnlyDictionary<string, string>? overrides = null)
@@ -357,7 +331,7 @@ internal sealed class WorkspaceRuntimeContextResolver(
 
         foreach ((string key, string value) in baseEnvironment)
         {
-            if (!string.IsNullOrWhiteSpace(key) && !string.IsNullOrWhiteSpace(value))
+            if (Kautuka.Gateway.Domain.Connectors.ConnectorEnvironmentKeyPolicy.SandboxSettingError(key, value) is null)
             {
                 mergedEnvironment[key] = value;
             }
@@ -367,7 +341,9 @@ internal sealed class WorkspaceRuntimeContextResolver(
         {
             foreach ((string key, string value) in overrides)
             {
-                if (!string.IsNullOrWhiteSpace(key) && !string.IsNullOrWhiteSpace(value) && !IsUnsafeProbeEnvironmentOverride(key))
+                if (!string.IsNullOrWhiteSpace(key)
+                    && !string.IsNullOrWhiteSpace(value)
+                    && Kautuka.Gateway.Domain.Connectors.ConnectorEnvironmentKeyPolicy.IsSupported(key, out _))
                 {
                     mergedEnvironment[key] = value;
                 }

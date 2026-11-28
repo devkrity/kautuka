@@ -373,8 +373,9 @@ message WorkspaceMcpContainerCallRequest {
   bool allow_internal_system_connector = 7;
   WorkspaceContextMessage workspace_context = 8;
   WorkspaceMcpExecutionContext execution_context = 9;
-  // Host directory for view files. The connector sandbox is not given this path.
-  string host_artifact_directory = 10;
+  // Removed in favor of the workspace resolved from Manager desired state.
+  reserved 10;
+  reserved "host_artifact_directory";
   string expected_image_digest = 11;
   string expected_source_digest = 12;
   bool verify_execution_command = 13;

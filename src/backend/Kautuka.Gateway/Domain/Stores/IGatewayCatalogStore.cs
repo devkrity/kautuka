@@ -53,4 +53,6 @@ internal interface IGatewayCatalogStore
     bool TryGetSkill(string id, out GatewaySkill? skill);
     GatewaySkill SaveSkill(string skillId, JsonElement body, string scope, string? ownerUserId);
     bool DeleteSkill(string skillId);
+    IReadOnlyList<string> StartupDriftNotes => [];
+    IReadOnlyList<string> GetAgentOwnerNotices(string agentId) => [];
 }

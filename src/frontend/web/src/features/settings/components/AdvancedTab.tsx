@@ -43,6 +43,7 @@ export function AdvancedTab({ initialSection = 'workspace' }: { initialSection?:
     sandboxCpus,
     sandboxMemory,
     sandboxTimeout,
+    sandboxEnvironment,
     documentIngestionEnabled,
     internalParserConnectorId,
     internalParserToolName,
@@ -90,6 +91,7 @@ export function AdvancedTab({ initialSection = 'workspace' }: { initialSection?:
     setSandboxCpus,
     setSandboxMemory,
     setSandboxTimeout,
+    setSandboxEnvironment,
     setDocumentIngestionEnabled,
     setInternalParserConnectorId,
     setInternalParserToolName,
@@ -238,6 +240,7 @@ export function AdvancedTab({ initialSection = 'workspace' }: { initialSection?:
                 sandboxCpus={sandboxCpus}
                 sandboxMemory={sandboxMemory}
                 sandboxTimeout={sandboxTimeout}
+                sandboxEnvironment={sandboxEnvironment}
                 documentIngestionEnabled={documentIngestionEnabled}
                 internalParserConnectorId={internalParserConnectorId}
                 internalParserToolName={internalParserToolName}
@@ -249,6 +252,7 @@ export function AdvancedTab({ initialSection = 'workspace' }: { initialSection?:
                 onSandboxCpusChange={setSandboxCpus}
                 onSandboxMemoryChange={setSandboxMemory}
                 onSandboxTimeoutChange={setSandboxTimeout}
+                onSandboxEnvironmentChange={setSandboxEnvironment}
                 onDocumentIngestionEnabledChange={setDocumentIngestionEnabled}
                 onInternalParserConnectorIdChange={setInternalParserConnectorId}
                 onInternalParserToolNameChange={setInternalParserToolName}

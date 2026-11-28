@@ -43,6 +43,21 @@ const mail = {
   isInternalSystemConnector: true,
 } as Connector;
 
+it('shows refused-setting guidance where the connector owner manages it', () => {
+  const connector = connectorSchema.parse({
+    id: 'personal', name: 'Family calendar', transport: 'container', scope: 'user',
+    ownerUserId: 'owner', enabled: true,
+    notices: ["This connector still works without 'HTTPS_PROXY'. Select the pencil Edit button on this card, remove the setting from Environment credentials, then select Save changes."],
+  });
+  render(<ConnectorCard connector={connector} canManage onToggle={vi.fn()} onEdit={vi.fn()}
+    onDelete={vi.fn()} toggling={false} />);
+  const notice = screen.getByRole('status');
+  expect(notice).toHaveTextContent("HTTPS_PROXY");
+  expect(notice).toHaveClass('text-muted-foreground');
+  expect(notice).not.toHaveClass('text-destructive');
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
 describe('ConnectorCard managed sign-in connector', () => {
   it('lets a regular user enable and disable a shared connector without granting deletion', () => {
     const connector = connectorSchema.parse({

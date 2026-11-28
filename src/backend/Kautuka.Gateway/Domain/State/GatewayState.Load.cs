@@ -1,3 +1,4 @@
+using Kautuka.Gateway.Domain.Connectors;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -20,6 +21,35 @@ internal sealed partial class GatewayState
     private static partial void LogFailedAgentStoreLoad(ILogger logger, Exception exception, string agentId, string storageLocatorKey);
 
     // ── load methods ─────────────────────────────────────────────────────────
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "{Notice}")]
+    private static partial void LogSandboxEnvironmentNotice(ILogger logger, string notice);
+
+    private static void CheckSandboxEnvironment(SqliteConnection connection, GatewayState state)
+    {
+        string? raw = ReadSetting(connection, "infra.sandbox.container_env_json");
+        if (string.IsNullOrEmpty(raw)) return;
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(raw);
+            if (document.RootElement.ValueKind != JsonValueKind.Object) throw new JsonException();
+            foreach (JsonProperty entry in document.RootElement.EnumerateObject())
+            {
+                string? error = ConnectorEnvironmentKeyPolicy.SandboxSettingError(entry.Name,
+                    entry.Value.ValueKind == JsonValueKind.String ? entry.Value.GetString() : null);
+                if (error is not null) state.SandboxEnvironmentNotices.Add(error + " The sandbox will start without this entry.");
+            }
+        }
+        catch (JsonException)
+        {
+            state.SandboxEnvironmentNotices.Add("Sandbox environment settings could not be read. " + ConnectorEnvironmentKeyPolicy.SandboxSettingsLocation + " Replace the contents of Sandbox environment settings with NAME=value entries and save.");
+        }
+        foreach (string notice in state.SandboxEnvironmentNotices)
+        {
+            state.StartupDriftNotes.Add(notice);
+            LogSandboxEnvironmentNotice(state.Logger, notice);
+        }
+    }
 
     private static void LoadProviders(SqliteConnection connection, GatewayState state)
     {
@@ -44,7 +74,13 @@ internal sealed partial class GatewayState
         }
     }
 
-    private static void LoadAgents(SqliteConnection connection, GatewayState state, IAgentDefinitionStore agentDefinitionStore)
+    [LoggerMessage(Level = LogLevel.Information, Message = "Migrated agent {AgentId} connector bindings to isolated execution at revision {Revision}: {Connectors}")]
+    private static partial void LogIsolatedBindings(ILogger logger, string agentId, long revision, string connectors);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Connector {ConnectorId} declares unsupported setting {SettingName}: {Reason}")]
+    private static partial void LogUnsupportedConnectorSetting(ILogger logger, string connectorId, string settingName, string reason);
+
+    private static void LoadAgents(SqliteConnection connection, GatewayState state, IAgentDefinitionStore agentDefinitionStore, ConnectorAuthCatalog? authCatalog)
     {
         foreach (DbAgent row in connection.Query<DbAgent>(
             """
@@ -84,7 +120,56 @@ internal sealed partial class GatewayState
                 continue;
             }
 
-            definition = ApplyRegistryMetadata(definition, row.Scope, row.Enabled != 0);
+            List<string> persistedNotices = DeserializeStringList(ReadSetting(connection, GetAgentOwnerNoticesSettingKey(row.Id))) ?? [];
+            var migrated = new List<(string ConnectorId, bool KeepsAgentFiles, string Notice)>();
+            var bindings = definition.McpBindings.Select(binding =>
+            {
+                if (McpAgentToolProvider.NormalizeBindingContext(binding.Context) != Kautuka.Manager.Protos.WorkspaceMcpExecutionContext.AgentSandbox
+                    || !state.McpServers.TryGetValue(binding.ConnectorId, out var server)
+                    || !GatewayCatalogStore.ToDefinition(server).RequiresIsolation(authCatalog))
+                    return binding;
+
+                bool keepsAgentFiles = definition.Sandbox.Enabled
+                    && !string.Equals(server.Transport, "http", StringComparison.OrdinalIgnoreCase);
+                string targetContext = keepsAgentFiles ? "OwnContextWithAgentFiles" : "OwnContext";
+                string displayName = string.IsNullOrWhiteSpace(server.Name) ? server.Id : server.Name;
+                string ownerNotice = keepsAgentFiles
+                    ? $"Connector {displayName} now runs separately for safety. It can still read the agent's files but can't change them."
+                    : $"Connector {displayName} now runs separately for safety.";
+                migrated.Add((binding.ConnectorId, keepsAgentFiles, ownerNotice));
+                return new AgentMcpBindingDefinition { ConnectorId = binding.ConnectorId, Context = targetContext };
+            }).ToArray();
+            definition = ApplyRegistryMetadata(definition, row.Scope, row.Enabled != 0, bindings);
+            if (migrated.Count > 0)
+            {
+                state.Models.TryGetValue(definition.ModelId, out GatewayModel? model);
+                var snapshotMetadata = new AgentDefinitionSnapshotMetadata(
+                    model?.ModelName,
+                    model?.ProviderId,
+                    state.McpServers.ToDictionary(static pair => pair.Key, static pair => pair.Value.Name, StringComparer.Ordinal),
+                    state.Skills.ToDictionary(static pair => pair.Key, static pair => pair.Value.Name, StringComparer.Ordinal));
+                revision = agentDefinitionStore.SaveDefinition(row.StorageLocatorKey, definition, snapshotMetadata);
+                foreach ((string connectorId, bool keepsAgentFiles, string ownerNotice) in migrated)
+                {
+                    LogIsolatedBindings(state.Logger, row.Id, revision, connectorId);
+                    string targetDescription = keepsAgentFiles ? "isolated execution with agent files" : "isolated execution";
+                    state.StartupDriftNotes.Add($"Agent '{row.Id}' connector '{connectorId}' binding moved from agent sandbox to {targetDescription} at revision {revision}.");
+                    if (!persistedNotices.Contains(ownerNotice, StringComparer.Ordinal))
+                    {
+                        persistedNotices.Add(ownerNotice);
+                    }
+                }
+
+                string noticesJson = JsonSerializer.Serialize(persistedNotices.ToArray(), KautukaJsonContext.Default.StringArray);
+                connection.Execute(
+                    "INSERT INTO system_settings (key, value_json, updated_at) VALUES (@key, @valueJson, @updatedAt) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at",
+                    new { key = GetAgentOwnerNoticesSettingKey(row.Id), valueJson = noticesJson, updatedAt = Timestamp() });
+            }
+
+            if (persistedNotices.Count > 0)
+            {
+                state.AgentOwnerNotices[row.Id] = [.. persistedNotices];
+            }
 
             AgentDefinitionSerializer.SerializedAgentDefinition serialized = AgentDefinitionSerializer.Serialize(definition);
             var session = SafeCreateJsonObject(DeserializeJsonElement(serialized.SessionJson));
@@ -160,6 +245,17 @@ internal sealed partial class GatewayState
 
             IReadOnlyList<string>? toolNames = DeserializeStringList(row.ToolNamesJson);
             IReadOnlyList<string>? envKeys = DeserializeStringList(row.EnvKeysJson);
+            if (envKeys is { Count: > 0 })
+            {
+                foreach (string key in envKeys)
+                {
+                    if (!ConnectorEnvironmentKeyPolicy.IsSupported(key, out string reason))
+                    {
+                        LogUnsupportedConnectorSetting(state.Logger, row.Id, key, reason);
+                        state.StartupDriftNotes.Add($"Connector '{row.Name}' ({row.Id}) uses unsupported setting '{key}'. {reason}");
+                    }
+                }
+            }
             RemoteMcpConfiguration remote = JsonSerializer.Deserialize(row.RemoteConfigJson, PlatformConfigurationJsonContext.Default.RemoteMcpConfiguration) ?? new([], []);
             state.McpServers[row.Id] = new GatewayMcpServer(
                 row.Id, row.Name, row.Description, row.IconUrl,
@@ -513,7 +609,7 @@ internal sealed partial class GatewayState
         }
     }
 
-    private static AgentDefinition ApplyRegistryMetadata(AgentDefinition definition, string scope, bool enabled)
+    private static AgentDefinition ApplyRegistryMetadata(AgentDefinition definition, string scope, bool enabled, IReadOnlyList<AgentMcpBindingDefinition> bindings)
         => new()
         {
             Id = definition.Id,
@@ -526,7 +622,7 @@ internal sealed partial class GatewayState
             ApprovalPolicy = definition.ApprovalPolicy,
             Session = definition.Session,
             Sandbox = definition.Sandbox,
-            McpBindings = definition.McpBindings,
+            McpBindings = bindings,
             SkillAttachments = definition.SkillAttachments,
             Persona = definition.Persona,
             ToolExposure = definition.ToolExposure,

@@ -88,7 +88,7 @@ internal sealed partial class GatewayCatalogStore
             planning,
             sandbox,
             skillAttachments,
-            ownerUserId,
+            existingAgent?.OwnerUserId ?? ownerUserId,
             Timestamp(),
             approvalConfig,
             toolExposure,
@@ -127,6 +127,11 @@ internal sealed partial class GatewayCatalogStore
         state.AgentStorageLocators[agentId] = storageLocatorKey;
 
         state.Agents[agentId] = agent;
+        if (existingAgent is not null
+            && string.Equals(existingAgent.OwnerUserId, ownerUserId, StringComparison.Ordinal)
+            && request.AcknowledgedNotices is { Length: > 0 }
+            && request.AcknowledgedNotices.SequenceEqual(GetAgentOwnerNotices(agentId), StringComparer.Ordinal))
+            state.ClearAgentOwnerNotices(agentId);
         await RebuildAgentWorkspacesForAllUsersAsync(agentId, cancellationToken).ConfigureAwait(false);
         state.TopologyHash = state.ComputeTopologyHashFromState();
         await desiredStatePublisher.TryPublishCurrentAsync("agent-save", cancellationToken).ConfigureAwait(false);
@@ -187,6 +192,7 @@ internal sealed partial class GatewayCatalogStore
         }
         state.AgentStorageLocators.TryRemove(agentId, out _);
         bool removed = state.Agents.TryRemove(agentId, out _);
+        state.ClearAgentOwnerNotices(agentId);
 
         try
         {
@@ -408,6 +414,13 @@ internal sealed partial class GatewayCatalogStore
                 && !GatewayOwnershipAccess.CallerCanUse(ownerUserId, server.Scope, server.OwnerUserId))
             {
                 throw new ArgumentException($"Connector '{binding.ConnectorId}' is not available to this user.");
+            }
+
+            if (server is not null && McpAgentToolProvider.NormalizeBindingContext(binding.Context) == Kautuka.Manager.Protos.WorkspaceMcpExecutionContext.AgentSandbox)
+            {
+                McpServerDefinition definition = ToDefinition(server);
+                if (definition.RequiresIsolation(authCatalog))
+                    throw new ArgumentException(definition.IsolationMessage);
             }
         }
 

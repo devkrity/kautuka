@@ -1,4 +1,5 @@
 import { Alert } from '@/components/ui/alert';
+import { AgentUpgradeNotices } from './AgentUpgradeNotices';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { TabsContent } from '@/components/ui/tabs';
 import type { Connector } from '@/features/connectors';
@@ -8,7 +9,18 @@ import { McpPanel } from './shared/McpPanel';
 import { executionContextOptions } from './shared/executionContextOptions';
 
 const agentSandboxExecutionContext = 'AgentContext';
+const isolatedWithAgentFilesExecutionContext = 'OwnContextWithAgentFiles';
 const defaultBundleExecutionContext = 'OwnContext';
+
+export function connectorUsesCredentials(connector: Connector): boolean {
+  return Boolean(
+    connector.usesCredentials ||
+      connector.envKeys.length > 0 ||
+      (connector.credentials?.length ?? 0) > 0 ||
+      connector.requiresCredentialReentry ||
+      connector.httpHeaders?.some((header) => Boolean(header.credentialKey))
+  );
+}
 
 interface AgentConnectorsEditorProps {
   agent: AgentSettingsEntry;
@@ -59,10 +71,19 @@ export function AgentConnectorsEditor({
 
   const getBinding = (connectorId: string) =>
     agent.mcpBindings.find((binding) => binding.connectorId === connectorId) ?? null;
-  const getBundleExecutionContext = (connectorId: string): string =>
-    !sandboxEnabled && getBinding(connectorId)?.context === agentSandboxExecutionContext
-      ? defaultBundleExecutionContext
-      : (getBinding(connectorId)?.context ?? defaultBundleExecutionContext);
+  const getBundleExecutionContext = (connector: Connector): string => {
+    const connectorId = String(connector.id);
+    const current = getBinding(connectorId)?.context;
+    if (current === agentSandboxExecutionContext) {
+      if (connectorUsesCredentials(connector)) {
+        return sandboxEnabled ? isolatedWithAgentFilesExecutionContext : defaultBundleExecutionContext;
+      }
+      if (!sandboxEnabled) {
+        return defaultBundleExecutionContext;
+      }
+    }
+    return current ?? defaultBundleExecutionContext;
+  };
 
   const upsertBinding = (connectorId: string, context: string) => {
     onPatch((previous) => {
@@ -129,6 +150,9 @@ export function AgentConnectorsEditor({
 
   return (
     <TabsContent value="connectors" className="space-y-3">
+      <AgentUpgradeNotices agent={agent} onAcknowledge={() => onPatch((previous) => ({
+        ...previous, acknowledgedNotices: previous.notices ?? [],
+      }))} />
       <div className="settings-subpanel-compact">
         <div className="mb-3 text-sm font-medium">Built-in Tools</div>
         <div
@@ -181,14 +205,20 @@ export function AgentConnectorsEditor({
             groups.bundles,
             (connector) => {
               const connectorId = String(connector.id);
-              const selectedContext = getBundleExecutionContext(connectorId);
+              const usesCredentials = connectorUsesCredentials(connector);
+              const selectedContext = getBundleExecutionContext(connector);
+              const availableOptions = usesCredentials
+                ? executionContextOptions.filter(
+                    (option) => option.value !== agentSandboxExecutionContext
+                  )
+                : executionContextOptions;
               return (
                 <div className="space-y-2">
                   <div className="text-sm font-medium">Execution Context</div>
                   <SegmentedControl
                     value={selectedContext}
                     onChange={(next) => upsertBinding(connectorId, next)}
-                    options={executionContextOptions.map((option) => ({
+                    options={availableOptions.map((option) => ({
                       value: option.value,
                       label: option.label,
                       disabled:
@@ -197,6 +227,13 @@ export function AgentConnectorsEditor({
                         !selectionEnabled,
                     }))}
                   />
+                  {usesCredentials ? (
+                    <p className="text-xs text-muted-foreground">
+                      This connector uses sign-in or secret keys, so it runs separately for safety.
+                      Choose Isolated with access to Agent Files if it needs to read your
+                      agent&apos;s files.
+                    </p>
+                  ) : null}
                 </div>
               );
             }

@@ -24,6 +24,479 @@ namespace Kautuka.IntegrationTests;
 public sealed class WorkspaceContainerConnectorExecutionServiceTests
 {
     [Theory]
+    [InlineData("matching")]
+    [InlineData("modified")]
+    [InlineData("malformed")]
+    public async Task VersionThreeSandboxManifestOnlyControlsReinstallation(string installedState)
+    {
+        string root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            string bundle = Path.Combine(root, "connector.mcpb");
+            var token = TestContext.Current.CancellationToken;
+            await File.WriteAllTextAsync(bundle, "bundle", token);
+            string image = "quay.io/devkrity/kautuka-base@sha256:" + new string('a', 64);
+            string workspacePath = Path.Combine(root, "users", "user", "agents", "agent");
+            Directory.CreateDirectory(workspacePath);
+            var workspace = new ContainerContext("agent", "agent", "user", workspacePath, "/workspace", image, 30, "512m", 1, [], new Dictionary<string, string>());
+            var connector = new WorkspaceMcpContainerConnectorDefinition("user::web", image, "manager-command", ["manager-arg"], true, false, bundle, "binary", [], 30, 600);
+            var desired = new WorkspaceDesiredStateStore();
+            _ = desired.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap,
+                new ManagerRuntimeSettings(new ManagerWorkspaceDefinition { BaseRoot = root }, new ManagerSandboxRuntimeDefinition { Image = image, DefaultTimeout = 30 }, new WorkspaceTelemetryDefinition()),
+                [workspace], [connector], [new("agent", "agent", [connector.ConnectorId])]);
+
+            // Frozen v0.1.27 values for this bundle and base image.
+            const string installRoot = "/home/node/.kautuka/connectors/by-digest/d9f3820066cd225f4407a643b1961bb39d4e356c8ef6c6a0e2c389dd20ea9c3b";
+            const string artifactDigest = "cda184e0acf69f4c84153a6eacbbc9dc5d0b4c220de5d4f19503b4f0d58c9552";
+            string legacyManifest = $$$"""
+                {"NormalizationVersion":3,"Contracts":[{"ConnectorId":"user::web","ArtifactDigest":"{{{artifactDigest}}}","RuntimeImage":"localhost/kautuka-mcpb-sandbox-binary:{{{artifactDigest}}}","ServerType":"binary","InstallRoot":"{{{installRoot}}}","ExecutablePath":"manager-command","ArgsTemplate":["manager-arg"],"EnvTemplate":[],"WorkingDirectory":"{{{installRoot}}}","NormalizationVersion":3}]}
+                """;
+            var modified = System.Text.Json.Nodes.JsonNode.Parse(legacyManifest)!;
+            var contract = modified["Contracts"]![0]!;
+            contract["ExecutablePath"] = "sandbox-command";
+            contract["ArgsTemplate"] = new System.Text.Json.Nodes.JsonArray("sandbox-arg");
+            contract["EnvTemplate"] = JsonSerializer.SerializeToNode(new[]
+            {
+                new KeyValuePair<string, string>("LD_PRELOAD", "sandbox-value"),
+                new KeyValuePair<string, string>("CONTAINERS_CONF", "sandbox-value"),
+                new KeyValuePair<string, string>("PATH", "sandbox-value")
+            });
+            string poison = modified.ToJsonString();
+            bool drifted = installedState != "matching";
+            string firstRead = installedState switch
+            {
+                "matching" => legacyManifest,
+                "modified" => poison,
+                _ => "{"
+            };
+            var sandbox = new ManifestSandbox(firstRead, poison);
+            List<string> commands = [];
+            var runner = new PodmanCommandRunner((args, _) =>
+            {
+                commands.Add(args[0]);
+                return Task.FromResult(new PodmanCommandResult(0, "", "", ProcessTerminationReason.Completed));
+            });
+            var materializer = new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance,
+                new RuntimeImageAllowlist(1, [new("kautuka-base", image, null)]));
+            string capture = Path.Combine(root, "launch.json");
+            const string recorder = "import json, os, sys; json.dump([sys.argv[2:], [os.getenv(k) for k in ('LD_PRELOAD','CONTAINERS_CONF','PATH')]], open(sys.argv[1],'w'))";
+            await using var service = new WorkspaceContainerConnectorExecutionService(desired, runner, materializer, sandbox,
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance, stdioCommand: "python3", stdioArgumentsPrefix: ["-c", recorder, capture]);
+            await service.CallToolAsync(connector.ConnectorId, null, "test", "{}", 30, false, workspace, WorkspaceMcpExecutionContext.AgentSandbox, token);
+            Assert.Equal(1, sandbox.ManifestReads);
+            Assert.Equal(drifted ? 1 : 0, sandbox.Replacements);
+            Assert.Equal(drifted ? new[] { "image", "create", "cp", "rm" } : ["image"], commands);
+            using var recorded = JsonDocument.Parse(await File.ReadAllTextAsync(capture, token));
+            Assert.Equal(new[] { "exec", "-i", "--workdir", installRoot, "sandbox", "manager-command", "manager-arg" },
+                recorded.RootElement[0].EnumerateArray().Select(value => value.GetString()));
+            Assert.DoesNotContain(recorded.RootElement[1].EnumerateArray(), value => value.GetString() == "sandbox-value");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private sealed class ManifestSandbox(string firstManifest, string laterManifest) : IContainerTool
+    {
+        public int ManifestReads { get; private set; }
+        public int Replacements { get; private set; }
+        public Task<OciSandboxSession> SpawnSandboxAsync(ContainerContext context, CancellationToken cancellationToken)
+            => Task.FromResult(new OciSandboxSession("sandbox", Replacements > 0, context.ScopeType, context.ScopeId, context.UserId));
+        public Task CloseSandboxAsync(ContainerContext context, CancellationToken cancellationToken)
+        {
+            Replacements++;
+            return Task.CompletedTask;
+        }
+        public Task<ContainerExecutionResult> RunShellAsync(ContainerContext context, string command, int? timeoutSeconds, CancellationToken cancellationToken)
+        {
+            string output = command.StartsWith("if [ -f ", StringComparison.Ordinal)
+                ? (++ManifestReads == 1 ? firstManifest : laterManifest) : "";
+            return Task.FromResult(new ContainerExecutionResult("ok", 0, output, ""));
+        }
+        public Task PrimeWorkspaceAsync(ContainerContext context, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<ContainerContext> RebuildWorkspaceAsync(ContainerContext context, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> DeleteWorkspaceAsync(ContainerContext context, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<OciSandboxSession> InspectSandboxAsync(ContainerContext context, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public async Task CallToolMaterializesViewFilesIntoDesiredWorkspaceOnly()
+    {
+        string root = Directory.CreateDirectory(Path.Combine(OperatingSystem.IsMacOS() ? "/private/tmp" : Path.GetTempPath(), "native-call-" + Guid.NewGuid().ToString("N"))).FullName;
+        string outside = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var token = TestContext.Current.CancellationToken;
+            string bundle = Path.Combine(root, "connector.mcpb");
+            await File.WriteAllTextAsync(bundle, "bundle", token);
+            string script = Path.Combine(root, "mcp_view_server.py");
+            await File.WriteAllTextAsync(script, """
+                import json, sys, pathlib
+                for line in sys.stdin:
+                    if not line.strip():
+                        continue
+                    req = json.loads(line)
+                    method = req.get("method")
+                    req_id = req.get("id")
+                    if method == "initialize":
+                        print(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}}, "serverInfo": {"name": "view", "version": "1"}}}), flush=True)
+                    elif method == "tools/call":
+                        if "--env-file" in sys.argv:
+                            env_file = pathlib.Path(sys.argv[sys.argv.index("--env-file") + 1])
+                            assert not env_file.exists(), "Connector settings file remained after initialization"
+                        structured = {"view": {"blocks": [{"type": "file", "fileId": "f1"}]}, "files": [{"fileId": "f1", "name": "report.txt", "base64": "aGVsbG8="}]}
+                        print(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": "ok"}], "structuredContent": structured, "isError": False}}), flush=True)
+                """, token);
+
+            string image = "quay.io/devkrity/kautuka-base@sha256:" + new string('a', 64);
+            string desiredWorkspacePath = Path.Combine(root, "users", "user", "agents", "agent");
+            Directory.CreateDirectory(desiredWorkspacePath);
+            var desiredWorkspace = new ContainerContext("agent", "agent", "user", desiredWorkspacePath, "/workspace", image, 30, "512m", 1, [], new Dictionary<string, string>());
+            var spoofedCallerWorkspace = desiredWorkspace with { HostWorkspacePath = outside };
+            var connector = new WorkspaceMcpContainerConnectorDefinition("user::web", image, "manager-command", ["manager-arg"], true, false, bundle, "binary", [new("TOKEN", "runtime-secret")], 30, 600);
+            var desired = new WorkspaceDesiredStateStore();
+            _ = desired.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap,
+                new ManagerRuntimeSettings(new ManagerWorkspaceDefinition { BaseRoot = root }, new ManagerSandboxRuntimeDefinition { Image = image, DefaultTimeout = 30 }, new WorkspaceTelemetryDefinition()),
+                [desiredWorkspace], [connector], [new("agent", "agent", [connector.ConnectorId])]);
+
+            var runner = new PodmanCommandRunner((_, _) => Task.FromResult(new PodmanCommandResult(0, "", "", ProcessTerminationReason.Completed)));
+            var materializer = new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance,
+                new RuntimeImageAllowlist(1, [new("kautuka-base", image, null)]));
+            var sandbox = new ManifestSandbox("{", "{");
+            await using var service = new WorkspaceContainerConnectorExecutionService(desired, runner, materializer, sandbox,
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance, stdioCommand: "python3", stdioArgumentsPrefix: ["-u", script]);
+
+            var call = await service.CallToolAsync(connector.ConnectorId, null, "render", "{}", 30, false, spoofedCallerWorkspace, WorkspaceMcpExecutionContext.AgentSandbox, token);
+            Assert.True(call.Ok, call.FailureMessage);
+            Assert.Contains("view-files/", call.Result, StringComparison.Ordinal);
+            string written = Assert.Single(Directory.GetFiles(desiredWorkspacePath, "report.txt", SearchOption.AllDirectories));
+            Assert.Equal("hello", await File.ReadAllTextAsync(written, token));
+            Assert.Empty(Directory.EnumerateFileSystemEntries(outside));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+            Directory.Delete(outside, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PersistentConnectorStartFiltersHostProcessEnvironment()
+    {
+        string root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var token = TestContext.Current.CancellationToken;
+            string image = "quay.io/devkrity/kautuka-base@sha256:" + new string('a', 64);
+            string workspacePath = Path.Combine(root, "users", "user", "agents", "agent");
+            Directory.CreateDirectory(workspacePath);
+            var workspace = new ContainerContext("agent", "agent", "user", workspacePath, "/workspace", image, 30, "512m", 1, [], new Dictionary<string, string>());
+            var connector = new WorkspaceMcpContainerConnectorDefinition(
+                "user::persistent",
+                image,
+                "node",
+                ["server.js"],
+                true,
+                false,
+                null,
+                "node",
+                [
+                    new("TOKEN", "allowed-value"),
+                    new("PYTHONPATH", "/app/custom-python"),
+                    new("LD_PRELOAD", "/tmp/poison.so"),
+                    new("CONTAINERS_CONF", "/tmp/containers.conf"),
+                    new("DOCKER_HOST", "tcp://127.0.0.1:2375"),
+                    new("PODMAN_CUSTOM", "poison"),
+                    new("PATH", "/tmp/bin"),
+                ],
+                30,
+                600);
+            var desired = new WorkspaceDesiredStateStore();
+            _ = desired.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap,
+                new ManagerRuntimeSettings(new ManagerWorkspaceDefinition { BaseRoot = root }, new ManagerSandboxRuntimeDefinition { Image = image, DefaultTimeout = 30 }, new WorkspaceTelemetryDefinition()),
+                [workspace], [connector], []);
+
+            IReadOnlyDictionary<string, string>? observedRunEnvironment = null;
+            List<string>? observedRunArgs = null;
+            string? observedEnvFilePath = null;
+            string? observedEnvFileContent = null;
+            var runner = new PodmanCommandRunner(async (args, env, ct) =>
+            {
+                if (args[0] == "run")
+                {
+                    observedRunArgs = [.. args];
+                    observedRunEnvironment = new Dictionary<string, string>(env, StringComparer.Ordinal);
+                    int envFileIndex = observedRunArgs.IndexOf("--env-file");
+                    if (envFileIndex >= 0 && envFileIndex + 1 < observedRunArgs.Count)
+                    {
+                        observedEnvFilePath = observedRunArgs[envFileIndex + 1];
+                        observedEnvFileContent = await File.ReadAllTextAsync(observedEnvFilePath, ct);
+                    }
+
+                    return new PodmanCommandResult(125, string.Empty, "synthetic stop after capture", ProcessTerminationReason.NonZeroExit);
+                }
+
+                if (args[0] == "image" && args.Count > 1 && args[1] == "inspect")
+                {
+                    return new PodmanCommandResult(0, "sha256:" + new string('a', 64), string.Empty, ProcessTerminationReason.Completed);
+                }
+
+                if (args[0] == "inspect")
+                {
+                    return new PodmanCommandResult(125, string.Empty, "no such container", ProcessTerminationReason.NonZeroExit);
+                }
+
+                if (args[0] == "container" && args.Count > 1 && args[1] == "exists")
+                {
+                    return new PodmanCommandResult(1, string.Empty, "no such container", ProcessTerminationReason.NonZeroExit);
+                }
+
+                return new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed);
+            });
+
+            using var policyStore = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
+            var launchGate = new WorkloadLaunchGate(new TestWorkloadStartupState(true), policyStore);
+            await using var service = new WorkspaceContainerConnectorExecutionService(
+                desired,
+                runner,
+                new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance, new RuntimeImageAllowlist(1, [new("kautuka-base", image, null)])),
+                new PodmanContainerTool(runner),
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+                addressAllocator: new WorkloadAddressAllocator(Path.Combine(root, "ip-cursor.json")),
+                workloadLaunchGate: launchGate);
+
+            var result = await service.CallToolAsync(connector.ConnectorId, null, "ping", "{}", 30, false, workspace, WorkspaceMcpExecutionContext.Isolated, token);
+            Assert.False(result.Ok);
+            Assert.NotNull(observedRunEnvironment);
+            Assert.Empty(observedRunEnvironment);
+            Assert.NotNull(observedRunArgs);
+            foreach (string hidden in new[] { "TOKEN", "allowed-value", "PYTHONPATH", "/app/custom-python", "DOCKER_HOST", "PODMAN_CUSTOM", "LD_PRELOAD", "CONTAINERS_CONF" })
+            {
+                Assert.DoesNotContain(observedRunArgs, arg => arg.Contains(hidden, StringComparison.OrdinalIgnoreCase));
+            }
+
+            Assert.NotNull(observedEnvFilePath);
+            Assert.False(File.Exists(observedEnvFilePath));
+            Assert.NotNull(observedEnvFileContent);
+            Assert.Contains("PYTHONPATH=/app/custom-python\n", observedEnvFileContent, StringComparison.Ordinal);
+            Assert.Contains("DOCKER_HOST=tcp://127.0.0.1:2375\n", observedEnvFileContent, StringComparison.Ordinal);
+            Assert.Contains("TOKEN=allowed-value\n", observedEnvFileContent, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task V0127ConnectorWithPythonPathAndDockerSettingsReusesMatchingContainerOrRecreatesOnceWithoutHostOrCliLeak()
+    {
+        string root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var token = TestContext.Current.CancellationToken;
+            string image = "quay.io/devkrity/kautuka-base@sha256:" + new string('a', 64);
+            string imageId = "sha256:" + new string('a', 64);
+            string containerId = new string('b', 64);
+            string workspacePath = Path.Combine(root, "users", "user-alpha", "agents", "agent-alpha");
+            Directory.CreateDirectory(workspacePath);
+            var workspace = new ContainerContext("agent", "agent-alpha", "user-alpha", workspacePath, "/workspace", image, 30, "512m", 1, [], new Dictionary<string, string>());
+            var connector = new WorkspaceMcpContainerConnectorDefinition(
+                "user-alpha::python-docker",
+                image,
+                "python3",
+                ["-m", "connector_server"],
+                true,
+                false,
+                null,
+                "python",
+                [
+                    new("PYTHONPATH", "/app/connector/src"),
+                    new("DOCKER_CUSTOM_ENDPOINT", "https://docker.example.internal"),
+                ],
+                30,
+                600);
+            var desired = new WorkspaceDesiredStateStore();
+            _ = desired.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap,
+                new ManagerRuntimeSettings(new ManagerWorkspaceDefinition { BaseRoot = root }, new ManagerSandboxRuntimeDefinition { Image = image, DefaultTimeout = 30 }, new WorkspaceTelemetryDefinition()),
+                [workspace], [connector], []);
+            WorkspaceMcpContainerConnectorDefinition storedConnector = Assert.Single(desired.Snapshot.DesiredContainerConnectors);
+            var identity = ConnectorContainerSpecBuilder.ResolveIdentity(storedConnector, workspace, purpose: null);
+            string currentFingerprint = ConnectorContainerSpecBuilder.ComputeWorkloadFingerprint(
+                storedConnector,
+                identity,
+                WorkspaceMcpExecutionContext.Isolated);
+            string currentDesiredVersion = storedConnector.DesiredStateVersion.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+            string[] liveEnv =
+            [
+                "PATH=/usr/bin",
+                "HOME=/tmp",
+                "NPM_CONFIG_CACHE=/tmp/.npm",
+                "PIP_CACHE_DIR=/tmp/.pip",
+                "UV_CACHE_DIR=/tmp/.uv",
+                "DOCKER_CUSTOM_ENDPOINT=https://docker.example.internal",
+            ];
+            int runCount = 0;
+            int rmCount = 0;
+            List<string[]> observedCommands = [];
+            List<Dictionary<string, string>> observedHostEnvs = [];
+
+            string BuildV0127Inspect() => JsonSerializer.Serialize(new[]
+            {
+                new
+                {
+                    Id = containerId,
+                    Image = imageId,
+                    EffectiveCaps = Array.Empty<string>(),
+                    BoundingCaps = Array.Empty<string>(),
+                    NetworkSettings = new { Networks = new Dictionary<string, object> { ["kautuka-workload"] = new { IPAddress = "10.247.1.25" } } },
+                    State = new { Status = "running", Pid = 4242 },
+                    Config = new
+                    {
+                        User = "65532:65532",
+                        Env = liveEnv,
+                        Labels = new Dictionary<string, string>
+                        {
+                            ["kautuka.desired-version"] = currentDesiredVersion,
+                            ["kautuka.spec-fingerprint"] = currentFingerprint,
+                        },
+                    },
+                    Mounts = Array.Empty<object>(),
+                    HostConfig = new
+                    {
+                        NetworkMode = "bridge",
+                        Binds = Array.Empty<string>(),
+                        CapDrop = new[] { "ALL" },
+                        CapAdd = Array.Empty<string>(),
+                        Privileged = false,
+                        Devices = Array.Empty<object>(),
+                        PublishAllPorts = false,
+                        PortBindings = new Dictionary<string, object[]>(),
+                        ReadonlyRootfs = true,
+                        PidsLimit = 128,
+                        SecurityOpt = new[] { "no-new-privileges", "label=disable" },
+                        Sysctls = new Dictionary<string, string> { ["net.ipv6.conf.all.disable_ipv6"] = "1" },
+                        Tmpfs = new Dictionary<string, string> { ["/tmp"] = "rw,noexec,nosuid,nodev" },
+                    },
+                },
+            });
+
+            var runner = new PodmanCommandRunner(async (args, env, ct) =>
+            {
+                observedCommands.Add([.. args]);
+                observedHostEnvs.Add(new Dictionary<string, string>(env, StringComparer.Ordinal));
+                if (args[0] == "image" && args.Count > 1 && args[1] == "inspect")
+                {
+                    return new PodmanCommandResult(0, imageId, string.Empty, ProcessTerminationReason.Completed);
+                }
+
+                if (args[0] == "inspect")
+                {
+                    return new PodmanCommandResult(0, BuildV0127Inspect(), string.Empty, ProcessTerminationReason.Completed);
+                }
+
+                if (args[0] == "rm")
+                {
+                    rmCount++;
+                    return new PodmanCommandResult(0, containerId, string.Empty, ProcessTerminationReason.Completed);
+                }
+
+                if (args[0] == "run")
+                {
+                    runCount++;
+                    string? fingerprintLabel = args.FirstOrDefault(static item => item.StartsWith("kautuka.spec-fingerprint=", StringComparison.Ordinal));
+                    if (fingerprintLabel is not null)
+                    {
+                        currentFingerprint = fingerprintLabel["kautuka.spec-fingerprint=".Length..];
+                    }
+
+                    int envIdx = args.ToList().IndexOf("--env-file");
+                    string[] fileLines = await File.ReadAllLinesAsync(args[envIdx + 1], ct);
+                    liveEnv =
+                    [
+                        "PATH=/usr/bin",
+                        "HOME=/tmp",
+                        "NPM_CONFIG_CACHE=/tmp/.npm",
+                        "PIP_CACHE_DIR=/tmp/.pip",
+                        "UV_CACHE_DIR=/tmp/.uv",
+                        .. fileLines,
+                    ];
+                    return new PodmanCommandResult(0, containerId, string.Empty, ProcessTerminationReason.Completed);
+                }
+
+                return new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed);
+            });
+
+            string capture = Path.Combine(root, "exec-capture.json");
+            string recorderScript = Path.Combine(root, "recorder.py");
+            const string recorder = """
+                import json, os, pathlib, sys
+                argv = sys.argv[2:]
+                idx = argv.index("--env-file")
+                env_path = argv[idx + 1]
+                env_text = pathlib.Path(env_path).read_text(encoding="utf-8")
+                pathlib.Path(sys.argv[1]).write_text(json.dumps({
+                    "argv": argv,
+                    "envPath": env_path,
+                    "envText": env_text,
+                    "hostPythonPath": os.getenv("PYTHONPATH"),
+                    "hostDocker": os.getenv("DOCKER_CUSTOM_ENDPOINT"),
+                }), encoding="utf-8")
+                """;
+            await File.WriteAllTextAsync(recorderScript, recorder, token);
+            using var policyStore = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
+            var launchGate = new WorkloadLaunchGate(new TestWorkloadStartupState(true), policyStore);
+            await using var service = new WorkspaceContainerConnectorExecutionService(
+                desired,
+                runner,
+                new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance, new RuntimeImageAllowlist(1, [new("kautuka-base", image, null)])),
+                new PodmanContainerTool(runner),
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+                addressAllocator: new WorkloadAddressAllocator(Path.Combine(root, "ip-cursor.json")),
+                workloadLaunchGate: launchGate,
+                stdioCommand: "python3",
+                stdioArgumentsPrefix: ["-u", recorderScript, capture]);
+
+            // First call after v0.1.27 upgrade: missing PYTHONPATH in v0.1.27 container triggers one recreate.
+            _ = await service.CallToolAsync(connector.ConnectorId, new Dictionary<string, string> { ["DOCKER_RUNTIME_TOKEN"] = "runtime-secret" }, "ping", "{}", 30, false, workspace, WorkspaceMcpExecutionContext.Isolated, token);
+            Assert.True(rmCount == 1, $"Expected rmCount=1 after first call, got {rmCount}. Commands: {string.Join(" | ", observedCommands.Select(c => string.Join(' ', c)))}");
+            Assert.Equal(1, runCount);
+
+            // Second call: container now has PYTHONPATH + DOCKER_CUSTOM_ENDPOINT and is NOT treated as changed.
+            _ = await service.CallToolAsync(connector.ConnectorId, new Dictionary<string, string> { ["DOCKER_RUNTIME_TOKEN"] = "runtime-secret" }, "ping", "{}", 30, false, workspace, WorkspaceMcpExecutionContext.Isolated, token);
+            Assert.True(rmCount == 1, $"Expected rmCount=1 after second call, got {rmCount}. Commands: {string.Join(" | ", observedCommands.Select(c => string.Join(' ', c)))}");
+            Assert.Equal(1, runCount);
+
+            Assert.All(observedHostEnvs, hostEnv => Assert.Empty(hostEnv));
+            foreach (string[] cmd in observedCommands)
+            {
+                Assert.DoesNotContain(cmd, arg =>
+                    arg.Contains("PYTHONPATH", StringComparison.OrdinalIgnoreCase)
+                    || arg.Contains("DOCKER_", StringComparison.OrdinalIgnoreCase)
+                    || arg.Contains("runtime-secret", StringComparison.Ordinal));
+            }
+
+            using JsonDocument doc = JsonDocument.Parse(await File.ReadAllTextAsync(capture, token));
+            string[] execArgv = [.. doc.RootElement.GetProperty("argv").EnumerateArray().Select(static x => x.GetString()!)];
+            Assert.DoesNotContain(execArgv, arg => arg.Contains("PYTHONPATH", StringComparison.OrdinalIgnoreCase) || arg.Contains("DOCKER_", StringComparison.OrdinalIgnoreCase));
+            string execEnvPath = doc.RootElement.GetProperty("envPath").GetString()!;
+            Assert.False(File.Exists(execEnvPath));
+            string execEnvText = doc.RootElement.GetProperty("envText").GetString()!;
+            Assert.Contains("PYTHONPATH=/app/connector/src\n", execEnvText, StringComparison.Ordinal);
+            Assert.Contains("DOCKER_CUSTOM_ENDPOINT=https://docker.example.internal\n", execEnvText, StringComparison.Ordinal);
+            Assert.Contains("DOCKER_RUNTIME_TOKEN=runtime-secret\n", execEnvText, StringComparison.Ordinal);
+            Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("hostPythonPath").ValueKind);
+            Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("hostDocker").ValueKind);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
     [InlineData("old", "one")]
     [InlineData("server", "old")]
     public async Task ChangedCommandOrArgumentsAreRejectedBeforeStartingConnector(string expectedCommand, string expectedArgument)
@@ -1585,9 +2058,10 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
 
             Assert.DoesNotContain("--volume", arguments, StringComparer.Ordinal);
             Assert.Contains(runtimeImage, arguments, StringComparer.Ordinal);
-            Assert.Contains("SPLOSE_ROOT", arguments, StringComparer.Ordinal);
+            Assert.DoesNotContain("SPLOSE_ROOT", arguments, StringComparer.Ordinal);
             Assert.DoesNotContain("/opt/kautuka/mcpb/config", arguments, StringComparer.Ordinal);
-            Assert.Equal("/opt/kautuka/mcpb/config", ConnectorContainerSpecBuilder.BuildTransportEnvironment(prepared)["SPLOSE_ROOT"]);
+            Assert.Empty(ConnectorContainerSpecBuilder.BuildTransportEnvironment(prepared));
+            Assert.Equal("/opt/kautuka/mcpb/config", ConnectorContainerSpecBuilder.FilterContainerEnvironment(prepared.Environment)["SPLOSE_ROOT"]);
             Assert.Contains("/opt/kautuka/mcpb/.venv/bin/python", arguments, StringComparer.Ordinal);
             Assert.DoesNotContain("uv", arguments, StringComparer.Ordinal);
             Assert.Contains("-m", arguments, StringComparer.Ordinal);
@@ -2233,10 +2707,11 @@ Egress: "normal", Attribution: "user", CompatProfile: null, DateTimeOffset.UtcNo
             30,
             600);
 
-        List<string> arguments = InvokeBuildPodmanExecArguments(
+        List<string> arguments = ConnectorContainerSpecBuilder.BuildExec(
             connector,
             "test-container",
-            "/home/node/.kautuka/connectors/user-1--kautuka-web-tools");
+            "/home/node/.kautuka/connectors/user-1--kautuka-web-tools",
+            "/tmp/kautuka-env-test");
 
         Assert.Equal(
             [
@@ -2244,14 +2719,17 @@ Egress: "normal", Attribution: "user", CompatProfile: null, DateTimeOffset.UtcNo
                 "-i",
                 "--workdir",
                 "/home/node/.kautuka/connectors/user-1--kautuka-web-tools",
-                "--env",
-                "PYTHONPATH",
+                "--env-file",
+                "/tmp/kautuka-env-test",
                 "test-container",
                 "/home/node/.kautuka/connectors/user-1--kautuka-web-tools/.venv/bin/python",
                 "-m",
                 "kautuka_web_tools.server"
             ],
             arguments);
+        Assert.Equal(
+            "/home/node/.kautuka/connectors/user-1--kautuka-web-tools/src",
+            ConnectorContainerSpecBuilder.FilterContainerEnvironment(connector.Environment)["PYTHONPATH"]);
     }
 
     [Fact]

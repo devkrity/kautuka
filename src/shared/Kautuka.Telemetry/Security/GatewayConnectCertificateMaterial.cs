@@ -10,6 +10,8 @@ namespace Kautuka.Telemetry.Security;
 [SupportedOSPlatform("linux")]
 public sealed class GatewayConnectCertificateMaterial
 {
+    private static readonly int LinuxDirectoryFlags = (RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? 0x4000 : 0x10000) | 0x80000;
+
     private const string ServerDnsName = "kautuka-connect.internal";
     private const string ClientName = "Kautuka Gateway CONNECT Client";
     private const string ServerName = "Kautuka Gateway CONNECT Listener";
@@ -187,7 +189,7 @@ public sealed class GatewayConnectCertificateMaterial
 
     private static void FlushDirectory(string path)
     {
-        int descriptor = open(path, 0x10000 | 0x80000); // O_RDONLY | O_DIRECTORY | O_CLOEXEC
+        int descriptor = open(path, LinuxDirectoryFlags); // O_RDONLY | O_DIRECTORY | O_CLOEXEC
         if (descriptor < 0)
             throw new IOException("Could not open the Gateway CONNECT certificate directory.", Marshal.GetLastPInvokeError());
         try

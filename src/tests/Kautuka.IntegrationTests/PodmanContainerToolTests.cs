@@ -178,6 +178,145 @@ public sealed class PodmanContainerToolTests
     }
 
     [Fact]
+    public async Task SandboxStartupFiltersHostSensitiveEnvironmentAndReusesExistingV0127Sandbox()
+    {
+        string root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            string workspacePath = Path.Combine(root, "agent-a");
+            Directory.CreateDirectory(workspacePath);
+            string image = "ghcr.io/devkrity/kautuka-base@sha256:" + new string('a', 64);
+            string imageId = "sha256:" + new string('b', 64);
+            IReadOnlyDictionary<string, string>? observedRunEnvironment = null;
+            List<string>? observedRunArgs = null;
+            string? environmentPath = null;
+            string? environmentContent = null;
+            bool containerExists = false;
+            string? inspectPayload = null;
+
+            var runner = new PodmanCommandRunner(async (args, env, ct) =>
+            {
+                if (args[0] == "run")
+                {
+                    observedRunArgs = [.. args];
+                    environmentPath = args[args.ToList().IndexOf("--env-file") + 1];
+                    environmentContent = await File.ReadAllTextAsync(environmentPath, ct);
+                    observedRunEnvironment = new Dictionary<string, string>(env, StringComparer.Ordinal);
+                    return new PodmanCommandResult(0, new string('c', 64), string.Empty, ProcessTerminationReason.Completed);
+                }
+
+                if (args[0] == "image" && args.Count > 1 && args[1] == "inspect")
+                {
+                    return new PodmanCommandResult(0, imageId, string.Empty, ProcessTerminationReason.Completed);
+                }
+
+                if (args[0] == "inspect")
+                {
+                    return containerExists && inspectPayload is not null
+                        ? new PodmanCommandResult(0, inspectPayload, string.Empty, ProcessTerminationReason.Completed)
+                        : new PodmanCommandResult(125, string.Empty, "no such container", ProcessTerminationReason.NonZeroExit);
+                }
+
+                if (args[0] == "container" && args.Count > 1 && args[1] == "exists")
+                {
+                    return containerExists
+                        ? new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed)
+                        : new PodmanCommandResult(1, string.Empty, "no such container", ProcessTerminationReason.NonZeroExit);
+                }
+
+                return new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed);
+            });
+
+            using var policyStore = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
+            var tool = new PodmanContainerTool(
+                runner,
+                addressAllocator: new WorkloadAddressAllocator(Path.Combine(root, "ip-cursor.json")),
+                workloadLaunchGate: new WorkloadLaunchGate(new TestWorkloadStartupState(true), policyStore));
+
+            ContainerContext context = CreateLaunchContext("user-a", "agent-a", workspacePath) with
+            {
+                Image = image,
+                DesiredStateVersion = 1,
+                ContainerEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["NPM_CONFIG_REGISTRY"] = "http://kautuka-pkgs-proxy:20101/npm/",
+                    ["LD_PRELOAD"] = "/tmp/poison.so",
+                    ["CONTAINERS_CONF"] = "/tmp/containers.conf",
+                    ["DOCKER_HOST"] = "tcp://127.0.0.1:2375",
+                    ["PODMAN_TMPDIR"] = "/tmp/podman",
+                    ["GCONV_PATH"] = "/tmp/gconv",
+                    ["PATH"] = "/tmp/bin",
+                },
+            };
+            context = context with { SpecFingerprint = WorkspaceContainerSpecFingerprint.Compute(context, []) };
+
+            OciSandboxSession created = await tool.SpawnSandboxAsync(context, TestContext.Current.CancellationToken);
+            Assert.True(created.Created);
+            Assert.NotNull(observedRunArgs);
+            Assert.NotNull(observedRunEnvironment);
+            Assert.Empty(observedRunEnvironment);
+            Assert.NotNull(environmentContent);
+            Assert.False(File.Exists(environmentPath));
+            foreach (var entry in context.ContainerEnvironment)
+                Assert.Contains(entry.Key + "=" + entry.Value, environmentContent, StringComparison.Ordinal);
+            foreach (string blocked in new[] { "LD_PRELOAD", "CONTAINERS_CONF", "DOCKER_HOST", "PODMAN_TMPDIR", "GCONV_PATH", "PATH" })
+            {
+                Assert.DoesNotContain(blocked, observedRunArgs);
+                Assert.False(observedRunEnvironment.ContainsKey(blocked));
+            }
+
+            // v0.1.27 stored these settings inside the container, including host-sensitive names.
+            ContainerContext v0127Context = context;
+            v0127Context = v0127Context with { SpecFingerprint = WorkspaceContainerSpecFingerprint.Compute(v0127Context, []) };
+            containerExists = true;
+            observedRunArgs = null;
+            inspectPayload = System.Text.Json.JsonSerializer.Serialize(new[]
+            {
+                new
+                {
+                    Id = new string('d', 64),
+                    Image = imageId,
+                    State = new { Status = "running" },
+                    HostConfig = new
+                    {
+                        NetworkMode = "kautuka-workload",
+                        PublishAllPorts = false,
+                        PortBindings = new Dictionary<string, object>(),
+                        Binds = new[] { $"{workspacePath}:/workspace:rw" },
+                        CapDrop = new[] { "ALL" },
+                        CapAdd = Array.Empty<string>(),
+                        Privileged = false,
+                        Devices = Array.Empty<object>(),
+                        ReadonlyRootfs = true,
+                        PidsLimit = 256L,
+                        SecurityOpt = new[] { "no-new-privileges" },
+                        Tmpfs = new Dictionary<string, string> { ["/tmp"] = "rw,noexec,nosuid", ["/home/node"] = "rw,nodev,nosuid,mode=1777" },
+                    },
+                    Mounts = new[] { new { Type = "bind", Source = workspacePath, Destination = "/workspace" } },
+                    NetworkSettings = new { Networks = new Dictionary<string, object> { ["kautuka-workload"] = new { IPAddress = "10.247.1.10" } } },
+                    Config = new
+                    {
+                        Env = context.ContainerEnvironment.Select(pair => pair.Key + "=" + pair.Value).ToArray(),
+                        Labels = new Dictionary<string, string>
+                        {
+                            ["kautuka.desired-version"] = "1",
+                            ["kautuka.spec-fingerprint"] = v0127Context.SpecFingerprint!,
+                        },
+                    },
+                },
+            });
+
+            OciSandboxSession reused = await tool.SpawnSandboxAsync(v0127Context, TestContext.Current.CancellationToken);
+            Assert.False(reused.Created);
+            Assert.Null(observedRunArgs);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task EphemeralEnvironmentFileIsRestrictedToTheProcessOwner()
     {
         string path = await PodmanContainerTool.WriteEphemeralEnvironmentFileAsync(
@@ -241,10 +380,10 @@ public sealed class PodmanContainerToolTests
 
         AssertOption(arguments, "--add-host", $"kautuka-pkgs-proxy:{Kautuka.NetworkAccessController.NetworkAddressClassifier.PackageProxyServiceAddress}");
 
-        Assert.Contains("NPM_CONFIG_REGISTRY", arguments);
-        Assert.Contains("UV_INDEX_URL", arguments);
-        Assert.Contains("PIP_INDEX_URL", arguments);
-        Assert.Contains("LOG_LEVEL", arguments);
+        Assert.DoesNotContain("NPM_CONFIG_REGISTRY", arguments);
+        Assert.DoesNotContain("UV_INDEX_URL", arguments);
+        Assert.DoesNotContain("PIP_INDEX_URL", arguments);
+        Assert.DoesNotContain("LOG_LEVEL", arguments);
         Assert.DoesNotContain(arguments, static argument => argument.Contains("gateway.example.invalid", StringComparison.Ordinal));
         Assert.DoesNotContain(arguments, static argument => argument == "NPM_CONFIG_REGISTRY=http://kautuka-pkgs-proxy:20101/npm/");
         Assert.DoesNotContain(arguments, static argument => argument == "UV_INDEX_URL=http://kautuka-pkgs-proxy:20101/pypi/simple/");

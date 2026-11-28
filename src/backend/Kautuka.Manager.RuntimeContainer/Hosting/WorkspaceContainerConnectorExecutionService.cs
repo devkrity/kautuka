@@ -36,7 +36,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     Kautuka.NetworkAccessController.NetworkAccessPolicyStore? probePolicyStore = null,
     string stdioCommand = PodmanCommandRunner.BinaryName,
     IReadOnlyList<string>? stdioArgumentsPrefix = null,
-    IHostApplicationLifetime? hostLifetime = null) : IAsyncDisposable
+    IHostApplicationLifetime? hostLifetime = null,
+    Microsoft.Extensions.Options.IOptions<ViewFileOptions>? viewFileOptions = null) : IAsyncDisposable
 {
     private const string agentSandboxInstallRoot = "/home/node/.kautuka/connectors";
     private const string agentSandboxManifestPath = "/home/node/.kautuka/connectors/.installed.json";
@@ -295,10 +296,10 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             : await workloadLaunchGate.AcquireLaunchLeaseAsync(workspaceContext.UserId, cancellationToken).ConfigureAwait(false);
         await using var leaseScope = lease.ConfigureAwait(false);
         using CancellationTokenSource launchCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.CancellationToken);
-        return await EnsureAgentSandboxProvisionedUnderLeaseAsync(workspaceContext, desiredConnectorIds, launchCancellation.Token).ConfigureAwait(false);
+        return (await EnsureAgentSandboxProvisionedUnderLeaseAsync(workspaceContext, desiredConnectorIds, launchCancellation.Token).ConfigureAwait(false)).Session;
     }
 
-    private async Task<OciSandboxSession> EnsureAgentSandboxProvisionedUnderLeaseAsync(
+    private async Task<(OciSandboxSession Session, AgentSandboxInstalledManifest DesiredManifest)> EnsureAgentSandboxProvisionedUnderLeaseAsync(
         ContainerContext workspaceContext,
         IReadOnlyList<string> desiredConnectorIds,
         CancellationToken cancellationToken)
@@ -312,9 +313,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         OciSandboxSession session = await containerTool.SpawnSandboxAsync(workspaceContext, cancellationToken).ConfigureAwait(false);
         if (!session.Created)
         {
-            AgentSandboxInstalledManifest? installedManifest = await TryReadAgentSandboxManifestAsync(workspaceContext, cancellationToken).ConfigureAwait(false);
-            if (AgentSandboxInstallContract.Equals(installedManifest, desiredManifest))
-                return session;
+            if (await HasDesiredSandboxManifestAsync(workspaceContext, desiredManifest, cancellationToken).ConfigureAwait(false))
+                return (session, desiredManifest);
 
             await containerTool.CloseSandboxAsync(workspaceContext, cancellationToken).ConfigureAwait(false);
             session = await containerTool.SpawnSandboxAsync(workspaceContext, cancellationToken).ConfigureAwait(false);
@@ -330,7 +330,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             }
 
             await WriteAgentSandboxManifestAsync(workspaceContext, desiredManifest, cancellationToken).ConfigureAwait(false);
-            return session;
+            return (session, desiredManifest);
         }
         catch
         {
@@ -498,7 +498,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             connector = ResolveEffectiveConnectorDefinition(
                 connectorId,
-                environmentOverrides,
+                environmentOverrides: null,
                 timeoutSeconds,
                 allowInternalSystemConnector);
 
@@ -512,7 +512,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 WorkspaceMcpContainerLifecycleState.Starting,
                 "list-start");
 
-            transportLaunch = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, isProbe: false, cancellationToken: cancellationToken, authoritativeSnapshot: authoritativeSnapshot).ConfigureAwait(false);
+            transportLaunch = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, isProbe: false, authoritativeSnapshot: authoritativeSnapshot, runtimeEnvironmentOverrides: environmentOverrides, cancellationToken: cancellationToken).ConfigureAwait(false);
             ephemeralWorkload = transportLaunch.EphemeralWorkload;
             var tools = await ListMcpToolsAsync(transportLaunch, ClientOptionsFor(connector.McpProtocolVersion), cancellationToken).ConfigureAwait(false);
 
@@ -564,7 +564,6 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         ContainerContext? workspaceContext,
         WorkspaceMcpExecutionContext executionContext,
         CancellationToken cancellationToken,
-        string? hostArtifactDirectory = null,
         string? expectedImageDigest = null,
         string? expectedSourceDigest = null,
         string? expectedCommand = null,
@@ -584,7 +583,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             connector = ResolveEffectiveConnectorDefinition(
                 connectorId,
-                environmentOverrides,
+                environmentOverrides: null,
                 timeoutSeconds,
                 allowInternalSystemConnector);
 
@@ -611,7 +610,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 "call-start");
 
             long prepareStarted = Stopwatch.GetTimestamp();
-            transportLaunch = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, isProbe: false, cancellationToken: cancellationToken, authoritativeSnapshot: authoritativeSnapshot, expectedImageDigest: expectedImageDigest).ConfigureAwait(false);
+            transportLaunch = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, isProbe: false, authoritativeSnapshot: authoritativeSnapshot, expectedImageDigest: expectedImageDigest, runtimeEnvironmentOverrides: environmentOverrides, cancellationToken: cancellationToken).ConfigureAwait(false);
             ephemeralWorkload = transportLaunch.EphemeralWorkload;
             using CancellationTokenSource? toolTimeout = executionContext == WorkspaceMcpExecutionContext.AgentSandbox
                 ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken) : null;
@@ -622,6 +621,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             McpClient client = await McpClient.CreateAsync(transportLaunch.Transport, ClientOptionsFor(connector.McpProtocolVersion), cancellationToken: launchCancellation.Token).ConfigureAwait(false);
             await using (client.ConfigureAwait(false))
             {
+                transportLaunch.CleanupEnvironmentFile();
                 long initialized = Stopwatch.GetTimestamp();
                 await ReleaseLaunchLeaseAsync(transportLaunch).ConfigureAwait(false);
                 var toolInput = McpToolContractCodec.ParseInput(toolInputJson);
@@ -638,9 +638,15 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                         Stopwatch.GetElapsedTime(callStarted).TotalMilliseconds);
                 }
 
+                string? hostWorkspacePath = workspaceContext is not null
+                    && !string.IsNullOrWhiteSpace(workspaceContext.ScopeType)
+                    && !string.IsNullOrWhiteSpace(workspaceContext.ScopeId)
+                    && desiredStateStore.TryResolveWorkspace(workspaceContext.ScopeType, workspaceContext.ScopeId, workspaceContext.UserId, out ContainerContext? resolvedWorkspace)
+                    ? resolvedWorkspace?.HostWorkspacePath
+                    : null;
                 string resultJson = ViewFileMaterializer.Materialize(
                     McpToolContractCodec.SerializeResult(result),
-                    hostArtifactDirectory);
+                    hostWorkspacePath, viewFileOptions?.Value);
 
                 _ = desiredStateStore.TryTransitionConnectorState(
                     connector.ConnectorId,
@@ -775,9 +781,10 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         bool isProbe = false,
         WorkspaceDesiredStateSnapshot? authoritativeSnapshot = null,
         string? expectedImageDigest = null,
+        IReadOnlyDictionary<string, string>? runtimeEnvironmentOverrides = null,
         CancellationToken cancellationToken = default)
         => CreateTransportCoreAsync(connector, requireEnabled, allowInternalSystemConnector, workspaceContext,
-            executionContext, isProbe, false, authoritativeSnapshot, expectedImageDigest, cancellationToken);
+            executionContext, isProbe, false, authoritativeSnapshot, expectedImageDigest, runtimeEnvironmentOverrides, cancellationToken);
 
     private async Task<TransportLaunch> CreateTransportCoreAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
@@ -789,6 +796,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         bool saveDiscovery = false,
         WorkspaceDesiredStateSnapshot? authoritativeSnapshot = null,
         string? expectedImageDigest = null,
+        IReadOnlyDictionary<string, string>? runtimeEnvironmentOverrides = null,
         CancellationToken cancellationToken = default)
     {
         authoritativeSnapshot ??= desiredStateStore.Snapshot;
@@ -823,6 +831,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         bool leaseTransferred = false;
         EphemeralWorkload? ephemeralWorkload = null;
         PersistentConnectorUse? persistentUse = null;
+        string? environmentFile = null;
         try
         {
             bool isBraked = workloadLaunchGate?.IsBraked(launchUserId) ?? true;
@@ -842,13 +851,26 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     throw new InvalidOperationException("The connector base image must be pinned to a digest. Test the connection and start a new run.");
 
                 IReadOnlyList<string> desiredConnectorIds = ResolveDesiredSandboxConnectorIds(workspaceContext);
-                OciSandboxSession sandboxSession = await EnsureAgentSandboxProvisionedUnderLeaseAsync(workspaceContext, desiredConnectorIds, cancellationToken).ConfigureAwait(false);
-                AgentSandboxInstalledContract installedContract = await GetInstalledAgentSandboxContractAsync(workspaceContext, connector.ConnectorId, cancellationToken).ConfigureAwait(false);
-                WorkspaceMcpContainerConnectorDefinition sandboxConnector = ApplyInstalledAgentSandboxContract(connector, installedContract);
+                var (sandboxSession, desiredManifest) = await EnsureAgentSandboxProvisionedUnderLeaseAsync(workspaceContext, desiredConnectorIds, cancellationToken).ConfigureAwait(false);
+                AgentSandboxInstalledContract contract = desiredManifest.Contracts.FirstOrDefault(candidate => candidate.ConnectorId == connector.ConnectorId)
+                    ?? throw new InvalidOperationException($"Agent sandbox '{workspaceContext.ScopeId}' has no desired contract for connector '{connector.ConnectorId}'.");
+                var sandboxConnector = connector with
+                {
+                    Command = contract.ExecutablePath,
+                    Args = contract.ArgsTemplate,
+                    Environment = contract.EnvTemplate
+                };
+                Dictionary<string, string> sandboxContainerEnvironment = ConnectorContainerSpecBuilder.FilterContainerEnvironment(sandboxConnector.Environment);
+                if (sandboxContainerEnvironment.Count > 0)
+                {
+                    environmentFile = await PodmanContainerTool.WriteEphemeralEnvironmentFileAsync(sandboxContainerEnvironment, cancellationToken).ConfigureAwait(false);
+                }
+
                 List<string> sandboxArguments = ConnectorContainerSpecBuilder.BuildExec(
                     sandboxConnector,
                     sandboxSession.ContainerName,
-                    installedContract.WorkingDirectory ?? installedContract.InstallRoot);
+                    contract.WorkingDirectory ?? contract.InstallRoot,
+                    environmentFile);
 
                 var sandboxLaunch = new TransportLaunch(new StdioClientTransport(new StdioClientTransportOptions
                 {
@@ -856,7 +878,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     Arguments = [.. (stdioArgumentsPrefix ?? []), .. sandboxArguments],
                     EnvironmentVariables = ConnectorContainerSpecBuilder.BuildTransportEnvironment(sandboxConnector),
                     Name = $"sandbox-connector-{connector.ConnectorId}"
-                }), null, launchLease);
+                }), null, launchLease, environmentFile: environmentFile);
                 leaseTransferred = true;
                 return sandboxLaunch;
             }
@@ -927,6 +949,13 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
                 ephemeralWorkload = new EphemeralWorkload(containerName, allocatedIp, compatProfile, desiredIdentity);
                 trackedConnectorContainers["ephemeral:" + containerName] = containerName;
+                IReadOnlyList<KeyValuePair<string, string>> ephemeralMergedEnvironment = MergeEnvironment(connector.Environment, runtimeEnvironmentOverrides);
+                Dictionary<string, string> ephemeralEnvironment = ConnectorContainerSpecBuilder.FilterContainerEnvironment(ephemeralMergedEnvironment);
+                if (ephemeralEnvironment.Count > 0)
+                {
+                    environmentFile = await PodmanContainerTool.WriteEphemeralEnvironmentFileAsync(ephemeralEnvironment, cancellationToken).ConfigureAwait(false);
+                }
+
                 arguments = BuildConnectorWorkloadRunArguments(
                     connector,
                     containerName,
@@ -936,7 +965,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     allocatedIp: allocatedIp,
                     isBraked: isBraked,
                     purpose: isProbe ? (saveDiscovery ? "save-discovery" : "probe") : null,
-                    compatProfile: compatProfile);
+                    compatProfile: compatProfile,
+                    environmentFile: environmentFile);
             }
             else
             {
@@ -959,7 +989,14 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     authoritativeSnapshot: authoritativeSnapshot,
                     trackUse: true).ConfigureAwait(false);
                 persistentUse = new PersistentConnectorUse(connector, runtimeKey, containerName);
-                arguments = ConnectorContainerSpecBuilder.BuildExec(connector, containerName, ResolveExecWorkingDirectory(connector));
+                IReadOnlyList<KeyValuePair<string, string>> execMergedEnvironment = MergeEnvironment(connector.Environment, runtimeEnvironmentOverrides);
+                Dictionary<string, string> execEnvironment = ConnectorContainerSpecBuilder.FilterContainerEnvironment(execMergedEnvironment);
+                if (execEnvironment.Count > 0)
+                {
+                    environmentFile = await PodmanContainerTool.WriteEphemeralEnvironmentFileAsync(execEnvironment, cancellationToken).ConfigureAwait(false);
+                }
+
+                arguments = ConnectorContainerSpecBuilder.BuildExec(connector, containerName, ResolveExecWorkingDirectory(connector), environmentFile);
             }
 
             var stdioTransport = new StdioClientTransport(new StdioClientTransportOptions
@@ -972,7 +1009,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             IClientTransport transport = ephemeralWorkload is null
                 ? stdioTransport
                 : new VerifiedConnectorTransport(stdioTransport, token => VerifyEphemeralWorkloadAsync(ephemeralWorkload, connector.ReadinessTimeoutSeconds, token));
-            var transportLaunch = new TransportLaunch(transport, ephemeralWorkload, launchLease, imageDigest, persistentContainerId, persistentUse);
+            var transportLaunch = new TransportLaunch(transport, ephemeralWorkload, launchLease, imageDigest, persistentContainerId, persistentUse, environmentFile);
             leaseTransferred = true;
             return transportLaunch;
         }
@@ -984,6 +1021,11 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             if (!leaseTransferred)
             {
+                if (environmentFile is not null && File.Exists(environmentFile))
+                {
+                    PodmanContainerTool.DeleteSecretFile(environmentFile);
+                }
+
                 if (ephemeralWorkload is not null)
                 {
                     RemoveNeverStartedEphemeralIdentity(ephemeralWorkload);
@@ -1059,45 +1101,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             .OrderBy(static connectorId => connectorId, StringComparer.Ordinal)
             .ToArray();
 
-    private async Task<AgentSandboxInstalledContract> GetInstalledAgentSandboxContractAsync(
+    private async Task<bool> HasDesiredSandboxManifestAsync(
         ContainerContext workspaceContext,
-        string connectorId,
-        CancellationToken cancellationToken)
-    {
-        AgentSandboxInstalledManifest manifest = await TryReadAgentSandboxManifestAsync(workspaceContext, cancellationToken).ConfigureAwait(false)
-            ?? throw new InvalidOperationException($"Agent sandbox '{workspaceContext.ScopeId}' has no installed connector manifest.");
-
-        return manifest.Contracts.FirstOrDefault(contract => string.Equals(contract.ConnectorId, connectorId, StringComparison.Ordinal))
-            ?? throw new InvalidOperationException($"Agent sandbox '{workspaceContext.ScopeId}' is missing installed contract for connector '{connectorId}'.");
-    }
-
-    private static WorkspaceMcpContainerConnectorDefinition ApplyInstalledAgentSandboxContract(
-        WorkspaceMcpContainerConnectorDefinition connector,
-        AgentSandboxInstalledContract installedContract)
-    {
-        Dictionary<string, string> mergedEnvironment = installedContract.EnvTemplate
-            .ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.OrdinalIgnoreCase);
-
-        foreach (KeyValuePair<string, string> pair in connector.Environment)
-        {
-            if (string.IsNullOrWhiteSpace(pair.Key))
-            {
-                continue;
-            }
-
-            mergedEnvironment[pair.Key] = AgentSandboxInstallContract.RewriteRuntimePath(pair.Value, installedContract.InstallRoot);
-        }
-
-        return connector with
-        {
-            Command = installedContract.ExecutablePath,
-            Args = installedContract.ArgsTemplate,
-            Environment = [.. mergedEnvironment.Select(static pair => new KeyValuePair<string, string>(pair.Key, pair.Value))]
-        };
-    }
-
-    private async Task<AgentSandboxInstalledManifest?> TryReadAgentSandboxManifestAsync(
-        ContainerContext workspaceContext,
+        AgentSandboxInstalledManifest desiredManifest,
         CancellationToken cancellationToken)
     {
         ContainerExecutionResult result = await containerTool
@@ -1108,12 +1114,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false);
 
-        if (result.ExitCode != 0 || string.IsNullOrWhiteSpace(result.StdOut))
-        {
-            return null;
-        }
-
-        return JsonSerializer.Deserialize(result.StdOut, AgentSandboxContractJsonContext.Default.AgentSandboxInstalledManifest);
+        // The v0.1.27 installer wrote this same canonical JSON. Treat any other bytes as drift.
+        return result.ExitCode == 0 && result.StdOut.AsSpan().TrimEnd().SequenceEqual(
+            JsonSerializer.Serialize(desiredManifest, AgentSandboxContractJsonContext.Default.AgentSandboxInstalledManifest));
     }
 
     private async Task ResetAgentSandboxInstallRootAsync(
@@ -1374,24 +1377,39 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             throw new InvalidOperationException($"Connector '{connector.ConnectorId}' workload address is already registered.");
         }
 
-        var runArgs = BuildConnectorWorkloadRunArguments(
-            connector,
-            containerName,
-            executionContext,
-            WithConfiguredWorkspaceRoot(identityContext ?? workspaceContext),
-            persistent: true,
-            allocatedIp: allocatedIp,
-            isBraked: isBraked,
-            purpose: isProbe ? (saveDiscovery ? "save-discovery" : "probe") : null,
-            compatProfile: compatProfile);
+        Dictionary<string, string> containerEnvironment = ConnectorContainerSpecBuilder.FilterContainerEnvironment(connector.Environment);
+        string? environmentFile = containerEnvironment.Count > 0
+            ? await PodmanContainerTool.WriteEphemeralEnvironmentFileAsync(containerEnvironment, cancellationToken).ConfigureAwait(false)
+            : null;
+        PodmanCommandResult result;
+        try
+        {
+            var runArgs = BuildConnectorWorkloadRunArguments(
+                connector,
+                containerName,
+                executionContext,
+                WithConfiguredWorkspaceRoot(identityContext ?? workspaceContext),
+                persistent: true,
+                allocatedIp: allocatedIp,
+                isBraked: isBraked,
+                purpose: isProbe ? (saveDiscovery ? "save-discovery" : "probe") : null,
+                compatProfile: compatProfile,
+                environmentFile: environmentFile);
 
-        PodmanCommandResult result = await podmanCommandRunner
-            .RunAsync(
-                runArgs,
-                Math.Max(10, connector.ReadinessTimeoutSeconds),
-                cancellationToken,
-                BuildPodmanEnvironment(connector))
-            .ConfigureAwait(false);
+            result = await podmanCommandRunner
+                .RunAsync(
+                    runArgs,
+                    Math.Max(10, connector.ReadinessTimeoutSeconds),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            if (environmentFile is not null && File.Exists(environmentFile))
+            {
+                PodmanContainerTool.DeleteSecretFile(environmentFile);
+            }
+        }
 
         if (result.ExitCode != 0)
         {
@@ -1649,10 +1667,17 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
     private async Task CompleteConnectorInvocationAsync(TransportLaunch? launch)
     {
-        if (launch?.PersistentUse is { } persistentUse)
-            await ReleasePersistentConnectorUseAsync(persistentUse).ConfigureAwait(false);
-        else if (launch?.EphemeralWorkload is { } ephemeralWorkload)
-            await CompleteEphemeralWorkloadAsync(ephemeralWorkload).ConfigureAwait(false);
+        try
+        {
+            if (launch?.PersistentUse is { } persistentUse)
+                await ReleasePersistentConnectorUseAsync(persistentUse).ConfigureAwait(false);
+            else if (launch?.EphemeralWorkload is { } ephemeralWorkload)
+                await CompleteEphemeralWorkloadAsync(ephemeralWorkload).ConfigureAwait(false);
+        }
+        finally
+        {
+            launch?.CleanupEnvironmentFile();
+        }
     }
 
     private async Task ReleasePersistentConnectorUseAsync(PersistentConnectorUse use)
@@ -1973,12 +1998,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             return assignments;
         }
 
-        foreach (KeyValuePair<string, string> pair in connector.Environment)
+        foreach ((string key, string value) in ConnectorContainerSpecBuilder.FilterContainerEnvironment(connector.Environment))
         {
-            if (ConnectorContainerSpecBuilder.ForwardsEnvironmentKey(pair.Key) && !string.IsNullOrWhiteSpace(pair.Value))
-            {
-                assignments.Add(pair.Key + "=" + pair.Value);
-            }
+            assignments.Add(key + "=" + value);
         }
 
         return assignments;
@@ -2101,7 +2123,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             foreach ((string key, string value) in overrides)
             {
-                if (!ConnectorContainerSpecBuilder.AllowsRuntimeEnvironmentOverride(key))
+                if (!ConnectorContainerSpecBuilder.AllowsContainerEnvironment(key))
                 {
                     continue;
                 }
@@ -2124,11 +2146,6 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
         return null;
     }
-
-    private static Dictionary<string, string> BuildPodmanEnvironment(WorkspaceMcpContainerConnectorDefinition connector)
-        => connector.Environment
-            .Where(static pair => ConnectorContainerSpecBuilder.ForwardsEnvironmentKey(pair.Key))
-            .ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.Ordinal);
 
     private static bool UsesImageDefaultCommand(WorkspaceMcpContainerConnectorDefinition connector)
     {
@@ -2238,7 +2255,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         string allocatedIp,
         bool isBraked,
         string? purpose = null,
-        NetworkAccess.ImageCompatProfile? compatProfile = null)
+        NetworkAccess.ImageCompatProfile? compatProfile = null,
+        string? environmentFile = null)
         => ConnectorContainerSpecBuilder.BuildRun(
             connector,
             containerName,
@@ -2249,7 +2267,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             isBraked,
             purpose,
             compatProfile,
-            identityContext);
+            identityContext,
+            environmentFile);
 
     private ContainerContext? WithConfiguredWorkspaceRoot(ContainerContext? context)
     {
@@ -2459,6 +2478,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         McpClient client = await McpClient.CreateAsync(launch.Transport, clientOptions, cancellationToken: launchCancellation.Token).ConfigureAwait(false);
         await using (client.ConfigureAwait(false))
         {
+            launch.CleanupEnvironmentFile();
             await ReleaseLaunchLeaseAsync(launch).ConfigureAwait(false);
             IList<McpClientTool> tools = await client.ListToolsAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
             return [.. tools];
@@ -2635,9 +2655,10 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         public ConnectorAdmissionInterruptedException(string message, Exception innerException) : base(message, innerException) { }
     }
 
-    private sealed class TransportLaunch(IClientTransport transport, EphemeralWorkload? ephemeralWorkload, NetworkAccess.IWorkloadLaunchLease? launchLease, string? imageDigest = null, string? containerId = null, PersistentConnectorUse? persistentUse = null)
+    private sealed class TransportLaunch(IClientTransport transport, EphemeralWorkload? ephemeralWorkload, NetworkAccess.IWorkloadLaunchLease? launchLease, string? imageDigest = null, string? containerId = null, PersistentConnectorUse? persistentUse = null, string? environmentFile = null)
     {
         private NetworkAccess.IWorkloadLaunchLease? launchLease = launchLease;
+        private string? environmentFile = environmentFile;
 
         public IClientTransport Transport { get; } = transport;
 
@@ -2650,6 +2671,15 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         public PersistentConnectorUse? PersistentUse { get; } = persistentUse;
 
         public CancellationToken CancellationToken => launchLease?.CancellationToken ?? System.Threading.CancellationToken.None;
+
+        public void CleanupEnvironmentFile()
+        {
+            string? path = Interlocked.Exchange(ref environmentFile, null);
+            if (path is not null && File.Exists(path))
+            {
+                PodmanContainerTool.DeleteSecretFile(path);
+            }
+        }
 
         public async ValueTask ReleaseLaunchLeaseAsync()
         {
