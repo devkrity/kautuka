@@ -69,7 +69,7 @@ internal static class DescriptorFiles
         using SafeFileHandle directory = OpenOrCreateDirectory(views, folder);
         int exclusiveCreate = 1 | (OperatingSystem.IsMacOS() ? 0xa00 : 0xc0) | OpenNoFollow | OpenCloseOnExec;
         int parent = directory.DangerousGetHandle().ToInt32();
-        int fd = CreateExclusive(parent, name, exclusiveCreate); // 0600
+        int fd = CreateExclusive(parent, name, exclusiveCreate); // 0640
         if (fd < 0 && Marshal.GetLastPInvokeError() == 17) // EEXIST
         {
             using SafeFileHandle existing = OpenChecked(directory, name, FileFlags, FileType, requireRootOwnership: false);
@@ -80,20 +80,40 @@ internal static class DescriptorFiles
         GC.KeepAlive(directory);
         if (fd < 0) throw new IOException("Unable to create view file.");
         using var handle = new SafeFileHandle(fd, ownsHandle: true);
+        if (ChangeFileMode(fd, 0x1a0) != 0) // Ensure 0640 regardless of service umask so sandbox GID 0 can read.
+            throw new IOException("Unable to set view file permissions.");
         RandomAccess.Write(handle, bytes, 0);
     }
 
     // Darwin arm64 passes the variadic creation mode on the stack after x0-x7.
     private static int CreateExclusive(int directory, string name, int flags)
         => OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture == Architecture.Arm64
-            ? OpenAtAppleArm64(directory, name, flags, 0, 0, 0, 0, 0, 0x180)
-            : OpenAt(directory, name, flags, 0x180);
+            ? OpenAtAppleArm64(directory, name, flags, 0, 0, 0, 0, 0, 0x1a0)
+            : OpenAt(directory, name, flags, 0x1a0);
 
     private static SafeFileHandle OpenOrCreateDirectory(SafeFileHandle parent, string name)
     {
-        if (MakeDirectoryAt(parent, name, 0x1c0) != 0 && Marshal.GetLastPInvokeError() != 17) // 0700, EEXIST
+        if (MakeDirectoryAt(parent, name, 0x1e8) != 0 && Marshal.GetLastPInvokeError() != 17) // 0750, EEXIST
             throw new IOException("Unable to create view file directory.");
-        return OpenChecked(parent, name, DirectoryFlags, DirectoryType, requireRootOwnership: false);
+        SafeFileHandle directory = OpenChecked(parent, name, DirectoryFlags, DirectoryType, requireRootOwnership: false);
+        try
+        {
+            int fd = directory.DangerousGetHandle().ToInt32();
+            if (!OperatingSystem.IsMacOS()
+                && Statx(fd, "", 0x1000, RequiredStat, out StatxResult stat) == 0
+                && stat.Uid == GetEffectiveUserId()
+                && (stat.Mode & 0xfff) != 0x1e8
+                && ChangeFileMode(fd, 0x1e8) != 0)
+            {
+                throw new IOException("Unable to set view file directory permissions.");
+            }
+            return directory;
+        }
+        catch
+        {
+            directory.Dispose();
+            throw;
+        }
     }
 
     [StructLayout(LayoutKind.Explicit, Size = 256)]
@@ -118,6 +138,12 @@ internal static class DescriptorFiles
     [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
     [DllImport("libc", EntryPoint = "openat", SetLastError = true)]
     private static extern int OpenAt(int directory, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mode);
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    [DllImport("libc", EntryPoint = "fchmod", SetLastError = true)]
+    private static extern int ChangeFileMode(int descriptor, uint mode);
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    [DllImport("libc", EntryPoint = "geteuid")]
+    private static extern uint GetEffectiveUserId();
     [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
     [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
     private static extern int Statx(int descriptor, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, out StatxResult result);

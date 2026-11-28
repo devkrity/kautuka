@@ -599,6 +599,116 @@ public sealed class ConnectorContainerSpecBuilderTests
     }
 
     [Fact]
+    public async Task ViewFileMaterializationAllowsSandboxGroupReadWithoutWriteOrEscape()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return;
+        }
+
+        string root = Path.Combine("/tmp", "kautuka-view-perms-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        uint previousUmask = SetProcessUmask(0x3f); // 0077 restrictive service umask
+        try
+        {
+            // Simulate an existing 0700 view-files directory from before the permission fix.
+            string viewsDir = Path.Combine(root, "view-files");
+            Directory.CreateDirectory(viewsDir);
+            File.SetUnixFileMode(viewsDir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+            string materialized = ViewFileMaterializer.Materialize(ViewFileResult, root);
+            Assert.Contains("view-files/", materialized, StringComparison.Ordinal);
+        }
+        finally
+        {
+            _ = SetProcessUmask(previousUmask);
+        }
+
+        try
+        {
+            string viewsDir = Path.Combine(root, "view-files");
+            string hashDir = Assert.Single(Directory.GetDirectories(viewsDir));
+            string filePath = Path.Combine(hashDir, "notes.txt");
+
+            UnixFileMode expectedDirMode =
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                | UnixFileMode.GroupRead | UnixFileMode.GroupExecute;
+            UnixFileMode expectedFileMode =
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead;
+
+            Assert.Equal(expectedDirMode, File.GetUnixFileMode(viewsDir));
+            Assert.Equal(expectedDirMode, File.GetUnixFileMode(hashDir));
+            Assert.Equal(expectedFileMode, File.GetUnixFileMode(filePath));
+
+            // Prove inside a rootless user namespace matching Podman's --user 65532:65532 --group-add=0 mapping
+            // (where host UID/GID map to 0:0 and a child drops to 65532:65532 with supplementary group 0)
+            // that the sandbox user can read notes.txt, cannot write to it, and cannot replace it.
+            var startInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "unshare",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            startInfo.ArgumentList.Add("--user");
+            startInfo.ArgumentList.Add("--map-root-user");
+            startInfo.ArgumentList.Add("python3");
+            startInfo.ArgumentList.Add("-c");
+            startInfo.ArgumentList.Add("""
+                import errno, os, pathlib, sys
+                target = pathlib.Path(sys.argv[1])
+                try:
+                    os.setgroups([0])
+                    os.setgid(65532)
+                    os.setuid(65532)
+                except OSError as exc:
+                    if exc.errno in (errno.EINVAL, errno.EPERM):
+                        print("SKIP_SUBUID")
+                        sys.exit(0)
+                    raise
+                assert target.read_text(encoding="utf-8") == "hello"
+                try:
+                    target.write_text("tampered", encoding="utf-8")
+                    sys.exit("expected EACCES on write")
+                except PermissionError:
+                    pass
+                try:
+                    (target.parent / "extra.txt").write_text("tampered", encoding="utf-8")
+                    sys.exit("expected EACCES on directory write")
+                except PermissionError:
+                    pass
+                print("SANDBOX_READ_OK")
+                """);
+            startInfo.ArgumentList.Add(filePath);
+
+            using var process = System.Diagnostics.Process.Start(startInfo);
+            if (process is not null)
+            {
+                string stdout = await process.StandardOutput.ReadToEndAsync(TestContext.Current.CancellationToken);
+                string stderr = await process.StandardError.ReadToEndAsync(TestContext.Current.CancellationToken);
+                await process.WaitForExitAsync(TestContext.Current.CancellationToken);
+                if (process.ExitCode == 0)
+                {
+                    Assert.True(
+                        stdout.Contains("SANDBOX_READ_OK", StringComparison.Ordinal)
+                        || stdout.Contains("SKIP_SUBUID", StringComparison.Ordinal),
+                        $"Unexpected userns output: stdout={stdout}; stderr={stderr}");
+                }
+            }
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+#pragma warning disable SYSLIB1054
+    [System.Runtime.InteropServices.DefaultDllImportSearchPaths(System.Runtime.InteropServices.DllImportSearchPath.SafeDirectories)]
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "umask")]
+    private static extern uint SetProcessUmask(uint mask);
+#pragma warning restore SYSLIB1054
+
+    [Fact]
     public void WindowsHostCommandRejectsAQuoteThatCmdWouldReparse()
     {
         WorkspaceMcpContainerConnectorDefinition connector = CreateConnector() with
