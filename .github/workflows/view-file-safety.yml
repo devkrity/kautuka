@@ -40,7 +40,7 @@ jobs:
         with:
           global-json-file: global.json
       - name: Save, open, replace, limit, and refuse links
-        run: dotnet test --project src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj -- --filter-class '*ViewFileMaterializerTests' --filter-class '*WorkspaceFileContainmentTests' --filter-class '*GatewayConnectCertificateMaterialTests' --filter-class '*U2_PolicyStoreTests' --filter-class '*NativeDirectoryFlagTests'
+        run: dotnet test --project src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj -- --filter-class '*ViewFileMaterializerTests' --filter-class '*WorkspaceFileContainmentTests' --filter-class '*GatewayConnectCertificateMaterialTests' --filter-class '*U2_PolicyStoreTests' --filter-class '*NativeDirectoryFlagTests' --filter-class '*NativeSqliteAssetTests'
 
       - name: Settings, notices, secret-file lifetime, and native downloads
         run: dotnet test --project src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj --no-build -- --filter-method '*SandboxEnvironmentSettingsRoundTripAndRefuseUnsafeEntriesBeforeSaving' --filter-method '*SandboxStartupFiltersHostSensitiveEnvironmentAndReusesExistingV0127Sandbox' --filter-method '*EphemeralEnvironmentFileIsRestrictedToTheProcessOwner' --filter-method '*UnsupportedConnectorSettingsAreRefusedOnSaveAndFlaggedAtStartup' --filter-method '*UpgradeIsolatesCredentialedBindingsOnceAndRejectsNewSandboxBindings' --filter-method '*CallToolMaterializesViewFilesIntoDesiredWorkspaceOnly' --filter-method '*NativeConnectorViewFilesAndOrdinaryAgentFilesCanBeDownloaded' --filter-method '*DownloadRejectsHardLinkThatLeavesTheWorkspace' --filter-method '*DownloadRejectsJunctionThatLeavesTheWorkspace'

@@ -11,7 +11,10 @@
       "licenseFiles": ["LICENSE-MIT", "LICENSE-APACHE"],
       "artifacts": {
         "src/backend/Kautuka.Gateway/NativeAssets/sqlite-vec/linux-x64/vec0.so": "5923730861b86c707cca5602b5f91092f9e52a46706dbc6e269fd4bb9c4498e8",
-        "src/backend/Kautuka.Gateway/NativeAssets/sqlite-vec/win-x64/vec0.dll": "fcf98662a7ad9dce394b96a88f91032047823831b951c76636787c312a6476e6"
+        "src/backend/Kautuka.Gateway/NativeAssets/sqlite-vec/win-x64/vec0.dll": "fcf98662a7ad9dce394b96a88f91032047823831b951c76636787c312a6476e6",
+        "src/backend/Kautuka.Gateway/NativeAssets/sqlite-vec/linux-arm64/vec0.so": "0b84cbd06418ca3040827deddd650539be05be0f657952426b926c8606217437",
+        "src/backend/Kautuka.Gateway/NativeAssets/sqlite-vec/osx-x64/vec0.dylib": "d39d33d16d302d57440d9a9cdbe3cc095e8324aa96b979b5171f545a6346996d",
+        "src/backend/Kautuka.Gateway/NativeAssets/sqlite-vec/osx-arm64/vec0.dylib": "193e480c50b59a55977d166f4aaf0e1bc8832d6963516e5950f39e4d2ce0b793"
       }
     },
     {
