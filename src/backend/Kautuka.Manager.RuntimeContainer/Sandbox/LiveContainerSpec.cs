@@ -21,7 +21,7 @@ internal static class LiveContainerSpec
     {
         ArgumentNullException.ThrowIfNull(context);
         string[] env = [.. context.ContainerEnvironment
-            .Where(static pair => !string.IsNullOrWhiteSpace(pair.Key) && !string.IsNullOrWhiteSpace(pair.Value))
+            .Where(static pair => Hosting.ConnectorContainerSpecBuilder.AllowsHostProcessEnvironment(pair.Key) && !string.IsNullOrWhiteSpace(pair.Value))
             .Select(static pair => pair.Key + "=" + pair.Value)];
         return new LiveContainerExpectation(
             networkName,

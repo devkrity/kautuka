@@ -178,6 +178,90 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         }
     }
 
+    [Fact]
+    public async Task PersistentConnectorStartFiltersHostProcessEnvironment()
+    {
+        string root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var token = TestContext.Current.CancellationToken;
+            string image = "quay.io/devkrity/kautuka-base@sha256:" + new string('a', 64);
+            string workspacePath = Path.Combine(root, "users", "user", "agents", "agent");
+            Directory.CreateDirectory(workspacePath);
+            var workspace = new ContainerContext("agent", "agent", "user", workspacePath, "/workspace", image, 30, "512m", 1, [], new Dictionary<string, string>());
+            var connector = new WorkspaceMcpContainerConnectorDefinition(
+                "user::persistent",
+                image,
+                "node",
+                ["server.js"],
+                true,
+                false,
+                null,
+                "node",
+                [
+                    new("TOKEN", "allowed-value"),
+                    new("LD_PRELOAD", "/tmp/poison.so"),
+                    new("CONTAINERS_CONF", "/tmp/containers.conf"),
+                    new("DOCKER_HOST", "tcp://127.0.0.1:2375"),
+                    new("PODMAN_CUSTOM", "poison"),
+                    new("PATH", "/tmp/bin"),
+                ],
+                30,
+                600);
+            var desired = new WorkspaceDesiredStateStore();
+            _ = desired.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap,
+                new ManagerRuntimeSettings(new ManagerWorkspaceDefinition { BaseRoot = root }, new ManagerSandboxRuntimeDefinition { Image = image, DefaultTimeout = 30 }, new WorkspaceTelemetryDefinition()),
+                [workspace], [connector], []);
+
+            IReadOnlyDictionary<string, string>? observedRunEnvironment = null;
+            var runner = new PodmanCommandRunner((args, env, _) =>
+            {
+                if (args[0] == "run")
+                {
+                    observedRunEnvironment = new Dictionary<string, string>(env, StringComparer.Ordinal);
+                    return Task.FromResult(new PodmanCommandResult(125, string.Empty, "synthetic stop after capture", ProcessTerminationReason.NonZeroExit));
+                }
+
+                if (args[0] == "image" && args.Count > 1 && args[1] == "inspect")
+                {
+                    return Task.FromResult(new PodmanCommandResult(0, "sha256:" + new string('a', 64), string.Empty, ProcessTerminationReason.Completed));
+                }
+
+                if (args[0] == "inspect")
+                {
+                    return Task.FromResult(new PodmanCommandResult(125, string.Empty, "no such container", ProcessTerminationReason.NonZeroExit));
+                }
+
+                if (args[0] == "container" && args.Count > 1 && args[1] == "exists")
+                {
+                    return Task.FromResult(new PodmanCommandResult(1, string.Empty, "no such container", ProcessTerminationReason.NonZeroExit));
+                }
+
+                return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+            });
+
+            using var policyStore = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
+            var launchGate = new WorkloadLaunchGate(new TestWorkloadStartupState(true), policyStore);
+            await using var service = new WorkspaceContainerConnectorExecutionService(
+                desired,
+                runner,
+                new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance, new RuntimeImageAllowlist(1, [new("kautuka-base", image, null)])),
+                new PodmanContainerTool(runner),
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+                addressAllocator: new WorkloadAddressAllocator(Path.Combine(root, "ip-cursor.json")),
+                workloadLaunchGate: launchGate);
+
+            var result = await service.CallToolAsync(connector.ConnectorId, null, "ping", "{}", 30, false, workspace, WorkspaceMcpExecutionContext.Isolated, token);
+            Assert.False(result.Ok);
+            Assert.NotNull(observedRunEnvironment);
+            Assert.Equal("TOKEN", Assert.Single(observedRunEnvironment).Key);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData("old", "one")]
     [InlineData("server", "old")]

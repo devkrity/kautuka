@@ -179,14 +179,36 @@ internal static class ConnectorContainerSpecBuilder
     }
 
     public static Dictionary<string, string?> BuildTransportEnvironment(WorkspaceMcpContainerConnectorDefinition connector)
-        => ForwardedEnvironment(connector)
+        => FilterHostProcessEnvironment(connector.Environment)
             .ToDictionary(static pair => pair.Key, static pair => (string?)pair.Value, StringComparer.Ordinal);
+
+    internal static Dictionary<string, string> FilterHostProcessEnvironment(IEnumerable<KeyValuePair<string, string>>? environment)
+    {
+        var filtered = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (environment is null)
+        {
+            return filtered;
+        }
+
+        foreach ((string key, string value) in environment)
+        {
+            if (AllowsHostProcessEnvironment(key))
+            {
+                filtered[key] = value;
+            }
+        }
+
+        return filtered;
+    }
 
     internal static bool ForwardsEnvironmentKey(string key)
         => !string.IsNullOrWhiteSpace(key) && !IsPackageIndexBypassKey(key);
 
-    internal static bool AllowsRuntimeEnvironmentOverride(string key)
+    internal static bool AllowsHostProcessEnvironment(string key)
         => ForwardsEnvironmentKey(key) && !IsHostProcessSensitiveKey(key);
+
+    internal static bool AllowsRuntimeEnvironmentOverride(string key)
+        => AllowsHostProcessEnvironment(key);
 
     private static readonly HashSet<string> hostProcessSensitiveKeys = new(StringComparer.OrdinalIgnoreCase)
     {

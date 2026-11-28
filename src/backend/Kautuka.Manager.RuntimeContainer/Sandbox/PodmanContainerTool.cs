@@ -279,7 +279,7 @@ public sealed class PodmanContainerTool(
             context.DefaultTimeoutSeconds,
             cancellationToken,
             containerName,
-            context.ContainerEnvironment).ConfigureAwait(false);
+            Hosting.ConnectorContainerSpecBuilder.FilterHostProcessEnvironment(context.ContainerEnvironment)).ConfigureAwait(false);
 
         bool hasCreatedId = Hosting.PodmanContainerIdentity.TryReadCanonicalLaunchOutput(createResult.StdOut, out string createdId);
         if (hasCreatedId && workloadRegistry is not null
@@ -877,7 +877,8 @@ public sealed class PodmanContainerTool(
         var envList = new List<KeyValuePair<string, string>>();
         foreach (KeyValuePair<string, string> kv in context.ContainerEnvironment)
         {
-            if (!string.IsNullOrWhiteSpace(kv.Value))
+            if (Hosting.ConnectorContainerSpecBuilder.AllowsHostProcessEnvironment(kv.Key)
+                && !string.IsNullOrWhiteSpace(kv.Value))
             {
                 // Pass --env KEY (without value) so Podman inherits values from ProcessStartInfo.Environment without CLI exposure.
                 envList.Add(new KeyValuePair<string, string>(kv.Key, string.Empty));

@@ -2098,9 +2098,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     }
 
     private static Dictionary<string, string> BuildPodmanEnvironment(WorkspaceMcpContainerConnectorDefinition connector)
-        => connector.Environment
-            .Where(static pair => ConnectorContainerSpecBuilder.ForwardsEnvironmentKey(pair.Key))
-            .ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.Ordinal);
+        => ConnectorContainerSpecBuilder.FilterHostProcessEnvironment(connector.Environment);
 
     private static bool UsesImageDefaultCommand(WorkspaceMcpContainerConnectorDefinition connector)
     {
