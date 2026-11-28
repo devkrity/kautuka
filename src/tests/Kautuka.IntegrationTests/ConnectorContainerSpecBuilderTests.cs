@@ -562,6 +562,13 @@ public sealed class ConnectorContainerSpecBuilderTests
         try
         {
             string result = ViewFileMaterializer.Materialize(ViewFileResult, root);
+            if (!OperatingSystem.IsLinux() || System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture != System.Runtime.InteropServices.Architecture.X64)
+            {
+                Assert.Contains("\"unavailable\":true", result, StringComparison.Ordinal);
+                Assert.Empty(Directory.EnumerateFileSystemEntries(root));
+                return;
+            }
+
             Assert.Contains("view-files/", result, StringComparison.Ordinal);
             string path = Assert.Single(Directory.GetFiles(root, "*.txt", SearchOption.AllDirectories));
             File.WriteAllText(path, "previous");
@@ -584,13 +591,57 @@ public sealed class ConnectorContainerSpecBuilderTests
             string stored = ViewFileMaterializer.Materialize(result, root);
             Assert.DoesNotContain("aGVsbG8=", stored, StringComparison.Ordinal);
             Assert.DoesNotContain("\"files\"", stored, StringComparison.Ordinal);
-            Assert.Contains("view-files/", stored, StringComparison.Ordinal);
-            string saved = Directory.GetFiles(root, "notes.txt", SearchOption.AllDirectories).Single();
-            Assert.Equal("hello", File.ReadAllText(saved));
+            if (OperatingSystem.IsLinux() && System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.X64)
+            {
+                Assert.Contains("view-files/", stored, StringComparison.Ordinal);
+                string saved = Directory.GetFiles(root, "notes.txt", SearchOption.AllDirectories).Single();
+                Assert.Equal("hello", File.ReadAllText(saved));
+            }
+            else
+            {
+                Assert.Contains("\"unavailable\":true", stored, StringComparison.Ordinal);
+                Assert.DoesNotContain("\"path\"", stored, StringComparison.Ordinal);
+                Assert.Empty(Directory.EnumerateFileSystemEntries(root));
+            }
 
             string stripped = ViewFileMaterializer.Materialize(result, hostDirectory: null);
             Assert.Contains("\"unavailable\":true", stripped, StringComparison.Ordinal);
             Assert.DoesNotContain("aGVsbG8=", stripped, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void DescriptorFilesUsesGenericErrorMessagesAndRequiresLinuxX64()
+    {
+        if (!OperatingSystem.IsLinux() || System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture != System.Runtime.InteropServices.Architecture.X64)
+        {
+            Assert.Throws<PlatformNotSupportedException>(() => DescriptorFiles.OpenAbsoluteDirectory("/tmp", requireRootOwnership: false));
+            return;
+        }
+
+        InvalidDataException relativeError = Assert.Throws<InvalidDataException>(() => DescriptorFiles.OpenAbsoluteDirectory("relative", requireRootOwnership: false));
+        Assert.DoesNotContain("trusted appliance release input", relativeError.Message, StringComparison.OrdinalIgnoreCase);
+
+        InvalidDataException traversalError = Assert.Throws<InvalidDataException>(() => DescriptorFiles.OpenAbsoluteDirectory("/tmp/../etc", requireRootOwnership: false));
+        Assert.DoesNotContain("trusted appliance release input", traversalError.Message, StringComparison.OrdinalIgnoreCase);
+
+        string missingPath = "/tmp/kautuka-missing-" + Guid.NewGuid().ToString("N");
+        FileNotFoundException missingError = Assert.Throws<FileNotFoundException>(() => DescriptorFiles.OpenAbsoluteDirectory(missingPath, requireRootOwnership: false));
+        Assert.DoesNotContain("trusted appliance release input", missingError.Message, StringComparison.OrdinalIgnoreCase);
+
+        string root = Path.Combine("/tmp", "kautuka-descriptor-generic-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            string regularFile = Path.Combine(root, "plain.txt");
+            File.WriteAllText(regularFile, "data");
+            using var dirHandle = DescriptorFiles.OpenAbsoluteDirectory(root, requireRootOwnership: false);
+            IOException typeMismatch = Assert.Throws<IOException>(() => DescriptorFiles.OpenChecked(dirHandle, "plain.txt", DescriptorFiles.FileFlags, DescriptorFiles.DirectoryType, requireRootOwnership: false));
+            Assert.DoesNotContain("trusted appliance release input", typeMismatch.Message, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {

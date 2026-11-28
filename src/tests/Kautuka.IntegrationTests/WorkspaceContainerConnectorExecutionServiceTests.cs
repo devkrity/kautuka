@@ -166,9 +166,17 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
 
             var call = await service.CallToolAsync(connector.ConnectorId, null, "render", "{}", 30, false, spoofedCallerWorkspace, WorkspaceMcpExecutionContext.AgentSandbox, token);
             Assert.True(call.Ok, call.FailureMessage);
-            Assert.Contains("view-files/", call.Result, StringComparison.Ordinal);
-            string written = Assert.Single(Directory.GetFiles(desiredWorkspacePath, "report.txt", SearchOption.AllDirectories));
-            Assert.Equal("hello", await File.ReadAllTextAsync(written, token));
+            if (OperatingSystem.IsLinux() && System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.X64)
+            {
+                Assert.Contains("view-files/", call.Result, StringComparison.Ordinal);
+                string written = Assert.Single(Directory.GetFiles(desiredWorkspacePath, "report.txt", SearchOption.AllDirectories));
+                Assert.Equal("hello", await File.ReadAllTextAsync(written, token));
+            }
+            else
+            {
+                Assert.Contains("\"unavailable\":true", call.Result, StringComparison.Ordinal);
+                Assert.Empty(Directory.EnumerateFileSystemEntries(desiredWorkspacePath));
+            }
             Assert.Empty(Directory.EnumerateFileSystemEntries(outside));
         }
         finally
