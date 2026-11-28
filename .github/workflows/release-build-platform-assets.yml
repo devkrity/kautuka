@@ -418,6 +418,7 @@ jobs:
       - name: Sign Windows appliance installer
         shell: pwsh
         env:
+          RELEASE_CHANNEL: ${{ inputs.channel }}
           WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
           WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
           WINDOWS_SIGNING_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGNING_TIMESTAMP_URL }}
@@ -427,6 +428,11 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_BASE64) -or
               [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PASSWORD)) {
             Write-Host 'Skipping Authenticode signing because Windows signing secrets are not configured.'
+            if ($env:RELEASE_CHANNEL -eq 'stable') {
+              Write-Warning 'The stable Windows installer is unsigned. Configure Authenticode credentials in windows-signing.'
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '## Unsigned stable Windows installer'
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value 'Windows could not verify the publisher for this release. Configure the Authenticode certificate and password in the windows-signing environment before publishing a signed installer.'
+            }
             Set-Content -LiteralPath $signingStatusPath -Value @'
           UNSIGNED
 

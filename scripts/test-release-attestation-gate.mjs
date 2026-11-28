@@ -52,3 +52,10 @@ assert.ok(job.indexOf(attest) < job.indexOf(upload),
   'the attestation must run before uploading the installer artifact');
 
 console.log('Release attestation gate tests passed: dry runs skip remote attestation; real runs require it before installer upload.');
+
+const windowsJob = workflow.split('  build-windows-installer-assets:')[1].split('  build-linux-installer-assets:')[0];
+assert.match(windowsJob, /environment: windows-signing/u);
+assert.match(windowsJob, /RELEASE_CHANNEL: \$\{\{ inputs.channel \}\}/u);
+assert.match(windowsJob, /if \(\$env:RELEASE_CHANNEL -eq 'stable'\)/u);
+assert.match(windowsJob, /Add-Content -LiteralPath \$env:GITHUB_STEP_SUMMARY -Value '## Unsigned stable Windows installer'/u);
+assert.match(windowsJob, /Write-Warning 'The stable Windows installer is unsigned/u);
