@@ -86,6 +86,7 @@ internal sealed partial class GatewayState
     internal KautukaDatabase Database => database;
     internal ILogger<GatewayState> Logger => logger;
     internal List<string> StartupDriftNotes { get; } = [];
+    internal ConcurrentDictionary<string, IReadOnlyList<string>> AgentOwnerNotices { get; } = new(StringComparer.Ordinal);
     internal object SettingsWriteSyncRoot => settingsWriteLock;
 
     private GatewayState(

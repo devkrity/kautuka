@@ -616,7 +616,8 @@ internal sealed record GatewayAgentListItem(
     string OwnerUserId,
     GatewayAgentRuntimePayload? Runtime = null,
     string[]? CallerAgentIds = null,
-    long Revision = 0);
+    long Revision = 0,
+    string[]? Notices = null);
 
 internal sealed record GatewayAgentsResponse(GatewayAgentListItem[] Agents);
 
@@ -879,7 +880,8 @@ internal sealed record GatewayConnectorListItem(
     RemoteMcpCredential[]? Credentials = null,
     RemoteMcpHeader[]? HttpHeaders = null,
     bool RequiresCredentialReentry = false,
-    bool? DefaultEnabled = null);
+    bool? DefaultEnabled = null,
+    bool UsesCredentials = false);
 
 internal sealed record GatewayConnectorsResponse(GatewayConnectorListItem[] Connectors);
 

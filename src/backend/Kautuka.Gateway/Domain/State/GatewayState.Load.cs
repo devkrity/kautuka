@@ -91,7 +91,8 @@ internal sealed partial class GatewayState
                 continue;
             }
 
-            var migrated = new List<string>();
+            List<string> persistedNotices = DeserializeStringList(ReadSetting(connection, GetAgentOwnerNoticesSettingKey(row.Id))) ?? [];
+            var migrated = new List<(string ConnectorId, bool KeepsAgentFiles, string Notice)>();
             var bindings = definition.McpBindings.Select(binding =>
             {
                 if (McpAgentToolProvider.NormalizeBindingContext(binding.Context) != Kautuka.Manager.Protos.WorkspaceMcpExecutionContext.AgentSandbox
@@ -99,8 +100,15 @@ internal sealed partial class GatewayState
                     || !GatewayCatalogStore.ToDefinition(server).RequiresIsolation(authCatalog))
                     return binding;
 
-                migrated.Add(binding.ConnectorId);
-                return new AgentMcpBindingDefinition { ConnectorId = binding.ConnectorId, Context = "OwnContext" };
+                bool keepsAgentFiles = definition.Sandbox.Enabled
+                    && !string.Equals(server.Transport, "http", StringComparison.OrdinalIgnoreCase);
+                string targetContext = keepsAgentFiles ? "OwnContextWithAgentFiles" : "OwnContext";
+                string displayName = string.IsNullOrWhiteSpace(server.Name) ? server.Id : server.Name;
+                string ownerNotice = keepsAgentFiles
+                    ? $"Connector {displayName} now runs separately for safety. It can still read your agent's files but can't change them."
+                    : $"Connector {displayName} now runs separately for safety.";
+                migrated.Add((binding.ConnectorId, keepsAgentFiles, ownerNotice));
+                return new AgentMcpBindingDefinition { ConnectorId = binding.ConnectorId, Context = targetContext };
             }).ToArray();
             definition = ApplyRegistryMetadata(definition, row.Scope, row.Enabled != 0, bindings);
             if (migrated.Count > 0)
@@ -112,11 +120,26 @@ internal sealed partial class GatewayState
                     state.McpServers.ToDictionary(static pair => pair.Key, static pair => pair.Value.Name, StringComparer.Ordinal),
                     state.Skills.ToDictionary(static pair => pair.Key, static pair => pair.Value.Name, StringComparer.Ordinal));
                 revision = agentDefinitionStore.SaveDefinition(row.StorageLocatorKey, definition, snapshotMetadata);
-                foreach (string connectorId in migrated)
+                foreach ((string connectorId, bool keepsAgentFiles, string ownerNotice) in migrated)
                 {
                     LogIsolatedBindings(state.Logger, row.Id, revision, connectorId);
-                    state.StartupDriftNotes.Add($"Agent '{row.Id}' connector '{connectorId}' binding moved from agent sandbox to isolated execution at revision {revision}.");
+                    string targetDescription = keepsAgentFiles ? "isolated execution with agent files" : "isolated execution";
+                    state.StartupDriftNotes.Add($"Agent '{row.Id}' connector '{connectorId}' binding moved from agent sandbox to {targetDescription} at revision {revision}.");
+                    if (!persistedNotices.Contains(ownerNotice, StringComparer.Ordinal))
+                    {
+                        persistedNotices.Add(ownerNotice);
+                    }
                 }
+
+                string noticesJson = JsonSerializer.Serialize(persistedNotices.ToArray(), KautukaJsonContext.Default.StringArray);
+                connection.Execute(
+                    "INSERT INTO system_settings (key, value_json, updated_at) VALUES (@key, @valueJson, @updatedAt) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at",
+                    new { key = GetAgentOwnerNoticesSettingKey(row.Id), valueJson = noticesJson, updatedAt = Timestamp() });
+            }
+
+            if (persistedNotices.Count > 0)
+            {
+                state.AgentOwnerNotices[row.Id] = [.. persistedNotices];
             }
 
             AgentDefinitionSerializer.SerializedAgentDefinition serialized = AgentDefinitionSerializer.Serialize(definition);

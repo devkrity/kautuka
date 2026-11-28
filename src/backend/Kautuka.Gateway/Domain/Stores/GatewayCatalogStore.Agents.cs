@@ -127,6 +127,7 @@ internal sealed partial class GatewayCatalogStore
         state.AgentStorageLocators[agentId] = storageLocatorKey;
 
         state.Agents[agentId] = agent;
+        state.ClearAgentOwnerNotices(agentId);
         await RebuildAgentWorkspacesForAllUsersAsync(agentId, cancellationToken).ConfigureAwait(false);
         state.TopologyHash = state.ComputeTopologyHashFromState();
         await desiredStatePublisher.TryPublishCurrentAsync("agent-save", cancellationToken).ConfigureAwait(false);
@@ -187,6 +188,7 @@ internal sealed partial class GatewayCatalogStore
         }
         state.AgentStorageLocators.TryRemove(agentId, out _);
         bool removed = state.Agents.TryRemove(agentId, out _);
+        state.ClearAgentOwnerNotices(agentId);
 
         try
         {

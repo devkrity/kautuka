@@ -341,24 +341,24 @@ internal static class GatewayConnectorEndpointMappings
             return Results.Json(ToConnectorPayload(saved), KautukaJsonContext.Default.GatewayConnectorListItem);
         });
 
-        app.MapGet("/api/connectors", (IGatewayCatalogStore catalog, ConnectorUserEnablement enablement, IGatewayAuthGuard auth, HttpContext context) =>
+        app.MapGet("/api/connectors", (IGatewayCatalogStore catalog, ConnectorUserEnablement enablement, ConnectorAuthCatalog connectorAuth, IGatewayAuthGuard auth, HttpContext context) =>
         {
             if (!auth.TryAuthorize(context, out GatewayUser? user) || user is null)
                 return Results.Unauthorized();
 
             return Results.Json(
                 new GatewayConnectorsResponse([.. catalog.ListMcpServers().Where(server => GatewayOwnershipAccess.CanAccessConnector(user, server))
-                    .Select(server => ToConnectorPayload(server) with { Enabled = enablement.IsEnabled(user.Id, server.Id, server.Enabled) })]),
+                    .Select(server => ToConnectorPayload(server, connectorAuth) with { Enabled = enablement.IsEnabled(user.Id, server.Id, server.Enabled) })]),
                 KautukaJsonContext.Default.GatewayConnectorsResponse);
         });
 
-        app.MapGet("/api/connectors/{serverId}", (string serverId, IGatewayCatalogStore catalog, ConnectorUserEnablement enablement, IGatewayAuthGuard auth, HttpContext context) =>
+        app.MapGet("/api/connectors/{serverId}", (string serverId, IGatewayCatalogStore catalog, ConnectorUserEnablement enablement, ConnectorAuthCatalog connectorAuth, IGatewayAuthGuard auth, HttpContext context) =>
         {
             if (!auth.TryAuthorize(context, out GatewayUser? user) || user is null)
                 return Results.Unauthorized();
 
             return catalog.TryGetMcpServer(serverId, out GatewayMcpServer? server) && server is not null && GatewayOwnershipAccess.CanAccessConnector(user, server)
-                ? Results.Json(ToConnectorPayload(server) with { Enabled = enablement.IsEnabled(user.Id, serverId, server.Enabled) }, KautukaJsonContext.Default.GatewayConnectorListItem)
+                ? Results.Json(ToConnectorPayload(server, connectorAuth) with { Enabled = enablement.IsEnabled(user.Id, serverId, server.Enabled) }, KautukaJsonContext.Default.GatewayConnectorListItem)
                 : Results.Json(new GatewayErrorResponse("Connector not found"), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status404NotFound);
         });
 
@@ -765,7 +765,7 @@ internal static class GatewayConnectorEndpointMappings
             AllowPrivateDestination = true,
         };
 
-    internal static GatewayConnectorListItem ToConnectorPayload(GatewayMcpServer server) => new(
+    internal static GatewayConnectorListItem ToConnectorPayload(GatewayMcpServer server, ConnectorAuthCatalog? connectorAuth = null) => new(
         server.Id,
         server.Name,
         server.Description,
@@ -799,7 +799,8 @@ internal static class GatewayConnectorEndpointMappings
         [.. server.Credentials ?? []],
         [.. server.HttpHeaders ?? []],
         server.RequiresCredentialReentry,
-        server.Enabled);
+        server.Enabled,
+        GatewayCatalogStore.ToDefinition(server).RequiresIsolation(connectorAuth));
 
     private static bool HasCurrentLocalTools(GatewayMcpServer server)
         => !string.Equals(server.Transport, "container", StringComparison.OrdinalIgnoreCase)

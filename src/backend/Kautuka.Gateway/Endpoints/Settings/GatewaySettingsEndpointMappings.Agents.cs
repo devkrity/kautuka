@@ -24,8 +24,9 @@ internal static partial class GatewaySettingsEndpointMappings
                     catalog.ListAgents()
                         .Where(agent => GatewayOwnershipAccess.CanAccessAgent(user, agent))
                         .Select(agent => GatewayAgentSettingsMapper.ToListItem(
-                        agent,
-                        settings.GetAgentPersonaProfile(agent.Id)))]),
+                            agent,
+                            settings.GetAgentPersonaProfile(agent.Id),
+                            GatewayOwnershipAccess.CanManageAgent(user, agent) ? catalog.GetAgentOwnerNotices(agent.Id) : null))]),
                 KautukaJsonContext.Default.GatewayAgentsResponse);
         });
 

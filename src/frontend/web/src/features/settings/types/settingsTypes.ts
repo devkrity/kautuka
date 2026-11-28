@@ -164,6 +164,7 @@ export interface AgentSettingsEntry {
   toolExposure: AgentToolExposure;
   runtime?: AgentRuntimeSettings;
   revision?: number;
+  notices?: string[] | null;
   session: {
     historyEnabled: boolean;
     maxHistoryRuns: number;

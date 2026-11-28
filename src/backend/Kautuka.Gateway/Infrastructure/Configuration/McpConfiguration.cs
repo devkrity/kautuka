@@ -114,7 +114,8 @@ internal sealed class McpServerDefinition
             || HttpHeaders.Any(header => !string.IsNullOrWhiteSpace(header.CredentialKey))
             || auth?.Find(Id) is not null;
 
-    internal string IsolationMessage => $"Connector '{Id}' uses credentials. Choose isolated execution or isolated execution with agent files.";
+    internal string IsolationMessage =>
+        $"Connector '{(string.IsNullOrWhiteSpace(Name) ? Id : Name)}' uses sign-in or secret keys and must run in isolated execution (with or without read-only access to your agent's files), not inside the agent sandbox.";
 
     public string CreatedAt { get; init; } = string.Empty;
     public string UpdatedAt { get; init; } = string.Empty;

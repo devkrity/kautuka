@@ -25,6 +25,22 @@ internal sealed partial class GatewayState
         }
     }
 
+    internal static string GetAgentOwnerNoticesSettingKey(string agentId) => "agent.owner_notices." + agentId;
+
+    internal void ClearAgentOwnerNotices(string agentId)
+    {
+        AgentOwnerNotices.TryRemove(agentId, out _);
+        lock (settingsWriteLock)
+        {
+            using var connection = new SqliteConnection(database.ConnectionString);
+            connection.Open();
+            connection.Execute("PRAGMA busy_timeout=5000;");
+            connection.Execute(
+                "DELETE FROM system_settings WHERE key = @key",
+                new { key = GetAgentOwnerNoticesSettingKey(agentId) });
+        }
+    }
+
     private static void UpsertSetting(SqliteConnection connection, SqliteTransaction transaction, string key, string value)
     {
         connection.Execute(

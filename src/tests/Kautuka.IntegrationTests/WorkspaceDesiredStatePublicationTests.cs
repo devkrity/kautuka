@@ -948,24 +948,114 @@ public sealed class WorkspaceDesiredStatePublicationTests
             McpBindings = [new GatewayAgentMcpBindingPayload { ConnectorId = "secret", Context = "AgentContext" }]
         };
         var previous = store.SaveAgent("agent", request, "owner");
+        var sandboxDisabledAgent = store.SaveAgent(
+            "agent-no-sandbox",
+            new GatewayAgentUpsertRequest
+            {
+                Sandbox = new GatewayAgentSandboxPayload { Enabled = false },
+                McpBindings = [new GatewayAgentMcpBindingPayload { ConnectorId = "secret", Context = "OwnContext" }],
+            },
+            "owner");
+        // Simulate a v0.1.27 stored binding where sandbox was off or remote connector had AgentContext.
+        _ = definitionStore.SaveDefinition(
+            definitionStore.GetStorageLocatorKey("agent-no-sandbox"),
+            new AgentDefinition
+            {
+                Id = "agent-no-sandbox",
+                Name = "agent-no-sandbox",
+                Scope = GatewayOwnershipScopes.User,
+                Enabled = true,
+                Sandbox = new AgentSandboxDefinition { Enabled = false },
+                McpBindings = [new AgentMcpBindingDefinition { ConnectorId = "secret", Context = "AgentContext" }],
+            });
         topologyWriter.SaveMcpServer(new McpServerDefinition
         {
             Id = "secret",
             Name = "Secret",
             Transport = McpTransport.Container,
+            ContainerImage = "example/secret@sha256:" + new string('b', 64),
             EnvKeys = ["TOKEN"]
         });
         GatewayState Reload() => GatewayState.FromDatabase(database, NullLogger<GatewayState>.Instance,
             new GatewayMemoryStore(), definitionStore, configuration, new NoOpWorkspaceRuntimeTool());
         var upgraded = Reload();
-        Assert.Equal("OwnContext", Assert.Single(upgraded.Agents["agent"].McpBindings!).Context);
+        Assert.Equal("OwnContextWithAgentFiles", Assert.Single(upgraded.Agents["agent"].McpBindings!).Context);
+        Assert.Equal("OwnContext", Assert.Single(upgraded.Agents["agent-no-sandbox"].McpBindings!).Context);
         Assert.Equal(previous.Revision + 1, upgraded.Agents["agent"].Revision);
-        Assert.Contains("isolated execution", Assert.Single(upgraded.StartupDriftNotes), StringComparison.Ordinal);
+        Assert.Equal(sandboxDisabledAgent.Revision + 2, upgraded.Agents["agent-no-sandbox"].Revision);
+        Assert.Equal(2, upgraded.StartupDriftNotes.Count);
+        Assert.Contains(upgraded.StartupDriftNotes, static note => note.Contains("isolated execution with agent files", StringComparison.Ordinal));
+        Assert.Equal(
+            "Connector Secret now runs separately for safety. It can still read your agent's files but can't change them.",
+            Assert.Single(upgraded.AgentOwnerNotices["agent"]));
+        Assert.Equal(
+            "Connector Secret now runs separately for safety.",
+            Assert.Single(upgraded.AgentOwnerNotices["agent-no-sandbox"]));
+
+        // Verify the migrated OwnContextWithAgentFiles binding still mounts the agent workspace read-only (/workspace:ro).
+        var runtimeResolver = new WorkspaceRuntimeContextResolver(
+            new SqlitePlatformConfigurationProvider(database, definitionStore),
+            configuration,
+            database);
+        Assert.Equal(
+            Kautuka.Manager.Protos.WorkspaceMcpExecutionContext.IsolatedWithAgentFiles,
+            McpAgentToolProvider.NormalizeBindingContext(Assert.Single(upgraded.Agents["agent"].McpBindings!).Context));
+        WorkspaceRuntimeContext agentWorkspace = runtimeResolver.ResolveAgentWorkspace("agent", "owner");
+        List<string> connectorRunArgs = Kautuka.Manager.RuntimeContainer.Hosting.ConnectorContainerSpecBuilder.BuildRun(
+            new Kautuka.Manager.RuntimeContainer.Hosting.WorkspaceMcpContainerConnectorDefinition(
+                "owner::secret",
+                "example/secret@sha256:" + new string('b', 64),
+                "node",
+                ["server.js"],
+                true,
+                false,
+                null,
+                "node",
+                [],
+                30,
+                600),
+            "secret-test",
+            Kautuka.Manager.Protos.WorkspaceMcpExecutionContext.IsolatedWithAgentFiles,
+            new Kautuka.Manager.RuntimeContainer.Sandbox.Models.ContainerContext(
+                agentWorkspace.ScopeType,
+                agentWorkspace.ScopeId,
+                agentWorkspace.UserId,
+                agentWorkspace.HostWorkspacePath,
+                agentWorkspace.ContainerWorkspacePath,
+                "example/secret@sha256:" + new string('b', 64),
+                1,
+                "512m",
+                30,
+                [],
+                new Dictionary<string, string>())
+            {
+                WorkspaceBaseRoot = runtimeResolver.ResolveRuntimeSettings().WorkspaceBaseRoot,
+            },
+            persistent: true,
+            allocatedIp: "10.247.1.10",
+            isBraked: false);
+        Assert.Contains($"{agentWorkspace.HostWorkspacePath}:{agentWorkspace.ContainerWorkspacePath}:ro", connectorRunArgs, StringComparer.Ordinal);
+
         var secondReload = Reload();
         Assert.Equal(upgraded.Agents["agent"].Revision, secondReload.Agents["agent"].Revision);
         Assert.Empty(secondReload.StartupDriftNotes);
-        var upgradedStore = new GatewayCatalogStore(upgraded, definitionStore, topologyWriter, new NoOpWorkspaceRuntimeTool(),
+        // Owner notice persists across restarts until the non-admin owner saves the agent.
+        var upgradedStore = new GatewayCatalogStore(secondReload, definitionStore, topologyWriter, new NoOpWorkspaceRuntimeTool(),
             new NoOpSkillPackageService(), new RecordingDesiredStatePublisher(), new NoOpContinuationStore(), new NoOpConversationAssetStore());
+        var nonAdminOwner = new GatewayUser("owner", "owner", "h", "user", true, null, null);
+        var otherNonAdmin = new GatewayUser("other", "other", "h", "user", true, null, null);
+        Assert.False(GatewayOwnershipAccess.IsAdmin(nonAdminOwner));
+        Assert.True(GatewayOwnershipAccess.CanManageAgent(nonAdminOwner, secondReload.Agents["agent"]));
+        Assert.False(GatewayOwnershipAccess.CanManageAgent(otherNonAdmin, secondReload.Agents["agent"]));
+        GatewayAgentListItem ownerItem = GatewayAgentSettingsMapper.ToListItem(
+            secondReload.Agents["agent"],
+            new System.Text.Json.Nodes.JsonObject(),
+            GatewayOwnershipAccess.CanManageAgent(nonAdminOwner, secondReload.Agents["agent"]) ? upgradedStore.GetAgentOwnerNotices("agent") : null);
+        Assert.NotNull(ownerItem.Notices);
+        Assert.Equal(
+            ["Connector Secret now runs separately for safety. It can still read your agent's files but can't change them."],
+            ownerItem.Notices);
+
         Assert.Contains("isolated execution", Assert.Throws<ArgumentException>(() => upgradedStore.SaveAgent("agent", request, "owner")).Message, StringComparison.Ordinal);
 
         upgradedStore.SaveMcpServer("plain", new GatewayConnectorUpsertRequest { Name = "Plain", Transport = "container", ContainerImage = "example/plain@sha256:" + new string('a', 64) }, "user", "owner");
@@ -974,6 +1064,7 @@ public sealed class WorkspaceDesiredStatePublicationTests
             Sandbox = new GatewayAgentSandboxPayload { Enabled = true },
             McpBindings = [new GatewayAgentMcpBindingPayload { ConnectorId = "plain", Context = "AgentContext" }]
         }, "owner");
+        Assert.Empty(upgradedStore.GetAgentOwnerNotices("agent"));
         Assert.Contains("isolated execution", Assert.Throws<ArgumentException>(() =>
             upgradedStore.SaveMcpServer("plain", new GatewayConnectorUpsertRequest { Name = "Plain", Transport = "container", ContainerImage = "example/plain@sha256:" + new string('a', 64), EnvKeys = ["API_KEY"] }, "user", "owner")).Message, StringComparison.Ordinal);
     }
