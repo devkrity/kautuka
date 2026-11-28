@@ -162,7 +162,7 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
             </p>
           ) : null}
           {canManage && connector.notices?.map((notice) => (
-            <p key={notice} role="alert" className="mt-1 text-sm text-destructive">{notice}</p>
+            <p key={notice} role="status" className="mt-1 text-sm text-muted-foreground">{notice}</p>
           ))}
           {commandSummary ? (
             <p

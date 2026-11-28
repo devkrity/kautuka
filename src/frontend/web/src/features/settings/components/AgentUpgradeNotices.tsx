@@ -14,12 +14,12 @@ export function AgentUpgradeNotices({ agent, onAcknowledge, className = '' }: Re
       {!agent.canAcknowledgeNotices ? (
         <p>The agent's owner will see this notice and can dismiss it.</p>
       ) : (agent.acknowledgedNotices?.length ?? 0) > 0 ? (
-        <p>This notice will be dismissed when you save. It stays here until the save succeeds.</p>
+        <p>Save your changes to dismiss this notice.</p>
       ) : onAcknowledge ? (
         <Button type="button" variant="outline" size="sm" onClick={onAcknowledge}>
-          Got it — dismiss when saved
+          Dismiss after saving
         </Button>
-      ) : <p>Open Connectors in agent settings to dismiss this notice.</p>}
+      ) : <p>To dismiss this notice, open the agent's settings and select Connectors.</p>}
     </Alert>
   );
 }

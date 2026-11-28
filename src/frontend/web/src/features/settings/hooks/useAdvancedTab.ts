@@ -478,7 +478,9 @@ export function useAdvancedTab() {
         defaultCpus: Number.parseInt(sandboxCpus, 10) || 2,
         defaultMemory: sandboxMemory,
         defaultTimeout: Number.parseInt(sandboxTimeout, 10) || 120,
-        containerEnvironment: parseSandboxEnvironment(sandboxEnvironment),
+        ...(sandboxEnvironment !== baselineDraft?.sandboxEnvironment
+          ? { containerEnvironment: parseSandboxEnvironment(sandboxEnvironment) }
+          : {}),
       },
       documentIngestion: {
         enabled: documentIngestionEnabled,

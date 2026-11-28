@@ -47,11 +47,15 @@ it('shows refused-setting guidance where the connector owner manages it', () => 
   const connector = connectorSchema.parse({
     id: 'personal', name: 'Family calendar', transport: 'container', scope: 'user',
     ownerUserId: 'owner', enabled: true,
-    notices: ["Setting 'HTTPS_PROXY' is managed by Kautuka. Edit this connector to choose a supported setting."],
+    notices: ["This connector still works without 'HTTPS_PROXY'. Open Edit connector, remove the matching Environment key entry under Environment credentials, and save."],
   });
   render(<ConnectorCard connector={connector} canManage onToggle={vi.fn()} onEdit={vi.fn()}
     onDelete={vi.fn()} toggling={false} />);
-  expect(screen.getByRole('alert')).toHaveTextContent("HTTPS_PROXY");
+  const notice = screen.getByRole('status');
+  expect(notice).toHaveTextContent("HTTPS_PROXY");
+  expect(notice).toHaveClass('text-muted-foreground');
+  expect(notice).not.toHaveClass('text-destructive');
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
 
 describe('ConnectorCard managed sign-in connector', () => {

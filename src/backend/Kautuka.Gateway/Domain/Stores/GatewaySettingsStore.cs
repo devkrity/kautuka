@@ -63,6 +63,7 @@ internal sealed class GatewaySettingsStore : IGatewaySettingsStore
         string? sandboxMemory = state.SystemSettings.SandboxDefaultMemory;
         int sandboxTimeout = state.SystemSettings.SandboxDefaultTimeout;
         IReadOnlyDictionary<string, string> sandboxEnvironment = configurationProvider.GetCurrent().Kautuka.Sandbox.ContainerEnvironment;
+        bool sandboxEnvironmentChanged = false;
         bool documentIngestionEnabled = state.SystemSettings.DocumentIngestionEnabled;
         string documentIngestionInternalParserConnectorId = state.SystemSettings.DocumentIngestionInternalParserConnectorId;
         string documentIngestionInternalParserToolName = state.SystemSettings.DocumentIngestionInternalParserToolName;
@@ -129,15 +130,21 @@ internal sealed class GatewaySettingsStore : IGatewaySettingsStore
                 if (sandbox.TryGetProperty("containerEnvironment", out JsonElement environment))
                 {
                     if (environment.ValueKind != JsonValueKind.Object)
-                        throw new ArgumentException("Sandbox settings must be a list of setting names and text values.");
+                        throw new ArgumentException("Sandbox settings need names and text values. " + ConnectorEnvironmentKeyPolicy.SandboxSettingsLocation + " Use NAME=value entries in Sandbox environment settings.");
                     var validated = new Dictionary<string, string>(StringComparer.Ordinal);
                     foreach (JsonProperty entry in environment.EnumerateObject())
                     {
                         string? value = entry.Value.ValueKind == JsonValueKind.String ? entry.Value.GetString() : null;
                         string? error = ConnectorEnvironmentKeyPolicy.SandboxSettingError(entry.Name, value);
-                        if (error is not null) throw new ArgumentException(error);
+                        bool unchanged = (entry.Value.ValueKind is JsonValueKind.String or JsonValueKind.Null)
+                            && sandboxEnvironment.TryGetValue(entry.Name, out string? existingValue)
+                            && string.Equals(existingValue, value, StringComparison.Ordinal);
+                        if (error is not null && !unchanged) throw new ArgumentException(error);
                         validated[entry.Name] = value!;
                     }
+                    sandboxEnvironmentChanged = validated.Count != sandboxEnvironment.Count
+                        || validated.Any(entry => !sandboxEnvironment.TryGetValue(entry.Key, out string? previous)
+                            || !string.Equals(previous, entry.Value, StringComparison.Ordinal));
                     sandboxEnvironment = validated;
                 }
             }
@@ -237,13 +244,16 @@ internal sealed class GatewaySettingsStore : IGatewaySettingsStore
             ["runtime.allow_multiple_tool_calls"] = allowMultipleToolCalls ? "true" : "false",
             ["runtime.allow_concurrent_invocation"] = allowConcurrentInvocation ? "true" : "false",
             ["runtime.max_parallel_tools"] = maxParallelTools.ToString(CultureInfo.InvariantCulture),
-        }, new Dictionary<string, string>
+        }, sandboxEnvironmentChanged ? new Dictionary<string, string>
         {
             ["infra.sandbox.container_env_json"] = JsonSerializer.Serialize(new Dictionary<string, string>(sandboxEnvironment), KautukaJsonContext.Default.DictionaryStringString),
-        });
+        } : null);
 
-        state.SandboxEnvironmentNotices.Clear();
-        state.SandboxEnvironmentNotices.AddRange(sandboxEnvironment.Select(pair => ConnectorEnvironmentKeyPolicy.SandboxSettingError(pair.Key, pair.Value)).OfType<string>());
+        if (sandboxEnvironmentChanged)
+        {
+            state.SandboxEnvironmentNotices.Clear();
+            state.SandboxEnvironmentNotices.AddRange(sandboxEnvironment.Select(pair => ConnectorEnvironmentKeyPolicy.SandboxSettingError(pair.Key, pair.Value)).OfType<string>());
+        }
         state.SystemSettings = newSettings;
         GenAiTelemetryEnvironment.ApplyCaptureMessageContent(captureMessageContent);
         logLevelSwitch.SetLevel(KautukaLogLevelSwitch.Parse(logLevel, LogLevel.Warning));

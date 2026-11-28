@@ -131,7 +131,7 @@ describe('AgentConnectorsEditor credentialed connector execution context', () =>
     expect(
       screen.getAllByRole('button', { name: 'Isolated with access to Agent Files' })
     ).toHaveLength(2);
-    fireEvent.click(screen.getByRole('button', { name: 'Got it — dismiss when saved' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss after saving' }));
     const acknowledged = onPatch.mock.calls[0]?.[0](agent);
     expect(acknowledged?.acknowledgedNotices).toEqual(agent.notices);
     expect(acknowledged?.notices).toEqual(agent.notices);
@@ -148,12 +148,12 @@ describe('AgentConnectorsEditor credentialed connector execution context', () =>
     const { rerender } = render(<QueryClientProvider client={queryClient}><Tabs value="connectors">
       <AgentConnectorsEditor {...props} agent={{ ...agent, acknowledgedNotices: agent.notices ?? [] }} />
     </Tabs></QueryClientProvider>);
-    expect(screen.getByText(/stays here until the save succeeds/)).toBeInTheDocument();
+    expect(screen.getByText(/Save your changes to dismiss this notice/)).toBeInTheDocument();
     expect(screen.getByText(/Connector Secret Bundle now runs separately/)).toBeInTheDocument();
     rerender(<QueryClientProvider client={queryClient}><Tabs value="connectors">
       <AgentConnectorsEditor {...props} agent={{ ...agent, canAcknowledgeNotices: false }} />
     </Tabs></QueryClientProvider>);
-    expect(screen.queryByRole('button', { name: /dismiss when saved/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Dismiss after saving/ })).not.toBeInTheDocument();
     expect(screen.getByText(/The agent's owner will see this notice/)).toBeInTheDocument();
   });
 

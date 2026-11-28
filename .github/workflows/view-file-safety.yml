@@ -12,6 +12,7 @@ on:
       - 'src/frontend/web/src/features/connectors/**'
       - 'src/frontend/web/src/test/AgentConnectorsEditor.test.tsx'
       - 'src/frontend/web/src/test/ConnectorCard.managed.test.tsx'
+      - 'src/frontend/web/src/test/useAdvancedTab.persona.test.tsx'
       - '.github/workflows/view-file-safety.yml'
   pull_request:
   workflow_dispatch:
@@ -43,7 +44,7 @@ jobs:
         run: dotnet test --project src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj -- --filter-class '*ViewFileMaterializerTests' --filter-class '*WorkspaceFileContainmentTests' --filter-class '*GatewayConnectCertificateMaterialTests' --filter-class '*U2_PolicyStoreTests' --filter-class '*NativeDirectoryFlagTests' --filter-class '*NativeSqliteAssetTests'
 
       - name: Settings, notices, secret-file lifetime, and native downloads
-        run: dotnet test --project src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj --no-build -- --filter-method '*LegacySandboxSettingsAreFlaggedAtStartupAndInvalidEntriesDoNotReachLaunch' --filter-method '*UploadEndpointOverwritesExistingFileWhenRequested' --filter-method '*SandboxEnvironmentSettingsRoundTripAndRefuseUnsafeEntriesBeforeSaving' --filter-method '*SandboxStartupFiltersHostSensitiveEnvironmentAndReusesExistingV0127Sandbox' --filter-method '*EphemeralEnvironmentFileIsRestrictedToTheProcessOwner' --filter-method '*UnsupportedConnectorSettingsAreRefusedOnSaveAndFlaggedAtStartup' --filter-method '*UpgradeIsolatesCredentialedBindingsOnceAndRejectsNewSandboxBindings' --filter-method '*CallToolMaterializesViewFilesIntoDesiredWorkspaceOnly' --filter-method '*NativeConnectorViewFilesAndOrdinaryAgentFilesCanBeDownloaded' --filter-method '*DownloadRejectsHardLinkThatLeavesTheWorkspace' --filter-method '*DownloadRejectsJunctionThatLeavesTheWorkspace'
+        run: dotnet test --project src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj --no-build -- --filter-method '*LegacySandboxSettingsDoNotBlockUnrelatedAdvancedSaves' --filter-method '*LegacySandboxSettingsAreFlaggedAtStartupAndInvalidEntriesDoNotReachLaunch' --filter-method '*UploadEndpointOverwritesExistingFileWhenRequested' --filter-method '*SandboxEnvironmentSettingsRoundTripAndRefuseUnsafeEntriesBeforeSaving' --filter-method '*SandboxStartupFiltersHostSensitiveEnvironmentAndReusesExistingV0127Sandbox' --filter-method '*EphemeralEnvironmentFileIsRestrictedToTheProcessOwner' --filter-method '*UnsupportedConnectorSettingsAreRefusedOnSaveAndFlaggedAtStartup' --filter-method '*UpgradeIsolatesCredentialedBindingsOnceAndRejectsNewSandboxBindings' --filter-method '*CallToolMaterializesViewFilesIntoDesiredWorkspaceOnly' --filter-method '*NativeConnectorViewFilesAndOrdinaryAgentFilesCanBeDownloaded' --filter-method '*DownloadRejectsHardLinkThatLeavesTheWorkspace' --filter-method '*DownloadRejectsJunctionThatLeavesTheWorkspace'
       - name: Hook allowlist, owner registry, lock, and audit files
         if: runner.os == 'Linux'
         run: dotnet run --project src/tests/Kautuka.OciHook.PolicyChecks/Kautuka.OciHook.PolicyChecks.csproj
@@ -60,4 +61,4 @@ jobs:
           corepack enable
           corepack prepare pnpm@11.5.2 --activate
           pnpm --dir src/frontend install --frozen-lockfile
-          pnpm --dir src/frontend/web exec vitest run src/test/AgentConnectorsEditor.test.tsx src/test/ConnectorCard.managed.test.tsx
+          pnpm --dir src/frontend/web exec vitest run src/test/AgentConnectorsEditor.test.tsx src/test/ConnectorCard.managed.test.tsx src/test/useAdvancedTab.persona.test.tsx

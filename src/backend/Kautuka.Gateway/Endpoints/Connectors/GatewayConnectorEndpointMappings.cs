@@ -802,7 +802,7 @@ internal static class GatewayConnectorEndpointMappings
         server.Enabled,
         GatewayCatalogStore.ToDefinition(server).RequiresIsolation(connectorAuth),
         [.. (server.EnvKeys ?? []).Where(key => !ConnectorEnvironmentKeyPolicy.IsSupported(key, out _))
-            .Select(key => $"This connector still works without '{key}'. Remove it from Environment credentials in Edit connector (the Environment key field), then save.")]);
+            .Select(key => $"This connector still works without '{key}'. Open Edit connector, remove the matching Environment key entry under Environment credentials, and save.")]);
 
     private static bool HasCurrentLocalTools(GatewayMcpServer server)
         => !string.Equals(server.Transport, "container", StringComparison.OrdinalIgnoreCase)

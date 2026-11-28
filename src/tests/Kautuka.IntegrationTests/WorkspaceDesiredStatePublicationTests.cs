@@ -2584,7 +2584,7 @@ public sealed class WorkspaceDesiredStatePublicationTests
         });
         GatewayState reloaded = CreateState(temp.SqlitePath);
         Assert.Equal(3, reloaded.SandboxEnvironmentNotices.Count);
-        Assert.All(reloaded.SandboxEnvironmentNotices, notice => Assert.Contains("Settings → Advanced → Sandbox environment settings", notice, StringComparison.Ordinal));
+        Assert.All(reloaded.SandboxEnvironmentNotices, notice => Assert.Contains("In Settings, open Advanced, then Workspace.", notice, StringComparison.Ordinal));
         Assert.Contains(reloaded.StartupDriftNotes, note => note.Contains("BAD-NAME", StringComparison.Ordinal));
         var configuration = CreateConfiguration(temp.SqlitePath);
         var database = new KautukaDatabase(configuration);
@@ -2599,6 +2599,49 @@ public sealed class WorkspaceDesiredStatePublicationTests
         Assert.DoesNotContain("VALID", environment.Keys);
         Assert.NotEqual("old", environment.GetValueOrDefault("HTTP_PROXY"));
         Assert.Equal("/custom/python", environment["PYTHONPATH"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LegacySandboxSettingsDoNotBlockUnrelatedAdvancedSaves(bool includeEnvironment)
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        GatewayState original = CreateState(temp.SqlitePath);
+        const string key = "infra.sandbox.container_env_json";
+        const string legacy = """{"HTTP_PROXY":"http://legacy.invalid","BAD-NAME":"old","BROKEN":"one\nline","PYTHONPATH":"/custom/python"}""";
+        original.PersistRawSettingsAuthoritatively(new Dictionary<string, string>(), new Dictionary<string, string> { [key] = legacy });
+        GatewayState reloaded = CreateState(temp.SqlitePath);
+        var configuration = CreateConfiguration(temp.SqlitePath);
+        var database = new KautukaDatabase(configuration);
+        var provider = new SqlitePlatformConfigurationProvider(database, new SqliteAgentDefinitionStore(configuration, database));
+        var settings = new GatewaySettingsStore(reloaded, new KautukaLogLevelSwitch(LogLevel.Warning),
+            new RecordingDesiredStatePublisher(), new NoOpUpdateServiceGrpcService(), configuration, provider);
+        string environment = includeEnvironment ? ""","kautuka":{"sandbox":{"containerEnvironment":""" + legacy + "}}" : "";
+        using var unrelated = JsonDocument.Parse("""{"system":{"logLevel":"INFO"}""" + environment + "}");
+        await settings.SaveAdvancedSettingsAsync(unrelated.RootElement, TestContext.Current.CancellationToken);
+        Assert.Equal("INFO", settings.GetPayload().System.LogLevel);
+        Assert.Equal(legacy, settings.ReadSettingJson(key));
+        Assert.Equal(3, settings.GetPayload().Kautuka.Sandbox.Notices!.Length);
+        Assert.Equal("old", settings.GetPayload().Kautuka.Sandbox.ContainerEnvironment!["BAD-NAME"]);
+
+        using var changed = JsonDocument.Parse("""{"kautuka":{"sandbox":{"containerEnvironment":{"HTTP_PROXY":"changed"}}}}""");
+        var error = await Assert.ThrowsAsync<ArgumentException>(() => settings.SaveAdvancedSettingsAsync(changed.RootElement, TestContext.Current.CancellationToken));
+        Assert.Contains("Kautuka handles network connections itself", error.Message, StringComparison.Ordinal);
+        Assert.Contains("You don't need to replace it.", error.Message, StringComparison.Ordinal);
+        Assert.Contains("In Settings, open Advanced, then Workspace.", error.Message, StringComparison.Ordinal);
+        Assert.Contains("Sandbox environment settings", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("→", error.Message, StringComparison.Ordinal);
+        Assert.Equal(legacy, settings.ReadSettingJson(key));
+
+        // Removing a refused proxy is allowed while other unchanged legacy entries remain visible.
+        using var removeProxy = JsonDocument.Parse("""{"kautuka":{"sandbox":{"containerEnvironment":{"BAD-NAME":"old","BROKEN":"one\nline","PYTHONPATH":"/custom/python"}}}}""");
+        await settings.SaveAdvancedSettingsAsync(removeProxy.RootElement, TestContext.Current.CancellationToken);
+        Assert.Equal(2, settings.GetPayload().Kautuka.Sandbox.Notices!.Length);
+        Assert.False(settings.GetPayload().Kautuka.Sandbox.ContainerEnvironment!.ContainsKey("HTTP_PROXY"));
+        using var corrected = JsonDocument.Parse("""{"kautuka":{"sandbox":{"containerEnvironment":{"PYTHONPATH":"/custom/python"}}}}""");
+        await settings.SaveAdvancedSettingsAsync(corrected.RootElement, TestContext.Current.CancellationToken);
+        Assert.Empty(settings.GetPayload().Kautuka.Sandbox.Notices!);
     }
 
     [Fact]
@@ -2626,7 +2669,7 @@ public sealed class WorkspaceDesiredStatePublicationTests
         {
             using var request = JsonDocument.Parse("""{"kautuka":{"sandbox":{"containerEnvironment":""" + invalid + "}}}");
             var error = Assert.Throws<ArgumentException>(() => store.Save(request.RootElement));
-            Assert.Contains("Settings → Advanced → Sandbox environment settings", error.Message, StringComparison.Ordinal);
+            Assert.Contains("In Settings, open Advanced, then Workspace.", error.Message, StringComparison.Ordinal);
             Assert.Equal("/custom/bin", provider.GetCurrent().Kautuka.Sandbox.ContainerEnvironment["PATH"]);
         }
         // Existing v0.1.27 container_env_json storage keeps its names and values on unrelated saves.

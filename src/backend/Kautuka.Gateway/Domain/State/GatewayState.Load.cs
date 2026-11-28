@@ -42,7 +42,7 @@ internal sealed partial class GatewayState
         }
         catch (JsonException)
         {
-            state.SandboxEnvironmentNotices.Add("Sandbox environment settings could not be read. Open Settings → Advanced → Sandbox environment settings, replace them with NAME=value entries, then save.");
+            state.SandboxEnvironmentNotices.Add("Sandbox environment settings could not be read. " + ConnectorEnvironmentKeyPolicy.SandboxSettingsLocation + " Replace the contents of Sandbox environment settings with NAME=value entries and save.");
         }
         foreach (string notice in state.SandboxEnvironmentNotices)
         {

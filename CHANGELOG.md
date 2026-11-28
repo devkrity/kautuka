@@ -11,6 +11,10 @@ upgrade path.
 
 ### Security
 
+- Sandbox proxy settings are now ignored because all outbound traffic goes through Kautuka's network access control. Admins can remove them from Sandbox environment settings on the Workspace tab in Advanced.
+
+- Unchanged legacy sandbox settings no longer block unrelated Advanced settings saves. Upgrade notices use the on-screen tab and field names, and ignored connector settings appear as a gentle heads-up.
+
 - Saving an agent preserves its owner. Upgrade notices explain who can dismiss them and stay visible until saving succeeds.
 - Existing sandbox settings are checked at startup; refused entries are reported in Advanced settings and skipped during launch. Uploading with overwrite enabled also creates a missing file safely on every supported platform.
 

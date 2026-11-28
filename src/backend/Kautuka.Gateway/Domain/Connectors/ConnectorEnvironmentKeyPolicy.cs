@@ -88,15 +88,19 @@ internal static class ConnectorEnvironmentKeyPolicy
         }
     }
 
+    internal const string SandboxSettingsLocation = "In Settings, open Advanced, then Workspace.";
+
     internal static string? SandboxSettingError(string key, string? value)
     {
-        const string action = "Open Settings → Advanced → Sandbox environment settings, remove or correct this entry, then save.";
+        const string action = SandboxSettingsLocation + " Remove or correct the entry in Sandbox environment settings and save.";
         if (!IsPortableIdentifier(key))
             return $"Sandbox setting name '{key}' is invalid. Use letters, numbers and underscores, starting with a letter or underscore. {action}";
         if (value is null || value.IndexOfAny(['\0', '\r', '\n']) >= 0)
             return $"Sandbox setting '{key}' needs a text value on one line. {action}";
+        if (proxySettingNames.Contains(key))
+            return $"Kautuka handles network connections itself, so sandbox proxy setting '{key}' is ignored. {SandboxSettingsLocation} Remove '{key}' from Sandbox environment settings and save. You don't need to replace it.";
         if (IsManagedNetworkSetting(key))
-            return $"Kautuka manages sandbox setting '{key}'. {action}";
+            return $"Kautuka sets sandbox setting '{key}'. {action}";
         return null;
     }
 
