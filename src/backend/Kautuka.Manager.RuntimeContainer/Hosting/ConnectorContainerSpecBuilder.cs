@@ -67,7 +67,8 @@ internal static class ConnectorContainerSpecBuilder
         bool isBraked,
         string? purpose = null,
         ImageCompatProfile? compatProfile = null,
-        ContainerContext? identityContext = null)
+        ContainerContext? identityContext = null,
+        string? environmentFile = null)
     {
         ArgumentNullException.ThrowIfNull(connector);
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
@@ -95,11 +96,6 @@ internal static class ConnectorContainerSpecBuilder
             new("PIP_CACHE_DIR", "/tmp/.pip"),
             new("UV_CACHE_DIR", "/tmp/.uv"),
         };
-
-        foreach (KeyValuePair<string, string> pair in ForwardedEnvironment(connector))
-        {
-            envList.Add(new KeyValuePair<string, string>(pair.Key, string.Empty));
-        }
 
         var mounts = new List<WorkloadMount>();
         if (workspaceContext is not null
@@ -151,6 +147,11 @@ internal static class ConnectorContainerSpecBuilder
         };
 
         var arguments = spec.Render().ToList();
+        if (!string.IsNullOrWhiteSpace(environmentFile))
+        {
+            arguments.InsertRange(1, ["--env-file", environmentFile]);
+        }
+
         EnsureHostProcessArguments(arguments);
         return arguments;
     }
@@ -158,7 +159,8 @@ internal static class ConnectorContainerSpecBuilder
     public static List<string> BuildExec(
         WorkspaceMcpContainerConnectorDefinition connector,
         string containerName,
-        string? workingDirectory)
+        string? workingDirectory,
+        string? environmentFile = null)
     {
         ArgumentNullException.ThrowIfNull(connector);
         var arguments = new List<string> { "exec", "-i" };
@@ -167,9 +169,9 @@ internal static class ConnectorContainerSpecBuilder
             arguments.AddRange(["--workdir", workingDirectory]);
         }
 
-        foreach (KeyValuePair<string, string> pair in ForwardedEnvironment(connector))
+        if (!string.IsNullOrWhiteSpace(environmentFile))
         {
-            arguments.AddRange(["--env", pair.Key]);
+            arguments.AddRange(["--env-file", environmentFile]);
         }
 
         arguments.Add(containerName);
@@ -179,8 +181,10 @@ internal static class ConnectorContainerSpecBuilder
     }
 
     public static Dictionary<string, string?> BuildTransportEnvironment(WorkspaceMcpContainerConnectorDefinition connector)
-        => FilterHostProcessEnvironment(connector.Environment)
-            .ToDictionary(static pair => pair.Key, static pair => (string?)pair.Value, StringComparer.Ordinal);
+    {
+        ArgumentNullException.ThrowIfNull(connector);
+        return new Dictionary<string, string?>(StringComparer.Ordinal);
+    }
 
     internal static Dictionary<string, string> FilterHostProcessEnvironment(IEnumerable<KeyValuePair<string, string>>? environment)
     {
@@ -192,7 +196,30 @@ internal static class ConnectorContainerSpecBuilder
 
         foreach ((string key, string value) in environment)
         {
-            if (AllowsHostProcessEnvironment(key))
+            if (AllowsHostProcessEnvironment(key)
+                && value is not null
+                && value.IndexOfAny(['\0', '\r', '\n']) < 0)
+            {
+                filtered[key] = value;
+            }
+        }
+
+        return filtered;
+    }
+
+    internal static Dictionary<string, string> FilterContainerEnvironment(IEnumerable<KeyValuePair<string, string>>? environment)
+    {
+        var filtered = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (environment is null)
+        {
+            return filtered;
+        }
+
+        foreach ((string key, string value) in environment)
+        {
+            if (AllowsContainerEnvironment(key)
+                && !string.IsNullOrWhiteSpace(value)
+                && value.IndexOfAny(['\0', '\r', '\n']) < 0)
             {
                 filtered[key] = value;
             }
@@ -202,10 +229,13 @@ internal static class ConnectorContainerSpecBuilder
     }
 
     internal static bool ForwardsEnvironmentKey(string key)
-        => !string.IsNullOrWhiteSpace(key) && !IsPackageIndexBypassKey(key);
+        => IsPortableEnvironmentIdentifier(key) && !IsPackageIndexBypassKey(key);
+
+    internal static bool AllowsContainerEnvironment(string key)
+        => ForwardsEnvironmentKey(key) && !IsProhibitedProxyKey(key) && !IsReservedContainerRuntimeKey(key);
 
     internal static bool AllowsHostProcessEnvironment(string key)
-        => ForwardsEnvironmentKey(key) && !IsHostProcessSensitiveKey(key);
+        => AllowsContainerEnvironment(key) && !IsHostProcessSensitiveKey(key);
 
     internal static bool AllowsRuntimeEnvironmentOverride(string key)
         => AllowsHostProcessEnvironment(key);
@@ -240,8 +270,40 @@ internal static class ConnectorContainerSpecBuilder
     private static readonly string[] hostProcessSensitivePrefixes =
         ["LD_", "DYLD_", "CONTAINERS_", "CONTAINER_", "DOCKER_", "PODMAN_", "GCONV_"];
 
-    private static IEnumerable<KeyValuePair<string, string>> ForwardedEnvironment(WorkspaceMcpContainerConnectorDefinition connector)
-        => connector.Environment.Where(static pair => AllowsRuntimeEnvironmentOverride(pair.Key));
+    private static readonly HashSet<string> prohibitedProxyKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    };
+
+    private static readonly HashSet<string> reservedContainerRuntimeKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "HOME", "NPM_CONFIG_CACHE", "PIP_CACHE_DIR", "UV_CACHE_DIR",
+    };
+
+    private static bool IsProhibitedProxyKey(string key)
+        => prohibitedProxyKeys.Contains(key);
+
+    private static bool IsReservedContainerRuntimeKey(string key)
+        => reservedContainerRuntimeKeys.Contains(key);
+
+    private static bool IsPortableEnvironmentIdentifier(string key)
+    {
+        if (string.IsNullOrWhiteSpace(key) || !(char.IsAsciiLetter(key[0]) || key[0] == '_'))
+        {
+            return false;
+        }
+
+        for (int index = 1; index < key.Length; index++)
+        {
+            char character = key[index];
+            if (!(char.IsAsciiLetterOrDigit(character) || character == '_'))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     private static bool IsPackageIndexBypassKey(string key)
     {

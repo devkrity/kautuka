@@ -446,15 +446,15 @@ public sealed class WorkspaceDesiredStatePublicationTests
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 ["SPLOSE_ROOT"] = "/opt/kautuka/mcpb/config",
+                ["PYTHONPATH"] = "/opt/kautuka/mcpb/src",
+                ["NODE_PATH"] = "/opt/kautuka/mcpb/node_modules",
+                ["PATH"] = "/opt/kautuka/mcpb/bin:/usr/bin",
+                ["DOCKER_HOST"] = "tcp://127.0.0.1:2375",
+                ["CONTAINER_HOST"] = "unix:///tmp/podman.sock",
+                ["PODMAN_CUSTOM"] = "enabled",
                 ["NPM_CONFIG_REGISTRY"] = "https://override.example.invalid/npm/",
                 ["HTTPS_PROXY"] = "http://attacker.example.invalid:3128",
-                ["LD_PRELOAD"] = "/tmp/lib.so",
-                ["PATH"] = "/tmp",
-                ["CONTAINERS_CONF"] = "/tmp/containers.conf",
-                ["CONTAINERS_HELPER_BINARY_DIR"] = "/tmp/helpers",
-                ["STORAGE_OPTS"] = "overlay.mount_program=/tmp/mount",
                 ["HOME"] = "/tmp/home",
-                ["CONTAINER_HOST"] = "unix:///tmp/podman.sock",
             });
 
         Assert.Equal("https://gateway.example.invalid/npm/", environment["NPM_CONFIG_REGISTRY"]);
@@ -463,13 +463,94 @@ public sealed class WorkspaceDesiredStatePublicationTests
         Assert.False(environment.ContainsKey("PIP_TRUSTED_HOST"));
         Assert.Equal("http://shared-proxy.example.invalid:3128", environment["HTTPS_PROXY"]);
         Assert.Equal("/opt/kautuka/mcpb/config", environment["SPLOSE_ROOT"]);
-        Assert.False(environment.ContainsKey("LD_PRELOAD"));
-        Assert.False(environment.ContainsKey("PATH"));
-        Assert.False(environment.ContainsKey("CONTAINERS_CONF"));
-        Assert.False(environment.ContainsKey("CONTAINERS_HELPER_BINARY_DIR"));
-        Assert.False(environment.ContainsKey("STORAGE_OPTS"));
+        Assert.Equal("/opt/kautuka/mcpb/src", environment["PYTHONPATH"]);
+        Assert.Equal("/opt/kautuka/mcpb/node_modules", environment["NODE_PATH"]);
+        Assert.Equal("/opt/kautuka/mcpb/bin:/usr/bin", environment["PATH"]);
+        Assert.Equal("tcp://127.0.0.1:2375", environment["DOCKER_HOST"]);
+        Assert.Equal("unix:///tmp/podman.sock", environment["CONTAINER_HOST"]);
+        Assert.Equal("enabled", environment["PODMAN_CUSTOM"]);
         Assert.False(environment.ContainsKey("HOME"));
-        Assert.False(environment.ContainsKey("CONTAINER_HOST"));
+    }
+
+    [Fact]
+    public void UnsupportedConnectorSettingsAreRefusedOnSaveAndFlaggedAtStartup()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        IConfiguration configuration = CreateConfiguration(temp.SqlitePath);
+        var database = new KautukaDatabase(configuration);
+        database.EnsureReady();
+        var definitionStore = new SqliteAgentDefinitionStore(configuration, database);
+        GatewayState state = GatewayState.FromDatabase(
+            database,
+            NullLogger<GatewayState>.Instance,
+            new GatewayMemoryStore(),
+            definitionStore,
+            configuration,
+            new NoOpWorkspaceRuntimeTool());
+        var topologyWriter = new SqliteTopologyConfigurationWriter(
+            database,
+            new SqlitePlatformConfigurationProvider(database, definitionStore));
+        var store = new GatewayCatalogStore(
+            state,
+            definitionStore,
+            topologyWriter,
+            new NoOpWorkspaceRuntimeTool(),
+            new NoOpSkillPackageService(),
+            new RecordingDesiredStatePublisher(),
+            new NoOpContinuationStore(),
+            new NoOpConversationAssetStore());
+
+        GatewayMcpServer supported = store.SaveMcpServer(
+            "supported-container",
+            new GatewayConnectorUpsertRequest
+            {
+                Name = "Supported Container",
+                Transport = "container",
+                ContainerImage = "example/supported@sha256:" + new string('a', 64),
+                EnvKeys = ["PYTHONPATH", "DOCKER_HOST", "NODE_PATH"],
+            },
+            "user",
+            "owner");
+        Assert.Equal(["PYTHONPATH", "DOCKER_HOST", "NODE_PATH"], supported.EnvKeys);
+
+        int suffix = 0;
+        foreach (string unsupported in new[] { "HTTP_PROXY", "NPM_CONFIG_REGISTRY", "HOME", "BAD-KEY" })
+        {
+            suffix++;
+            ArgumentException refused = Assert.Throws<ArgumentException>(() => store.SaveMcpServer(
+                "bad-" + suffix,
+                new GatewayConnectorUpsertRequest
+                {
+                    Name = "Unsupported",
+                    Transport = "container",
+                    ContainerImage = "example/unsupported@sha256:" + new string('b', 64),
+                    EnvKeys = [unsupported],
+                },
+                "user",
+                "owner"));
+            Assert.Contains(unsupported, refused.Message, StringComparison.Ordinal);
+        }
+
+        // Simulate a v0.1.27 database row that already stored an unsupported setting name.
+        topologyWriter.SaveMcpServer(new McpServerDefinition
+        {
+            Id = "legacy-proxy-connector",
+            Name = "Legacy Proxy Connector",
+            Transport = McpTransport.Container,
+            ContainerImage = "example/legacy@sha256:" + new string('c', 64),
+            EnvKeys = ["HTTPS_PROXY", "PYTHONPATH"],
+        });
+
+        GatewayState reloaded = GatewayState.FromDatabase(
+            database,
+            NullLogger<GatewayState>.Instance,
+            new GatewayMemoryStore(),
+            definitionStore,
+            configuration,
+            new NoOpWorkspaceRuntimeTool());
+        string note = Assert.Single(reloaded.StartupDriftNotes);
+        Assert.Contains("Legacy Proxy Connector", note, StringComparison.Ordinal);
+        Assert.Contains("HTTPS_PROXY", note, StringComparison.Ordinal);
     }
 
     [Fact]

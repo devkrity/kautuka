@@ -28,6 +28,14 @@ internal static class GatewayConnectorEndpointMappings
             }
 
             bool hasCallerEnvironment = request.TestEnv is { Count: > 0 };
+            if (hasCallerEnvironment && !ConnectorEnvironmentKeyPolicy.TryValidate(request.TestEnv!.Keys, out string testEnvError))
+            {
+                return Results.Json(
+                    new GatewayErrorResponse(testEnvError),
+                    KautukaJsonContext.Default.GatewayErrorResponse,
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
+
             string revisionKey = request.Id ?? string.Empty;
             string initialUserRevision = revisions.Get(revisionKey, user.Id, includeSystem: false);
             string initialCombinedRevision = revisions.Get(revisionKey, user.Id, includeSystem: true);
@@ -471,6 +479,15 @@ internal static class GatewayConnectorEndpointMappings
 
             string scope = GatewayOwnershipAccess.ResolveCatalogScope(user, request.Scope);
             string? ownerUserId = GatewayOwnershipAccess.ResolveCatalogOwnerUserId(scope, user);
+
+            if (request.EnvKeys is { Length: > 0 }
+                && !ConnectorEnvironmentKeyPolicy.TryValidate(request.EnvKeys.Where(static key => !string.IsNullOrWhiteSpace(key)).Select(static key => key.Trim()), out string envKeyError))
+            {
+                return Results.Json(
+                    new GatewayErrorResponse(envKeyError),
+                    KautukaJsonContext.Default.GatewayErrorResponse,
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
 
             McpConnectorTestResult? discovery = null;
             bool disablingExisting = hasExisting && existing!.Enabled && request.Enabled == false;

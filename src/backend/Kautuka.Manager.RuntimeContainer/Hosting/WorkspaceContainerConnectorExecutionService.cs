@@ -498,7 +498,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             connector = ResolveEffectiveConnectorDefinition(
                 connectorId,
-                environmentOverrides,
+                environmentOverrides: null,
                 timeoutSeconds,
                 allowInternalSystemConnector);
 
@@ -512,7 +512,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 WorkspaceMcpContainerLifecycleState.Starting,
                 "list-start");
 
-            transportLaunch = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, isProbe: false, cancellationToken: cancellationToken, authoritativeSnapshot: authoritativeSnapshot).ConfigureAwait(false);
+            transportLaunch = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, isProbe: false, authoritativeSnapshot: authoritativeSnapshot, runtimeEnvironmentOverrides: environmentOverrides, cancellationToken: cancellationToken).ConfigureAwait(false);
             ephemeralWorkload = transportLaunch.EphemeralWorkload;
             var tools = await ListMcpToolsAsync(transportLaunch, ClientOptionsFor(connector.McpProtocolVersion), cancellationToken).ConfigureAwait(false);
 
@@ -583,7 +583,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             connector = ResolveEffectiveConnectorDefinition(
                 connectorId,
-                environmentOverrides,
+                environmentOverrides: null,
                 timeoutSeconds,
                 allowInternalSystemConnector);
 
@@ -610,7 +610,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 "call-start");
 
             long prepareStarted = Stopwatch.GetTimestamp();
-            transportLaunch = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, isProbe: false, cancellationToken: cancellationToken, authoritativeSnapshot: authoritativeSnapshot, expectedImageDigest: expectedImageDigest).ConfigureAwait(false);
+            transportLaunch = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, isProbe: false, authoritativeSnapshot: authoritativeSnapshot, expectedImageDigest: expectedImageDigest, runtimeEnvironmentOverrides: environmentOverrides, cancellationToken: cancellationToken).ConfigureAwait(false);
             ephemeralWorkload = transportLaunch.EphemeralWorkload;
             using CancellationTokenSource? toolTimeout = executionContext == WorkspaceMcpExecutionContext.AgentSandbox
                 ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken) : null;
@@ -780,9 +780,10 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         bool isProbe = false,
         WorkspaceDesiredStateSnapshot? authoritativeSnapshot = null,
         string? expectedImageDigest = null,
+        IReadOnlyDictionary<string, string>? runtimeEnvironmentOverrides = null,
         CancellationToken cancellationToken = default)
         => CreateTransportCoreAsync(connector, requireEnabled, allowInternalSystemConnector, workspaceContext,
-            executionContext, isProbe, false, authoritativeSnapshot, expectedImageDigest, cancellationToken);
+            executionContext, isProbe, false, authoritativeSnapshot, expectedImageDigest, runtimeEnvironmentOverrides, cancellationToken);
 
     private async Task<TransportLaunch> CreateTransportCoreAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
@@ -794,6 +795,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         bool saveDiscovery = false,
         WorkspaceDesiredStateSnapshot? authoritativeSnapshot = null,
         string? expectedImageDigest = null,
+        IReadOnlyDictionary<string, string>? runtimeEnvironmentOverrides = null,
         CancellationToken cancellationToken = default)
     {
         authoritativeSnapshot ??= desiredStateStore.Snapshot;
@@ -828,6 +830,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         bool leaseTransferred = false;
         EphemeralWorkload? ephemeralWorkload = null;
         PersistentConnectorUse? persistentUse = null;
+        string? environmentFile = null;
         try
         {
             bool isBraked = workloadLaunchGate?.IsBraked(launchUserId) ?? true;
@@ -856,10 +859,17 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     Args = contract.ArgsTemplate,
                     Environment = contract.EnvTemplate
                 };
+                Dictionary<string, string> sandboxContainerEnvironment = ConnectorContainerSpecBuilder.FilterContainerEnvironment(sandboxConnector.Environment);
+                if (sandboxContainerEnvironment.Count > 0)
+                {
+                    environmentFile = await PodmanContainerTool.WriteEphemeralEnvironmentFileAsync(sandboxContainerEnvironment, cancellationToken).ConfigureAwait(false);
+                }
+
                 List<string> sandboxArguments = ConnectorContainerSpecBuilder.BuildExec(
                     sandboxConnector,
                     sandboxSession.ContainerName,
-                    contract.WorkingDirectory ?? contract.InstallRoot);
+                    contract.WorkingDirectory ?? contract.InstallRoot,
+                    environmentFile);
 
                 var sandboxLaunch = new TransportLaunch(new StdioClientTransport(new StdioClientTransportOptions
                 {
@@ -867,7 +877,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     Arguments = [.. (stdioArgumentsPrefix ?? []), .. sandboxArguments],
                     EnvironmentVariables = ConnectorContainerSpecBuilder.BuildTransportEnvironment(sandboxConnector),
                     Name = $"sandbox-connector-{connector.ConnectorId}"
-                }), null, launchLease);
+                }), null, launchLease, environmentFile: environmentFile);
                 leaseTransferred = true;
                 return sandboxLaunch;
             }
@@ -938,6 +948,13 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
                 ephemeralWorkload = new EphemeralWorkload(containerName, allocatedIp, compatProfile, desiredIdentity);
                 trackedConnectorContainers["ephemeral:" + containerName] = containerName;
+                IReadOnlyList<KeyValuePair<string, string>> ephemeralMergedEnvironment = MergeEnvironment(connector.Environment, runtimeEnvironmentOverrides);
+                Dictionary<string, string> ephemeralEnvironment = ConnectorContainerSpecBuilder.FilterContainerEnvironment(ephemeralMergedEnvironment);
+                if (ephemeralEnvironment.Count > 0)
+                {
+                    environmentFile = await PodmanContainerTool.WriteEphemeralEnvironmentFileAsync(ephemeralEnvironment, cancellationToken).ConfigureAwait(false);
+                }
+
                 arguments = BuildConnectorWorkloadRunArguments(
                     connector,
                     containerName,
@@ -947,7 +964,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     allocatedIp: allocatedIp,
                     isBraked: isBraked,
                     purpose: isProbe ? (saveDiscovery ? "save-discovery" : "probe") : null,
-                    compatProfile: compatProfile);
+                    compatProfile: compatProfile,
+                    environmentFile: environmentFile);
             }
             else
             {
@@ -970,7 +988,14 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     authoritativeSnapshot: authoritativeSnapshot,
                     trackUse: true).ConfigureAwait(false);
                 persistentUse = new PersistentConnectorUse(connector, runtimeKey, containerName);
-                arguments = ConnectorContainerSpecBuilder.BuildExec(connector, containerName, ResolveExecWorkingDirectory(connector));
+                IReadOnlyList<KeyValuePair<string, string>> execMergedEnvironment = MergeEnvironment(connector.Environment, runtimeEnvironmentOverrides);
+                Dictionary<string, string> execEnvironment = ConnectorContainerSpecBuilder.FilterContainerEnvironment(execMergedEnvironment);
+                if (execEnvironment.Count > 0)
+                {
+                    environmentFile = await PodmanContainerTool.WriteEphemeralEnvironmentFileAsync(execEnvironment, cancellationToken).ConfigureAwait(false);
+                }
+
+                arguments = ConnectorContainerSpecBuilder.BuildExec(connector, containerName, ResolveExecWorkingDirectory(connector), environmentFile);
             }
 
             var stdioTransport = new StdioClientTransport(new StdioClientTransportOptions
@@ -983,7 +1008,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             IClientTransport transport = ephemeralWorkload is null
                 ? stdioTransport
                 : new VerifiedConnectorTransport(stdioTransport, token => VerifyEphemeralWorkloadAsync(ephemeralWorkload, connector.ReadinessTimeoutSeconds, token));
-            var transportLaunch = new TransportLaunch(transport, ephemeralWorkload, launchLease, imageDigest, persistentContainerId, persistentUse);
+            var transportLaunch = new TransportLaunch(transport, ephemeralWorkload, launchLease, imageDigest, persistentContainerId, persistentUse, environmentFile);
             leaseTransferred = true;
             return transportLaunch;
         }
@@ -995,6 +1020,11 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             if (!leaseTransferred)
             {
+                if (environmentFile is not null && File.Exists(environmentFile))
+                {
+                    PodmanContainerTool.DeleteSecretFile(environmentFile);
+                }
+
                 if (ephemeralWorkload is not null)
                 {
                     RemoveNeverStartedEphemeralIdentity(ephemeralWorkload);
@@ -1346,24 +1376,39 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             throw new InvalidOperationException($"Connector '{connector.ConnectorId}' workload address is already registered.");
         }
 
-        var runArgs = BuildConnectorWorkloadRunArguments(
-            connector,
-            containerName,
-            executionContext,
-            WithConfiguredWorkspaceRoot(identityContext ?? workspaceContext),
-            persistent: true,
-            allocatedIp: allocatedIp,
-            isBraked: isBraked,
-            purpose: isProbe ? (saveDiscovery ? "save-discovery" : "probe") : null,
-            compatProfile: compatProfile);
+        Dictionary<string, string> containerEnvironment = ConnectorContainerSpecBuilder.FilterContainerEnvironment(connector.Environment);
+        string? environmentFile = containerEnvironment.Count > 0
+            ? await PodmanContainerTool.WriteEphemeralEnvironmentFileAsync(containerEnvironment, cancellationToken).ConfigureAwait(false)
+            : null;
+        PodmanCommandResult result;
+        try
+        {
+            var runArgs = BuildConnectorWorkloadRunArguments(
+                connector,
+                containerName,
+                executionContext,
+                WithConfiguredWorkspaceRoot(identityContext ?? workspaceContext),
+                persistent: true,
+                allocatedIp: allocatedIp,
+                isBraked: isBraked,
+                purpose: isProbe ? (saveDiscovery ? "save-discovery" : "probe") : null,
+                compatProfile: compatProfile,
+                environmentFile: environmentFile);
 
-        PodmanCommandResult result = await podmanCommandRunner
-            .RunAsync(
-                runArgs,
-                Math.Max(10, connector.ReadinessTimeoutSeconds),
-                cancellationToken,
-                BuildPodmanEnvironment(connector))
-            .ConfigureAwait(false);
+            result = await podmanCommandRunner
+                .RunAsync(
+                    runArgs,
+                    Math.Max(10, connector.ReadinessTimeoutSeconds),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            if (environmentFile is not null && File.Exists(environmentFile))
+            {
+                PodmanContainerTool.DeleteSecretFile(environmentFile);
+            }
+        }
 
         if (result.ExitCode != 0)
         {
@@ -1621,10 +1666,17 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
     private async Task CompleteConnectorInvocationAsync(TransportLaunch? launch)
     {
-        if (launch?.PersistentUse is { } persistentUse)
-            await ReleasePersistentConnectorUseAsync(persistentUse).ConfigureAwait(false);
-        else if (launch?.EphemeralWorkload is { } ephemeralWorkload)
-            await CompleteEphemeralWorkloadAsync(ephemeralWorkload).ConfigureAwait(false);
+        try
+        {
+            if (launch?.PersistentUse is { } persistentUse)
+                await ReleasePersistentConnectorUseAsync(persistentUse).ConfigureAwait(false);
+            else if (launch?.EphemeralWorkload is { } ephemeralWorkload)
+                await CompleteEphemeralWorkloadAsync(ephemeralWorkload).ConfigureAwait(false);
+        }
+        finally
+        {
+            launch?.CleanupEnvironmentFile();
+        }
     }
 
     private async Task ReleasePersistentConnectorUseAsync(PersistentConnectorUse use)
@@ -1945,12 +1997,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             return assignments;
         }
 
-        foreach (KeyValuePair<string, string> pair in connector.Environment)
+        foreach ((string key, string value) in ConnectorContainerSpecBuilder.FilterContainerEnvironment(connector.Environment))
         {
-            if (ConnectorContainerSpecBuilder.ForwardsEnvironmentKey(pair.Key) && !string.IsNullOrWhiteSpace(pair.Value))
-            {
-                assignments.Add(pair.Key + "=" + pair.Value);
-            }
+            assignments.Add(key + "=" + value);
         }
 
         return assignments;
@@ -2073,7 +2122,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             foreach ((string key, string value) in overrides)
             {
-                if (!ConnectorContainerSpecBuilder.AllowsRuntimeEnvironmentOverride(key))
+                if (!ConnectorContainerSpecBuilder.AllowsContainerEnvironment(key))
                 {
                     continue;
                 }
@@ -2096,9 +2145,6 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
         return null;
     }
-
-    private static Dictionary<string, string> BuildPodmanEnvironment(WorkspaceMcpContainerConnectorDefinition connector)
-        => ConnectorContainerSpecBuilder.FilterHostProcessEnvironment(connector.Environment);
 
     private static bool UsesImageDefaultCommand(WorkspaceMcpContainerConnectorDefinition connector)
     {
@@ -2208,7 +2254,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         string allocatedIp,
         bool isBraked,
         string? purpose = null,
-        NetworkAccess.ImageCompatProfile? compatProfile = null)
+        NetworkAccess.ImageCompatProfile? compatProfile = null,
+        string? environmentFile = null)
         => ConnectorContainerSpecBuilder.BuildRun(
             connector,
             containerName,
@@ -2219,7 +2266,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             isBraked,
             purpose,
             compatProfile,
-            identityContext);
+            identityContext,
+            environmentFile);
 
     private ContainerContext? WithConfiguredWorkspaceRoot(ContainerContext? context)
     {
@@ -2605,9 +2653,10 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         public ConnectorAdmissionInterruptedException(string message, Exception innerException) : base(message, innerException) { }
     }
 
-    private sealed class TransportLaunch(IClientTransport transport, EphemeralWorkload? ephemeralWorkload, NetworkAccess.IWorkloadLaunchLease? launchLease, string? imageDigest = null, string? containerId = null, PersistentConnectorUse? persistentUse = null)
+    private sealed class TransportLaunch(IClientTransport transport, EphemeralWorkload? ephemeralWorkload, NetworkAccess.IWorkloadLaunchLease? launchLease, string? imageDigest = null, string? containerId = null, PersistentConnectorUse? persistentUse = null, string? environmentFile = null)
     {
         private NetworkAccess.IWorkloadLaunchLease? launchLease = launchLease;
+        private string? environmentFile = environmentFile;
 
         public IClientTransport Transport { get; } = transport;
 
@@ -2620,6 +2669,15 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         public PersistentConnectorUse? PersistentUse { get; } = persistentUse;
 
         public CancellationToken CancellationToken => launchLease?.CancellationToken ?? System.Threading.CancellationToken.None;
+
+        public void CleanupEnvironmentFile()
+        {
+            string? path = Interlocked.Exchange(ref environmentFile, null);
+            if (path is not null && File.Exists(path))
+            {
+                PodmanContainerTool.DeleteSecretFile(path);
+            }
+        }
 
         public async ValueTask ReleaseLaunchLeaseAsync()
         {

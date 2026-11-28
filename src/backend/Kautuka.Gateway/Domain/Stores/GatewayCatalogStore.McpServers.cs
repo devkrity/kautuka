@@ -163,9 +163,18 @@ internal sealed partial class GatewayCatalogStore
             toolNames = null;
         }
         // Preserve existing env_keys if none provided in body
+        if (envKeys is { Length: > 0 })
+        {
+            ConnectorEnvironmentKeyPolicy.EnsureSupported(envKeys);
+        }
+
         string[]? envKeysFinal = envKeys is { Length: > 0 } ? envKeys : null;
         if (envKeysFinal is null && state.McpServers.TryGetValue(serverId, out GatewayMcpServer? prevForEnv))
             envKeysFinal = prevForEnv.EnvKeys is { Count: > 0 } ? [.. prevForEnv.EnvKeys] : null;
+        if (enabled && envKeysFinal is { Length: > 0 })
+        {
+            ConnectorEnvironmentKeyPolicy.EnsureSupported(envKeysFinal);
+        }
         if (bundlePath is null && state.McpServers.TryGetValue(serverId, out GatewayMcpServer? prevForBundle))
         {
             bundlePath = prevForBundle.BundlePath;

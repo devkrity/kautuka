@@ -187,6 +187,7 @@ internal sealed class McpbPackageService(KautukaDatabase database) : IMcpbPackag
             string normalizedServerType = serverType.Trim();
             ValidateServerLaunchConfiguration(normalizedServerType, command, args, envValues);
             string[] envKeys = ExtractUserConfigReferences(root, command, args, envValues);
+            ConnectorEnvironmentKeyPolicy.EnsureSupported(envKeys);
             PersistedBundleArchive persistedBundle = PersistBundleArchive(archivePath, connectorId);
 
             return new McpbConnectorInspection(
@@ -443,6 +444,7 @@ internal sealed class McpbPackageService(KautukaDatabase database) : IMcpbPackag
         var values = new List<string>();
         foreach (JsonProperty property in env.EnumerateObject())
         {
+            ConnectorEnvironmentKeyPolicy.EnsureSupported(property.Name);
             if (property.Value.ValueKind != JsonValueKind.String)
             {
                 throw new InvalidOperationException($"manifest.server.mcp_config.env.{property.Name} must be a string.");

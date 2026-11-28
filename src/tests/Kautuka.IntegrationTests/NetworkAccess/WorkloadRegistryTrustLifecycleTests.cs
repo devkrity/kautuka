@@ -997,6 +997,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
                 false,
                 null,
                 null,
+                null, // Runtime environment overrides are already merged into effectiveConnector.
                 cancellationToken,
             ])!;
             if (replaceAuthorityDuringVerification)

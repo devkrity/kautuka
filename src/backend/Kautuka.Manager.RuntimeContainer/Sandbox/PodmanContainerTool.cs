@@ -665,8 +665,8 @@ public sealed class PodmanContainerTool(
     private static void ValidateEnvironmentEntry(string key, string value)
     {
         if (string.IsNullOrWhiteSpace(key)
-            || !(char.IsLetter(key[0]) || key[0] == '_')
-            || key.Skip(1).Any(static character => !(char.IsLetterOrDigit(character) || character == '_')))
+            || !(char.IsAsciiLetter(key[0]) || key[0] == '_')
+            || key.Skip(1).Any(static character => !(char.IsAsciiLetterOrDigit(character) || character == '_')))
         {
             throw new ArgumentException("Environment variable names must be portable identifiers.", nameof(key));
         }
@@ -677,7 +677,7 @@ public sealed class PodmanContainerTool(
         }
     }
 
-    private static void DeleteSecretFile(string path)
+    internal static void DeleteSecretFile(string path)
     {
         try
         {

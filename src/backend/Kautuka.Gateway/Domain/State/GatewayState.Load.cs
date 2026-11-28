@@ -48,6 +48,9 @@ internal sealed partial class GatewayState
     [LoggerMessage(Level = LogLevel.Information, Message = "Migrated agent {AgentId} connector bindings to isolated execution at revision {Revision}: {Connectors}")]
     private static partial void LogIsolatedBindings(ILogger logger, string agentId, long revision, string connectors);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Connector {ConnectorId} declares unsupported setting {SettingName}: {Reason}")]
+    private static partial void LogUnsupportedConnectorSetting(ILogger logger, string connectorId, string settingName, string reason);
+
     private static void LoadAgents(SqliteConnection connection, GatewayState state, IAgentDefinitionStore agentDefinitionStore, ConnectorAuthCatalog? authCatalog)
     {
         foreach (DbAgent row in connection.Query<DbAgent>(
@@ -190,6 +193,17 @@ internal sealed partial class GatewayState
 
             IReadOnlyList<string>? toolNames = DeserializeStringList(row.ToolNamesJson);
             IReadOnlyList<string>? envKeys = DeserializeStringList(row.EnvKeysJson);
+            if (envKeys is { Count: > 0 })
+            {
+                foreach (string key in envKeys)
+                {
+                    if (!ConnectorEnvironmentKeyPolicy.IsSupported(key, out string reason))
+                    {
+                        LogUnsupportedConnectorSetting(state.Logger, row.Id, key, reason);
+                        state.StartupDriftNotes.Add($"Connector '{row.Name}' ({row.Id}) uses unsupported setting '{key}'. {reason}");
+                    }
+                }
+            }
             RemoteMcpConfiguration remote = JsonSerializer.Deserialize(row.RemoteConfigJson, PlatformConfigurationJsonContext.Default.RemoteMcpConfiguration) ?? new([], []);
             state.McpServers[row.Id] = new GatewayMcpServer(
                 row.Id, row.Name, row.Description, row.IconUrl,

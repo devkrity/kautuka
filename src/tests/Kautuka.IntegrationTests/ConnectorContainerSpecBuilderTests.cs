@@ -202,7 +202,9 @@ public sealed class ConnectorContainerSpecBuilderTests
         Assert.Contains("/tmp:rw,noexec,nosuid", arguments, StringComparer.Ordinal);
         Assert.DoesNotContain(arguments, static argument => argument.Contains("size=", StringComparison.Ordinal));
         Assert.DoesNotContain(arguments, static argument => argument.Contains("canary-secret", StringComparison.Ordinal));
-        Assert.Equal("canary-secret", ConnectorContainerSpecBuilder.BuildTransportEnvironment(connector)["TOKEN"]);
+        Assert.DoesNotContain(arguments, static argument => argument.Contains("TOKEN", StringComparison.Ordinal));
+        Assert.Empty(ConnectorContainerSpecBuilder.BuildTransportEnvironment(connector));
+        Assert.Equal("canary-secret", ConnectorContainerSpecBuilder.FilterContainerEnvironment(connector.Environment)["TOKEN"]);
     }
 
     [Fact]
@@ -240,6 +242,8 @@ public sealed class ConnectorContainerSpecBuilderTests
     [InlineData("LD_PRELOAD")]
     [InlineData("CONTAINERS_CONF")]
     [InlineData("PATH")]
+    [InlineData("PYTHONPATH")]
+    [InlineData("NODE_PATH")]
     [InlineData("ld_custom")]
     [InlineData("DYLD_CUSTOM")]
     [InlineData("CONTAINERS_CUSTOM")]
@@ -247,28 +251,55 @@ public sealed class ConnectorContainerSpecBuilderTests
     [InlineData("DOCKER_CUSTOM")]
     [InlineData("PODMAN_CUSTOM")]
     [InlineData("GCONV_PATH")]
-    public void LaunchFiltersProcessControlsFromArgumentsAndTransport(string key)
+    public void LaunchSeparatesHostProcessControlsFromContainerEnvironment(string key)
     {
         var connector = CreateConnector() with { Environment = [new(key, "canary"), new("TOKEN", "allowed")] };
-        Assert.DoesNotContain(key, ConnectorContainerSpecBuilder.BuildExec(connector, "sandbox", null));
-        Assert.DoesNotContain(key, ConnectorContainerSpecBuilder.BuildRun(connector, "isolated",
-            WorkspaceMcpExecutionContext.Isolated, CreateWorkspaceContext(), false, "10.247.1.1", false));
-        Assert.Equal("TOKEN", Assert.Single(ConnectorContainerSpecBuilder.BuildTransportEnvironment(connector)).Key);
+        List<string> execArgs = ConnectorContainerSpecBuilder.BuildExec(connector, "sandbox", null, "/tmp/connector.env");
+        List<string> runArgs = ConnectorContainerSpecBuilder.BuildRun(connector, "isolated",
+            WorkspaceMcpExecutionContext.Isolated, CreateWorkspaceContext(), false, "10.247.1.1", false, environmentFile: "/tmp/connector.env");
+        Assert.DoesNotContain(execArgs, arg => arg.Contains(key, StringComparison.OrdinalIgnoreCase) || arg.Contains("canary", StringComparison.Ordinal));
+        Assert.DoesNotContain(runArgs, arg => arg.Contains(key, StringComparison.OrdinalIgnoreCase) || arg.Contains("canary", StringComparison.Ordinal));
+        AssertOption(execArgs, "--env-file", "/tmp/connector.env");
+        AssertOption(runArgs, "--env-file", "/tmp/connector.env");
+        Assert.Empty(ConnectorContainerSpecBuilder.BuildTransportEnvironment(connector));
+        Assert.Equal("TOKEN", Assert.Single(ConnectorContainerSpecBuilder.FilterHostProcessEnvironment(connector.Environment)).Key);
+        Dictionary<string, string> containerEnv = ConnectorContainerSpecBuilder.FilterContainerEnvironment(connector.Environment);
+        Assert.Equal("canary", containerEnv[key]);
+        Assert.Equal("allowed", containerEnv["TOKEN"]);
     }
 
     [Fact]
-    public void RuntimeEnvironmentOverrideCannotSetHostProcessControls()
+    public void HostAndContainerEnvironmentPoliciesEnforceSeparateBoundaries()
     {
-        Assert.False(ConnectorContainerSpecBuilder.AllowsRuntimeEnvironmentOverride("PATH"));
-        Assert.False(ConnectorContainerSpecBuilder.AllowsRuntimeEnvironmentOverride("LD_PRELOAD"));
-        Assert.False(ConnectorContainerSpecBuilder.AllowsRuntimeEnvironmentOverride("HTTP_PROXY"));
-        Assert.False(ConnectorContainerSpecBuilder.AllowsRuntimeEnvironmentOverride("CONTAINERS_CONF"));
-        Assert.False(ConnectorContainerSpecBuilder.AllowsRuntimeEnvironmentOverride("CONTAINERS_HELPER_BINARY_DIR"));
-        Assert.False(ConnectorContainerSpecBuilder.AllowsRuntimeEnvironmentOverride("STORAGE_OPTS"));
-        Assert.False(ConnectorContainerSpecBuilder.AllowsRuntimeEnvironmentOverride("HOME"));
-        Assert.False(ConnectorContainerSpecBuilder.AllowsRuntimeEnvironmentOverride("CONTAINER_HOST"));
-        Assert.True(ConnectorContainerSpecBuilder.AllowsRuntimeEnvironmentOverride("TOKEN"));
-        Assert.True(ConnectorContainerSpecBuilder.ForwardsEnvironmentKey("HTTP_PROXY"));
+        Assert.False(ConnectorContainerSpecBuilder.AllowsHostProcessEnvironment("PATH"));
+        Assert.False(ConnectorContainerSpecBuilder.AllowsHostProcessEnvironment("PYTHONPATH"));
+        Assert.False(ConnectorContainerSpecBuilder.AllowsHostProcessEnvironment("NODE_PATH"));
+        Assert.False(ConnectorContainerSpecBuilder.AllowsHostProcessEnvironment("LD_PRELOAD"));
+        Assert.False(ConnectorContainerSpecBuilder.AllowsHostProcessEnvironment("HTTP_PROXY"));
+        Assert.False(ConnectorContainerSpecBuilder.AllowsHostProcessEnvironment("CONTAINERS_CONF"));
+        Assert.False(ConnectorContainerSpecBuilder.AllowsHostProcessEnvironment("CONTAINERS_HELPER_BINARY_DIR"));
+        Assert.False(ConnectorContainerSpecBuilder.AllowsHostProcessEnvironment("STORAGE_OPTS"));
+        Assert.False(ConnectorContainerSpecBuilder.AllowsHostProcessEnvironment("HOME"));
+        Assert.False(ConnectorContainerSpecBuilder.AllowsHostProcessEnvironment("CONTAINER_HOST"));
+        Assert.False(ConnectorContainerSpecBuilder.AllowsHostProcessEnvironment("DOCKER_HOST"));
+        Assert.False(ConnectorContainerSpecBuilder.AllowsHostProcessEnvironment("PODMAN_CUSTOM"));
+        Assert.True(ConnectorContainerSpecBuilder.AllowsHostProcessEnvironment("TOKEN"));
+
+        Assert.True(ConnectorContainerSpecBuilder.AllowsContainerEnvironment("PATH"));
+        Assert.True(ConnectorContainerSpecBuilder.AllowsContainerEnvironment("PYTHONPATH"));
+        Assert.True(ConnectorContainerSpecBuilder.AllowsContainerEnvironment("NODE_PATH"));
+        Assert.True(ConnectorContainerSpecBuilder.AllowsContainerEnvironment("DOCKER_HOST"));
+        Assert.True(ConnectorContainerSpecBuilder.AllowsContainerEnvironment("CONTAINER_HOST"));
+        Assert.True(ConnectorContainerSpecBuilder.AllowsContainerEnvironment("PODMAN_CUSTOM"));
+        Assert.True(ConnectorContainerSpecBuilder.AllowsContainerEnvironment("TOKEN"));
+        Assert.True(ConnectorContainerSpecBuilder.AllowsContainerEnvironment("NPM_CONFIG_REGISTRY"));
+        Assert.False(ConnectorContainerSpecBuilder.AllowsContainerEnvironment("HTTP_PROXY"));
+        Assert.False(ConnectorContainerSpecBuilder.AllowsContainerEnvironment("HTTPS_PROXY"));
+        Assert.False(ConnectorContainerSpecBuilder.AllowsContainerEnvironment("ALL_PROXY"));
+        Assert.False(ConnectorContainerSpecBuilder.AllowsContainerEnvironment("NO_PROXY"));
+        Assert.False(ConnectorContainerSpecBuilder.AllowsContainerEnvironment("HOME"));
+        Assert.False(ConnectorContainerSpecBuilder.AllowsContainerEnvironment("PIP_EXTRA_INDEX_URL"));
+        Assert.False(ConnectorContainerSpecBuilder.AllowsContainerEnvironment("INVALID-NAME"));
     }
 
     [Fact]
@@ -420,7 +451,8 @@ public sealed class ConnectorContainerSpecBuilderTests
         Assert.DoesNotContain("https://registry.npmjs.org", arguments, StringComparer.Ordinal);
         Assert.DoesNotContain("/tmp/evil.npmrc", arguments, StringComparer.Ordinal);
         Assert.DoesNotContain(arguments, static argument => argument.Contains("canary-secret", StringComparison.Ordinal));
-        Dictionary<string, string?> forwarded = ConnectorContainerSpecBuilder.BuildTransportEnvironment(connector);
+        Assert.Empty(ConnectorContainerSpecBuilder.BuildTransportEnvironment(connector));
+        Dictionary<string, string> forwarded = ConnectorContainerSpecBuilder.FilterContainerEnvironment(connector.Environment);
         Assert.Equal("http://kautuka-pkgs-proxy:20101/npm/", forwarded["NPM_CONFIG_REGISTRY"]);
         Assert.Equal("canary-secret", forwarded["TOKEN"]);
         Assert.False(forwarded.ContainsKey("npm_config_registry"));
