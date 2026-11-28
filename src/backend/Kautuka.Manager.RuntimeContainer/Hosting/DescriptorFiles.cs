@@ -7,26 +7,24 @@ namespace Kautuka.Manager.RuntimeContainer.Hosting;
 internal static class DescriptorFiles
 {
     private const int OpenReadOnly = 0;
-    private const int OpenWriteOnly = 1;
-    private const int OpenCreateExclusive = 0xc0;
-    private const int OpenNonBlock = 0x800;
-    private const int OpenDirectory = 0x10000;
-    private const int OpenNoFollow = 0x20000;
-    private const int OpenCloseOnExec = 0x80000;
-    internal const int DirectoryFlags = OpenReadOnly | OpenDirectory | OpenNoFollow | OpenCloseOnExec;
-    internal const int FileFlags = OpenReadOnly | OpenNoFollow | OpenCloseOnExec | OpenNonBlock;
+    private static readonly int OpenDirectory = OperatingSystem.IsMacOS() ? 0x100000 : RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? 0x4000 : 0x10000;
+    private static readonly int OpenNoFollow = OperatingSystem.IsMacOS() ? 0x100 : RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? 0x8000 : 0x20000;
+    private static readonly int OpenCloseOnExec = OperatingSystem.IsMacOS() ? 0x1000000 : 0x80000;
+    private static readonly int OpenNonBlock = OperatingSystem.IsMacOS() ? 4 : 0x800;
+    internal static readonly int DirectoryFlags = OpenReadOnly | OpenDirectory | OpenNoFollow | OpenCloseOnExec;
+    internal static readonly int FileFlags = OpenReadOnly | OpenNoFollow | OpenCloseOnExec | OpenNonBlock;
     private const uint RequiredStat = 0x7ff;
     private const ushort TypeMask = 0xf000;
     internal const ushort DirectoryType = 0x4000;
     internal const ushort FileType = 0x8000;
-
     internal static bool IsSupportedPlatform()
-        => OperatingSystem.IsLinux() && RuntimeInformation.ProcessArchitecture == Architecture.X64;
+        => (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+            && RuntimeInformation.ProcessArchitecture is Architecture.X64 or Architecture.Arm64;
 
     private static void EnsureSupportedPlatform()
     {
         if (!IsSupportedPlatform())
-            throw new PlatformNotSupportedException("Descriptor file operations are supported only on Linux x64.");
+            throw new PlatformNotSupportedException("Secure file operations are unavailable on this platform.");
     }
 
     internal static SafeFileHandle OpenAbsoluteDirectory(string path, bool requireRootOwnership = true)
@@ -52,7 +50,7 @@ internal static class DescriptorFiles
     internal static SafeFileHandle OpenChecked(SafeFileHandle? parent, string name, int flags, ushort expectedType, bool requireRootOwnership = true)
     {
         EnsureSupportedPlatform();
-        int parentFd = parent is null ? -100 : parent.DangerousGetHandle().ToInt32();
+        int parentFd = parent is null ? (OperatingSystem.IsMacOS() ? -2 : -100) : parent.DangerousGetHandle().ToInt32();
         int fd = OpenAt(parentFd, name, flags, 0);
         GC.KeepAlive(parent);
         if (fd < 0)
@@ -62,9 +60,9 @@ internal static class DescriptorFiles
             throw new IOException("Unable to open path.");
         }
         var handle = new SafeFileHandle((IntPtr)fd, true);
-        if (Statx(fd, "", 0x1000, RequiredStat, out StatxResult stat) == 0 &&
-            (stat.Mask & RequiredStat) == RequiredStat && (stat.Mode & TypeMask) == expectedType &&
-            (!requireRootOwnership || ((stat.Mode & 0x12) == 0 && stat.Uid == 0)))
+        if (TryReadMetadata(fd, out ushort mode, out uint owner)
+            && (mode & TypeMask) == expectedType
+            && (!requireRootOwnership || ((mode & 0x12) == 0 && owner == 0)))
             return handle;
         handle.Dispose();
         throw new IOException("Path has unsafe ownership, permissions, or file type.");
@@ -72,11 +70,10 @@ internal static class DescriptorFiles
 
     internal static void WriteViewFile(string workspace, string folder, string name, ReadOnlySpan<byte> bytes)
     {
-        EnsureSupportedPlatform();
         using SafeFileHandle root = OpenAbsoluteDirectory(workspace, requireRootOwnership: false);
         using SafeFileHandle views = OpenOrCreateDirectory(root, "view-files");
         using SafeFileHandle directory = OpenOrCreateDirectory(views, folder);
-        const int exclusiveCreate = OpenWriteOnly | OpenCreateExclusive | OpenNoFollow | OpenCloseOnExec;
+        int exclusiveCreate = 1 | (OperatingSystem.IsMacOS() ? 0xa00 : 0xc0) | OpenNoFollow | OpenCloseOnExec;
         int parent = directory.DangerousGetHandle().ToInt32();
         int fd = CreateExclusive(parent, name, exclusiveCreate); // 0640
         if (fd < 0 && Marshal.GetLastPInvokeError() == 17) // EEXIST
@@ -94,8 +91,11 @@ internal static class DescriptorFiles
         RandomAccess.Write(handle, bytes, 0);
     }
 
+    // Darwin arm64 passes the variadic creation mode on the stack after x0-x7.
     private static int CreateExclusive(int directory, string name, int flags)
-        => OpenAt(directory, name, flags, 0x1a0);
+        => OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture == Architecture.Arm64
+            ? OpenAtAppleArm64(directory, name, flags, 0, 0, 0, 0, 0, 0x1a0)
+            : OpenAt(directory, name, flags, 0x1a0);
 
     private static SafeFileHandle OpenOrCreateDirectory(SafeFileHandle parent, string name)
     {
@@ -105,9 +105,9 @@ internal static class DescriptorFiles
         try
         {
             int fd = directory.DangerousGetHandle().ToInt32();
-            if (Statx(fd, "", 0x1000, RequiredStat, out StatxResult stat) == 0
-                && stat.Uid == GetEffectiveUserId()
-                && (stat.Mode & 0xfff) != 0x1e8
+            if (TryReadMetadata(fd, out ushort mode, out uint owner)
+                && owner == GetEffectiveUserId()
+                && (mode & 0xfff) != 0x1e8
                 && ChangeFileMode(fd, 0x1e8) != 0)
             {
                 throw new IOException("Unable to set view file directory permissions.");
@@ -121,6 +121,31 @@ internal static class DescriptorFiles
         }
     }
 
+    private static bool TryReadMetadata(int fd, out ushort mode, out uint owner)
+    {
+        if (OperatingSystem.IsMacOS())
+        {
+            int result = RuntimeInformation.ProcessArchitecture == Architecture.X64
+                ? FStatMacIntel(fd, out DarwinStat stat)
+                : FStatMacArm(fd, out stat);
+            mode = stat.Mode;
+            owner = stat.Uid;
+            return result == 0;
+        }
+        int status = Statx(fd, "", 0x1000, RequiredStat, out StatxResult linuxStat);
+        mode = linuxStat.Mode;
+        owner = linuxStat.Uid;
+        return status == 0 && (linuxStat.Mask & RequiredStat) == RequiredStat;
+    }
+
+    // Darwin stat64 layout is shared by Intel and Apple silicon.
+    [StructLayout(LayoutKind.Explicit, Size = 144)]
+    private struct DarwinStat
+    {
+        [FieldOffset(4)] public ushort Mode;
+        [FieldOffset(16)] public uint Uid;
+    }
+
     [StructLayout(LayoutKind.Explicit, Size = 256)]
     private struct StatxResult
     {
@@ -130,6 +155,16 @@ internal static class DescriptorFiles
     }
 
 #pragma warning disable SYSLIB1054, CA2101 // Avoid enabling unsafe code in the Manager project for these fixed libc signatures.
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    [DllImport("libc", EntryPoint = "fstat$INODE64", SetLastError = true)]
+    private static extern int FStatMacIntel(int descriptor, out DarwinStat stat);
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    [DllImport("libc", EntryPoint = "fstat", SetLastError = true)]
+    private static extern int FStatMacArm(int descriptor, out DarwinStat stat);
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    [DllImport("libc", EntryPoint = "openat", SetLastError = true)]
+    private static extern int OpenAtAppleArm64(int directory, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, int flags,
+        nint pad3, nint pad4, nint pad5, nint pad6, nint pad7, uint mode);
     [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
     [DllImport("libc", EntryPoint = "mkdirat", SetLastError = true)]
     private static extern int MakeDirectoryAt(SafeFileHandle directory, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, uint mode);

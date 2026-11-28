@@ -52,6 +52,7 @@ public static class ViewFileMaterializer
                 {
                     block.Remove("path");
                     block["unavailable"] = true;
+                    block["unavailableReason"] = "This file could not be saved safely. Check the workspace and file limits, then try again.";
                 }
 
                 continue;
@@ -66,9 +67,12 @@ public static class ViewFileMaterializer
                 byte[] bytes = Convert.FromBase64String(base64);
                 if (bytes.Length > options.MaxFileBytes || name.Contains('\0', StringComparison.Ordinal))
                     throw new InvalidDataException("Invalid view file size or name.");
-                if (!DescriptorFiles.IsSupportedPlatform())
-                    throw new IOException("Secure view file writes are supported only on Linux x64.");
-                DescriptorFiles.WriteViewFile(hostDirectory, folder, name, bytes);
+                if (OperatingSystem.IsWindows())
+                    WindowsViewFiles.Write(hostDirectory, folder, name, bytes);
+                else if (DescriptorFiles.IsSupportedPlatform())
+                    DescriptorFiles.WriteViewFile(hostDirectory, folder, name, bytes);
+                else
+                    throw new IOException("Secure file saving is unavailable on this device.");
                 if (block is not null)
                     block["path"] = $"view-files/{folder}/{name}";
             }
@@ -78,6 +82,7 @@ public static class ViewFileMaterializer
                 {
                     block.Remove("path");
                     block["unavailable"] = true;
+                    block["unavailableReason"] = "This file could not be saved safely. Check the workspace and file limits, then try again.";
                 }
             }
         }

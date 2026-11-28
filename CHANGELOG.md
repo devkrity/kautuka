@@ -11,6 +11,8 @@ upgrade path.
 
 ### Security
 
+- Restore safe connector view-file saving when running from source on Windows, Linux x64/arm64, and macOS Intel/Apple silicon. Existing file formats and configurable limits are preserved.
+
 - Upgrades from v0.1.27 reuse matching sandbox installations. Manager now builds connector commands from its desired state and filters host process controls.
 - Container connector settings such as `PYTHONPATH`, `NODE_PATH`, `PATH`, and `DOCKER_*` now reach the connector inside its container through a temporary owner-only environment file without touching the host Podman process or command lines. Network proxy and package-registry settings managed by Kautuka are refused when saving a connector and flagged at startup if already stored.
 - Gateway moves existing agent-sandbox bindings with environment keys, credentials, or OAuth to isolated execution (preserving read-only access to the agent's files when the agent sandbox was enabled), notifies the agent's owner in plain language, and stops offering the agent sandbox option for credentialed connectors in agent settings.
