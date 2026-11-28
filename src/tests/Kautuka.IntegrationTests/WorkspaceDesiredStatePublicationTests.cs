@@ -238,7 +238,7 @@ public sealed class WorkspaceDesiredStatePublicationTests
         Assert.Equal("https://gateway.example.invalid/uv/simple", environment["UV_INDEX_URL"]);
         Assert.Equal("https://gateway.example.invalid/pip/simple", environment["PIP_INDEX_URL"]);
         Assert.False(environment.ContainsKey("PIP_TRUSTED_HOST"));
-        Assert.Equal("http://shared-proxy.example.invalid:3128", environment["HTTPS_PROXY"]);
+        Assert.False(environment.ContainsKey("HTTPS_PROXY"));
     }
 
     [Fact]
@@ -461,7 +461,7 @@ public sealed class WorkspaceDesiredStatePublicationTests
         Assert.Equal("https://gateway.example.invalid/uv/simple", environment["UV_INDEX_URL"]);
         Assert.Equal("https://gateway.example.invalid/pip/simple", environment["PIP_INDEX_URL"]);
         Assert.False(environment.ContainsKey("PIP_TRUSTED_HOST"));
-        Assert.Equal("http://shared-proxy.example.invalid:3128", environment["HTTPS_PROXY"]);
+        Assert.False(environment.ContainsKey("HTTPS_PROXY"));
         Assert.Equal("/opt/kautuka/mcpb/config", environment["SPLOSE_ROOT"]);
         Assert.Equal("/opt/kautuka/mcpb/src", environment["PYTHONPATH"]);
         Assert.Equal("/opt/kautuka/mcpb/node_modules", environment["NODE_PATH"]);
@@ -553,6 +553,8 @@ public sealed class WorkspaceDesiredStatePublicationTests
         Assert.Contains("HTTPS_PROXY", note, StringComparison.Ordinal);
         var ownerPayload = Kautuka.Gateway.Endpoints.Connectors.GatewayConnectorEndpointMappings.ToConnectorPayload(reloaded.McpServers["legacy-proxy-connector"]);
         Assert.Contains("HTTPS_PROXY", Assert.Single(ownerPayload.Notices!), StringComparison.Ordinal);
+        Assert.Contains("still works without", Assert.Single(ownerPayload.Notices!), StringComparison.Ordinal);
+        Assert.Contains("Environment credentials", Assert.Single(ownerPayload.Notices!), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -988,7 +990,7 @@ public sealed class WorkspaceDesiredStatePublicationTests
         Assert.Equal(2, upgraded.StartupDriftNotes.Count);
         Assert.Contains(upgraded.StartupDriftNotes, static note => note.Contains("isolated execution with agent files", StringComparison.Ordinal));
         Assert.Equal(
-            "Connector Secret now runs separately for safety. It can still read your agent's files but can't change them.",
+            "Connector Secret now runs separately for safety. It can still read the agent's files but can't change them.",
             Assert.Single(upgraded.AgentOwnerNotices["agent"]));
         Assert.Equal(
             "Connector Secret now runs separately for safety.",
@@ -1052,10 +1054,15 @@ public sealed class WorkspaceDesiredStatePublicationTests
         GatewayAgentListItem ownerItem = GatewayAgentSettingsMapper.ToListItem(
             secondReload.Agents["agent"],
             new System.Text.Json.Nodes.JsonObject(),
-            GatewayOwnershipAccess.CanManageAgent(nonAdminOwner, secondReload.Agents["agent"]) ? upgradedStore.GetAgentOwnerNotices("agent") : null);
+            GatewayOwnershipAccess.CanManageAgent(nonAdminOwner, secondReload.Agents["agent"]) ? upgradedStore.GetAgentOwnerNotices("agent") : null, nonAdminOwner.Id);
         Assert.NotNull(ownerItem.Notices);
+        Assert.True(ownerItem.CanAcknowledgeNotices);
+        var adminItem = GatewayAgentSettingsMapper.ToListItem(secondReload.Agents["agent"], new JsonObject(),
+            upgradedStore.GetAgentOwnerNotices("agent"), "another-administrator");
+        Assert.False(adminItem.CanAcknowledgeNotices);
+        Assert.DoesNotContain("your agent", Assert.Single(adminItem.Notices!), StringComparison.Ordinal);
         Assert.Equal(
-            ["Connector Secret now runs separately for safety. It can still read your agent's files but can't change them."],
+            ["Connector Secret now runs separately for safety. It can still read the agent's files but can't change them."],
             ownerItem.Notices);
 
         Assert.Contains("isolated execution", Assert.Throws<ArgumentException>(() => upgradedStore.SaveAgent("agent", request, "owner")).Message, StringComparison.Ordinal);
@@ -2566,6 +2573,35 @@ public sealed class WorkspaceDesiredStatePublicationTests
     }
 
     [Fact]
+    public void LegacySandboxSettingsAreFlaggedAtStartupAndInvalidEntriesDoNotReachLaunch()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        GatewayState original = CreateState(temp.SqlitePath);
+        // The v0.1.27 JSON format is retained; refuse entries without rewriting stored data.
+        original.PersistRawSettingsAuthoritatively(new Dictionary<string, string>(), new Dictionary<string, string>
+        {
+            ["infra.sandbox.container_env_json"] = """{"BAD-NAME":"old","HTTP_PROXY":"old","VALID":"bad\nline","PYTHONPATH":"/custom/python"}"""
+        });
+        GatewayState reloaded = CreateState(temp.SqlitePath);
+        Assert.Equal(3, reloaded.SandboxEnvironmentNotices.Count);
+        Assert.All(reloaded.SandboxEnvironmentNotices, notice => Assert.Contains("Settings → Advanced → Sandbox environment settings", notice, StringComparison.Ordinal));
+        Assert.Contains(reloaded.StartupDriftNotes, note => note.Contains("BAD-NAME", StringComparison.Ordinal));
+        var configuration = CreateConfiguration(temp.SqlitePath);
+        var database = new KautukaDatabase(configuration);
+        var provider = new SqlitePlatformConfigurationProvider(database, new SqliteAgentDefinitionStore(configuration, database));
+        var settings = new GatewaySettingsStore(reloaded, new KautukaLogLevelSwitch(LogLevel.Warning),
+            new RecordingDesiredStatePublisher(), new NoOpUpdateServiceGrpcService(), configuration, provider);
+        Assert.Equal(3, settings.GetPayload().Kautuka.Sandbox.Notices!.Length);
+        var method = typeof(WorkspaceRuntimeContextResolver).GetMethod("BuildResolvedContainerEnvironment", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var resolver = new WorkspaceRuntimeContextResolver(provider, configuration, database);
+        var environment = (Dictionary<string, string>)method.Invoke(resolver, [provider.GetCurrent().Kautuka.Sandbox.ContainerEnvironment, null])!;
+        Assert.DoesNotContain("BAD-NAME", environment.Keys);
+        Assert.DoesNotContain("VALID", environment.Keys);
+        Assert.NotEqual("old", environment.GetValueOrDefault("HTTP_PROXY"));
+        Assert.Equal("/custom/python", environment["PYTHONPATH"]);
+    }
+
+    [Fact]
     public void SandboxEnvironmentSettingsRoundTripAndRefuseUnsafeEntriesBeforeSaving()
     {
         using var temp = new TemporaryGatewayStateDirectory();
@@ -2589,7 +2625,8 @@ public sealed class WorkspaceDesiredStatePublicationTests
         foreach (string invalid in new[] { """{"HTTP_PROXY":"bad"}""", """{"BAD-KEY":"bad"}""", """{"VALID":"bad\nline"}""" })
         {
             using var request = JsonDocument.Parse("""{"kautuka":{"sandbox":{"containerEnvironment":""" + invalid + "}}}");
-            Assert.Throws<ArgumentException>(() => store.Save(request.RootElement));
+            var error = Assert.Throws<ArgumentException>(() => store.Save(request.RootElement));
+            Assert.Contains("Settings → Advanced → Sandbox environment settings", error.Message, StringComparison.Ordinal);
             Assert.Equal("/custom/bin", provider.GetCurrent().Kautuka.Sandbox.ContainerEnvironment["PATH"]);
         }
         // Existing v0.1.27 container_env_json storage keeps its names and values on unrelated saves.

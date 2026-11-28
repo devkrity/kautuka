@@ -87,7 +87,8 @@ internal sealed partial class GatewayCatalogStore : IGatewayCatalogStore
     public IReadOnlyList<string> StartupDriftNotes => state.StartupDriftNotes;
 
     public IReadOnlyList<string> GetAgentOwnerNotices(string agentId) =>
-        state.AgentOwnerNotices.TryGetValue(agentId, out IReadOnlyList<string>? notices) ? notices : [];
+        state.AgentOwnerNotices.TryGetValue(agentId, out IReadOnlyList<string>? notices)
+            ? [.. notices.Select(notice => notice.Replace("your agent's files", "the agent's files", StringComparison.Ordinal))] : [];
 
     public IReadOnlyList<GatewayProvider> ListProviders() =>
         [.. state.Providers.Values];

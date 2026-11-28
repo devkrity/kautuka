@@ -51,6 +51,10 @@ public sealed class WorkspaceFileContainmentTests
     public void OrdinaryReadCreateAndOverwriteStillWork()
     {
         using var fixture = new FileFixture();
+        string missing = Path.Combine(fixture.Parent, "overwrite-missing.txt");
+        using (FileStream stream = WorkspaceFile.OpenWrite(missing, FileMode.Create))
+            stream.Write("created"u8);
+        Assert.Equal("created", File.ReadAllText(missing));
         string created = Path.Combine(fixture.Parent, "new.txt");
         using (FileStream stream = WorkspaceFile.OpenWrite(created, FileMode.CreateNew))
         {

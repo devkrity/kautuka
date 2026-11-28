@@ -133,14 +133,10 @@ internal sealed class GatewaySettingsStore : IGatewaySettingsStore
                     var validated = new Dictionary<string, string>(StringComparer.Ordinal);
                     foreach (JsonProperty entry in environment.EnumerateObject())
                     {
-                        if (!ConnectorEnvironmentKeyPolicy.IsPortableIdentifier(entry.Name) || entry.Value.ValueKind != JsonValueKind.String)
-                            throw new ArgumentException("Sandbox settings need valid setting names and text values.");
-                        string value = entry.Value.GetString()!;
-                        if (value.IndexOfAny(['\0', '\r', '\n']) >= 0)
-                            throw new ArgumentException($"Sandbox setting '{entry.Name}' contains a line break or unsupported character.");
-                        if (ConnectorEnvironmentKeyPolicy.IsManagedNetworkSetting(entry.Name))
-                            throw new ArgumentException($"Sandbox setting '{entry.Name}' is managed by Kautuka. Change the network settings instead.");
-                        validated[entry.Name] = value;
+                        string? value = entry.Value.ValueKind == JsonValueKind.String ? entry.Value.GetString() : null;
+                        string? error = ConnectorEnvironmentKeyPolicy.SandboxSettingError(entry.Name, value);
+                        if (error is not null) throw new ArgumentException(error);
+                        validated[entry.Name] = value!;
                     }
                     sandboxEnvironment = validated;
                 }
@@ -246,6 +242,8 @@ internal sealed class GatewaySettingsStore : IGatewaySettingsStore
             ["infra.sandbox.container_env_json"] = JsonSerializer.Serialize(new Dictionary<string, string>(sandboxEnvironment), KautukaJsonContext.Default.DictionaryStringString),
         });
 
+        state.SandboxEnvironmentNotices.Clear();
+        state.SandboxEnvironmentNotices.AddRange(sandboxEnvironment.Select(pair => ConnectorEnvironmentKeyPolicy.SandboxSettingError(pair.Key, pair.Value)).OfType<string>());
         state.SystemSettings = newSettings;
         GenAiTelemetryEnvironment.ApplyCaptureMessageContent(captureMessageContent);
         logLevelSwitch.SetLevel(KautukaLogLevelSwitch.Parse(logLevel, LogLevel.Warning));
@@ -287,7 +285,7 @@ internal sealed class GatewaySettingsStore : IGatewaySettingsStore
                 state.SystemSettings.SandboxImage,
                 state.SystemSettings.SandboxDefaultCpus,
                 state.SystemSettings.SandboxDefaultMemory,
-                state.SystemSettings.SandboxDefaultTimeout, configurationProvider.GetCurrent().Kautuka.Sandbox.ContainerEnvironment),
+                state.SystemSettings.SandboxDefaultTimeout, configurationProvider.GetCurrent().Kautuka.Sandbox.ContainerEnvironment, [.. state.SandboxEnvironmentNotices]),
             new GatewayDocumentIngestionSettingsPayload(
                 state.SystemSettings.DocumentIngestionEnabled,
                 state.SystemSettings.DocumentIngestionInternalParserConnectorId,

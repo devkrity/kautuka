@@ -11,6 +11,9 @@ upgrade path.
 
 ### Security
 
+- Saving an agent preserves its owner. Upgrade notices explain who can dismiss them and stay visible until saving succeeds.
+- Existing sandbox settings are checked at startup; refused entries are reported in Advanced settings and skipped during launch. Uploading with overwrite enabled also creates a missing file safely on every supported platform.
+
 - Preserve sandbox environment settings through private files, remove connector settings files before tool calls, and report refused settings to their owners.
 - Keep moved-connector notices until their owner acknowledges them.
 - Include the matching existing SQLite vector extension on native Linux arm64 and macOS, and resolve macOS service temporary imports safely. No stored data format changes.

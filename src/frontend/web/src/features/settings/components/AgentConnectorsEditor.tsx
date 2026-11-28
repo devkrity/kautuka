@@ -1,5 +1,5 @@
-import { Button } from '@/components/ui/button';
 import { Alert } from '@/components/ui/alert';
+import { AgentUpgradeNotices } from './AgentUpgradeNotices';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { TabsContent } from '@/components/ui/tabs';
 import type { Connector } from '@/features/connectors';
@@ -150,16 +150,9 @@ export function AgentConnectorsEditor({
 
   return (
     <TabsContent value="connectors" className="space-y-3">
-      {(agent.notices?.length ?? 0) > 0 ? (
-        <Alert variant="info" className="space-y-1 px-3 py-2 text-xs">
-          {agent.notices?.map((notice) => (
-            <p key={notice}>{notice}</p>
-          ))}
-          <Button type="button" variant="outline" size="sm" onClick={() => onPatch((previous) => ({
-            ...previous, acknowledgedNotices: previous.notices ?? [], notices: [],
-          }))}>Got it — dismiss when saved</Button>
-        </Alert>
-      ) : null}
+      <AgentUpgradeNotices agent={agent} onAcknowledge={() => onPatch((previous) => ({
+        ...previous, acknowledgedNotices: previous.notices ?? [],
+      }))} />
       <div className="settings-subpanel-compact">
         <div className="mb-3 text-sm font-medium">Built-in Tools</div>
         <div

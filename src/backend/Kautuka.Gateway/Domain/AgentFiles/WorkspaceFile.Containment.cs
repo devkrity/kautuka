@@ -133,20 +133,11 @@ internal static partial class WorkspaceFile
             };
             uint access = (write ? genericWrite : genericRead) | 0x100000 | 0x80; // SYNCHRONIZE | READ_ATTRIBUTES
             uint share = write ? 0u : 1u;
-            uint disposition = mode == FileMode.CreateNew ? 2u : 1u; // FILE_CREATE / FILE_OPEN
+            uint disposition = mode == FileMode.CreateNew ? 2u : mode == FileMode.Create ? 3u : 1u; // FILE_CREATE / FILE_OPEN_IF / FILE_OPEN
             int status = NtCreateFile(out SafeFileHandle handle, access, ref attributes, out _, 0,
                 fileAttributeNormal, share, disposition, 0x20 | 0x40 | 0x00200000, 0, 0);
             // SYNCHRONOUS_IO_NONALERT | NON_DIRECTORY_FILE | OPEN_REPARSE_POINT
-            if (status < 0 && mode == FileMode.Create && status is unchecked((int)0xC0000034) or unchecked((int)0xC000003A))
-            {
-                handle.Dispose();
-                status = NtCreateFile(out handle, access, ref attributes, out _, 0,
-                    fileAttributeNormal, share, 2, 0x20 | 0x40 | 0x00200000, 0, 0);
-            }
-            else if (status >= 0 && mode == FileMode.Create)
-            {
-                truncate = true;
-            }
+            truncate = status >= 0 && mode == FileMode.Create;
 
             if (status < 0 || handle.IsInvalid)
             {

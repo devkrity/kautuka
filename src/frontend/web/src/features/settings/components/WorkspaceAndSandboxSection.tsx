@@ -1,3 +1,4 @@
+import { Alert } from '@/components/ui/alert';
 import { Textarea } from '@/components/ui/textarea';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -116,6 +117,7 @@ export const WorkspaceAndSandboxSection: React.FC<{
       </div>
 
       <div className="space-y-2">
+        {kautukaSettings?.sandbox.notices?.map((notice) => <Alert key={notice} variant="info">{notice}</Alert>)}
         <Label htmlFor="sandbox-environment">Sandbox environment settings</Label>
         <Textarea id="sandbox-environment" value={sandboxEnvironment ?? ''}
           onChange={(event) => onSandboxEnvironmentChange?.(event.target.value)}

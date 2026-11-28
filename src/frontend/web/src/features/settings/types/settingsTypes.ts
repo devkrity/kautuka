@@ -166,6 +166,7 @@ export interface AgentSettingsEntry {
   revision?: number;
   notices?: string[] | null;
   acknowledgedNotices?: string[];
+  canAcknowledgeNotices?: boolean;
   session: {
     historyEnabled: boolean;
     maxHistoryRuns: number;
@@ -246,6 +247,7 @@ export interface KautukaWorkspaceSettingsEntry {
 }
 
 export interface KautukaSandboxSettingsEntry {
+  notices?: string[];
   image: string;
   defaultCpus: number;
   defaultMemory: string;

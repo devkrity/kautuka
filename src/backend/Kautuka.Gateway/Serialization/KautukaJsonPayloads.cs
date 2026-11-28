@@ -619,7 +619,7 @@ internal sealed record GatewayAgentListItem(
     GatewayAgentRuntimePayload? Runtime = null,
     string[]? CallerAgentIds = null,
     long Revision = 0,
-    string[]? Notices = null);
+    string[]? Notices = null, bool CanAcknowledgeNotices = false);
 
 internal sealed record GatewayAgentsResponse(GatewayAgentListItem[] Agents);
 
@@ -700,7 +700,7 @@ internal sealed record GatewaySandboxSettingsPayload(
     string? Image,
     int DefaultCpus,
     string? DefaultMemory,
-    int DefaultTimeout, IReadOnlyDictionary<string, string>? ContainerEnvironment = null);
+    int DefaultTimeout, IReadOnlyDictionary<string, string>? ContainerEnvironment = null, string[]? Notices = null);
 
 internal sealed record GatewayDocumentIngestionSettingsPayload(
     bool Enabled,

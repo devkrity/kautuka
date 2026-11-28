@@ -22,6 +22,35 @@ internal sealed partial class GatewayState
 
     // ── load methods ─────────────────────────────────────────────────────────
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "{Notice}")]
+    private static partial void LogSandboxEnvironmentNotice(ILogger logger, string notice);
+
+    private static void CheckSandboxEnvironment(SqliteConnection connection, GatewayState state)
+    {
+        string? raw = ReadSetting(connection, "infra.sandbox.container_env_json");
+        if (string.IsNullOrEmpty(raw)) return;
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(raw);
+            if (document.RootElement.ValueKind != JsonValueKind.Object) throw new JsonException();
+            foreach (JsonProperty entry in document.RootElement.EnumerateObject())
+            {
+                string? error = ConnectorEnvironmentKeyPolicy.SandboxSettingError(entry.Name,
+                    entry.Value.ValueKind == JsonValueKind.String ? entry.Value.GetString() : null);
+                if (error is not null) state.SandboxEnvironmentNotices.Add(error + " The sandbox will start without this entry.");
+            }
+        }
+        catch (JsonException)
+        {
+            state.SandboxEnvironmentNotices.Add("Sandbox environment settings could not be read. Open Settings → Advanced → Sandbox environment settings, replace them with NAME=value entries, then save.");
+        }
+        foreach (string notice in state.SandboxEnvironmentNotices)
+        {
+            state.StartupDriftNotes.Add(notice);
+            LogSandboxEnvironmentNotice(state.Logger, notice);
+        }
+    }
+
     private static void LoadProviders(SqliteConnection connection, GatewayState state)
     {
         foreach (DbProvider row in connection.Query<DbProvider>(
@@ -105,7 +134,7 @@ internal sealed partial class GatewayState
                 string targetContext = keepsAgentFiles ? "OwnContextWithAgentFiles" : "OwnContext";
                 string displayName = string.IsNullOrWhiteSpace(server.Name) ? server.Id : server.Name;
                 string ownerNotice = keepsAgentFiles
-                    ? $"Connector {displayName} now runs separately for safety. It can still read your agent's files but can't change them."
+                    ? $"Connector {displayName} now runs separately for safety. It can still read the agent's files but can't change them."
                     : $"Connector {displayName} now runs separately for safety.";
                 migrated.Add((binding.ConnectorId, keepsAgentFiles, ownerNotice));
                 return new AgentMcpBindingDefinition { ConnectorId = binding.ConnectorId, Context = targetContext };

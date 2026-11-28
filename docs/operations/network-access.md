@@ -430,3 +430,5 @@ Connector compatibility profiles are matched against inspected immutable image i
 
 Native source runs include the matching SQLite vector extension for Linux x64 and arm64, macOS Intel and Apple silicon, and Windows x64. The bundled extension remains v0.1.9, with the same database format. CI opens agent stores on each supported platform before checking file downloads.
 macOS resolves the service-owned temporary import root to its physical location before importing built-in skills. Agent workspace paths continue to refuse links in every component.
+
+On upgrade, Advanced settings lists any sandbox environment entries that are no longer accepted. The sandbox starts without those entries; remove or correct them under Sandbox environment settings and save. Connector owners can remove a refused entry under Environment credentials in Edit connector, using its Environment key field. The connector continues without it. Only an agent’s owner can dismiss its moved-connector notice; the notice stays visible until that owner saves the acknowledgement. Editing an agent preserves its owner. These changes keep the existing stored formats.

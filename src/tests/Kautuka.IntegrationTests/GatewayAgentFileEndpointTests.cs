@@ -556,8 +556,10 @@ public sealed class GatewayAgentFileEndpointTests
         Assert.False(fixture.WorkspaceEntryExists(agentId, $"reports/{blockingFolder}/test"));
     }
 
-    [Fact]
-    public async Task UploadEndpointOverwritesExistingFileWhenRequested()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task UploadEndpointOverwritesExistingFileWhenRequested(bool existingFile)
     {
         await using var fixture = await AgentFilesApiFixture.CreateAsync();
         string accessToken = await fixture.LoginAsBootstrapAdminAsync();
@@ -565,7 +567,8 @@ public sealed class GatewayAgentFileEndpointTests
         string fileName = $"overwrite-{Guid.NewGuid():N}.txt";
 
         await fixture.CreateAgentAsync(agentId, sandboxEnabled: true);
-        fixture.WriteWorkspaceFile(agentId, $"reports/{fileName}", "old content");
+        fixture.WriteWorkspaceFile(agentId, "reports/keep.txt", "keep");
+        if (existingFile) fixture.WriteWorkspaceFile(agentId, $"reports/{fileName}", "old content");
 
         using MultipartFormDataContent upload = new();
         var fileContent = new ByteArrayContent(Encoding.UTF8.GetBytes("replacement content"));

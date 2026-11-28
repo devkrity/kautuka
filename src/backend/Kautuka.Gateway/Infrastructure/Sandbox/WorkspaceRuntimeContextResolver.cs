@@ -331,7 +331,7 @@ internal sealed class WorkspaceRuntimeContextResolver(
 
         foreach ((string key, string value) in baseEnvironment)
         {
-            if (!string.IsNullOrWhiteSpace(key) && value is not null)
+            if (Kautuka.Gateway.Domain.Connectors.ConnectorEnvironmentKeyPolicy.SandboxSettingError(key, value) is null)
             {
                 mergedEnvironment[key] = value;
             }

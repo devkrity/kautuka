@@ -88,6 +88,18 @@ internal static class ConnectorEnvironmentKeyPolicy
         }
     }
 
+    internal static string? SandboxSettingError(string key, string? value)
+    {
+        const string action = "Open Settings → Advanced → Sandbox environment settings, remove or correct this entry, then save.";
+        if (!IsPortableIdentifier(key))
+            return $"Sandbox setting name '{key}' is invalid. Use letters, numbers and underscores, starting with a letter or underscore. {action}";
+        if (value is null || value.IndexOfAny(['\0', '\r', '\n']) >= 0)
+            return $"Sandbox setting '{key}' needs a text value on one line. {action}";
+        if (IsManagedNetworkSetting(key))
+            return $"Kautuka manages sandbox setting '{key}'. {action}";
+        return null;
+    }
+
     internal static bool IsManagedNetworkSetting(string key)
         => proxySettingNames.Contains(key) || managedSettingNames.Contains(key) && !key.Equals("HOME", StringComparison.OrdinalIgnoreCase);
 

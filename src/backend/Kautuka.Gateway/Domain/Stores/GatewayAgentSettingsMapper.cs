@@ -8,7 +8,7 @@ namespace Kautuka.Gateway.Domain.Stores;
 
 internal static class GatewayAgentSettingsMapper
 {
-    public static GatewayAgentListItem ToListItem(GatewayAgent agent, JsonObject persona, IReadOnlyList<string>? notices = null)
+    public static GatewayAgentListItem ToListItem(GatewayAgent agent, JsonObject persona, IReadOnlyList<string>? notices = null, string? viewerUserId = null)
     {
         GatewayAgentSessionPayload session = NormalizeStoredSession(agent.Session);
         GatewayAgentPlanningPayload planning = NormalizeStoredPlanning(agent.Planning);
@@ -42,7 +42,8 @@ internal static class GatewayAgentSettingsMapper
             runtime,
             CallerAgentIds: null,
             Revision: agent.Revision,
-            Notices: notices is { Count: > 0 } ? [.. notices] : null);
+            Notices: notices is { Count: > 0 } ? [.. notices] : null,
+            CanAcknowledgeNotices: !string.IsNullOrEmpty(viewerUserId) && string.Equals(viewerUserId, agent.OwnerUserId, StringComparison.Ordinal));
     }
 
     public static GatewayAgentSessionPayload NormalizeStoredSession(JsonObject? existing)

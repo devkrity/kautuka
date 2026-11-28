@@ -75,20 +75,11 @@ internal static partial class WorkspaceFile
         }
 
         int flags = (write ? oWronly : oRdonly) | oNofollow | oCloexec;
-        if (mode == FileMode.CreateNew)
-        {
-            flags |= oCreat | oExcl;
-        }
+        if (mode is FileMode.CreateNew or FileMode.Create) flags |= oCreat;
+        if (mode == FileMode.CreateNew) flags |= oExcl;
 
         int descriptor = OpenUnixNoLinks(path, flags);
-        if (descriptor < 0 && mode == FileMode.Create && Marshal.GetLastPInvokeError() == 2)
-        {
-            descriptor = OpenUnixNoLinks(path, flags | oCreat | oExcl);
-        }
-        else if (descriptor >= 0 && mode == FileMode.Create)
-        {
-            truncateAfterValidation = true;
-        }
+        truncateAfterValidation = descriptor >= 0 && mode == FileMode.Create;
 
         if (descriptor < 0)
         {

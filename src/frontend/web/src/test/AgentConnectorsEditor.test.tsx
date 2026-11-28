@@ -21,6 +21,7 @@ function createAgent(overrides: Partial<AgentSettingsEntry> = {}): AgentSettings
     name: 'Family Assistant',
     modelId: 'model-1',
     ownerUserId: 'owner-1',
+    canAcknowledgeNotices: true,
     systemPrompt: '',
     superExecMode: 'disabled',
     mcpBindings: [
@@ -31,7 +32,7 @@ function createAgent(overrides: Partial<AgentSettingsEntry> = {}): AgentSettings
     persona: { temperature: 0.3, style: 'default', tone: 'friendly', verbosity: 'normal' },
     toolExposure: { exposedAsTool: false, description: '', invocationTimeoutSeconds: 60 },
     notices: [
-      "Connector Secret Bundle now runs separately for safety. It can still read your agent's files but can't change them.",
+      "Connector Secret Bundle now runs separately for safety. It can still read the agent's files but can't change them.",
     ],
     session: {
       historyEnabled: true,
@@ -118,7 +119,7 @@ describe('AgentConnectorsEditor credentialed connector execution context', () =>
 
     expect(
       screen.getByText(
-        "Connector Secret Bundle now runs separately for safety. It can still read your agent's files but can't change them."
+        "Connector Secret Bundle now runs separately for safety. It can still read the agent's files but can't change them."
       )
     ).toBeInTheDocument();
     expect(
@@ -133,6 +134,27 @@ describe('AgentConnectorsEditor credentialed connector execution context', () =>
     fireEvent.click(screen.getByRole('button', { name: 'Got it — dismiss when saved' }));
     const acknowledged = onPatch.mock.calls[0]?.[0](agent);
     expect(acknowledged?.acknowledgedNotices).toEqual(agent.notices);
-    expect(acknowledged?.notices).toEqual([]);
+    expect(acknowledged?.notices).toEqual(agent.notices);
   });
+  it('keeps the notice visible while acknowledgement is waiting to be saved and gives non-owners no dismiss button', () => {
+    const queryClient = new QueryClient();
+    const props = {
+      agents: [], connectors: [], selectionEnabled: true, selectionMessage: '',
+      isToolPanelOpen: () => false, getConnectorMode: () => 'off' as const, getToolMode: () => 'off' as const,
+      getAgentToolMode: () => 'off' as const, onPatch: vi.fn(), onModeChange: vi.fn(), onTogglePanel: vi.fn(),
+      onToolModeChange: vi.fn(), onAgentToolModeChange: vi.fn(),
+    };
+    const agent = createAgent();
+    const { rerender } = render(<QueryClientProvider client={queryClient}><Tabs value="connectors">
+      <AgentConnectorsEditor {...props} agent={{ ...agent, acknowledgedNotices: agent.notices ?? [] }} />
+    </Tabs></QueryClientProvider>);
+    expect(screen.getByText(/stays here until the save succeeds/)).toBeInTheDocument();
+    expect(screen.getByText(/Connector Secret Bundle now runs separately/)).toBeInTheDocument();
+    rerender(<QueryClientProvider client={queryClient}><Tabs value="connectors">
+      <AgentConnectorsEditor {...props} agent={{ ...agent, canAcknowledgeNotices: false }} />
+    </Tabs></QueryClientProvider>);
+    expect(screen.queryByRole('button', { name: /dismiss when saved/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/The agent's owner will see this notice/)).toBeInTheDocument();
+  });
+
 });

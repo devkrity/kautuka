@@ -86,6 +86,7 @@ internal sealed partial class GatewayState
     internal KautukaDatabase Database => database;
     internal ILogger<GatewayState> Logger => logger;
     internal List<string> StartupDriftNotes { get; } = [];
+    internal List<string> SandboxEnvironmentNotices { get; } = [];
     internal ConcurrentDictionary<string, IReadOnlyList<string>> AgentOwnerNotices { get; } = new(StringComparer.Ordinal);
     internal object SettingsWriteSyncRoot => settingsWriteLock;
 
@@ -119,6 +120,7 @@ internal sealed partial class GatewayState
 
     internal static void HydrateFromDatabase(SqliteConnection connection, GatewayState state, IWorkspaceRuntimeTool workspaceTool, IConfiguration configuration, IAgentDefinitionStore agentDefinitionStore, ConnectorAuthCatalog? authCatalog)
     {
+        CheckSandboxEnvironment(connection, state);
         LoadProviders(connection, state);
         LoadModels(connection, state);
         LoadMcpServers(connection, state);
