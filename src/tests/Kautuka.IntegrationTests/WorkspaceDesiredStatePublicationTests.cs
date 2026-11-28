@@ -552,9 +552,7 @@ public sealed class WorkspaceDesiredStatePublicationTests
         Assert.Contains("Legacy Proxy Connector", note, StringComparison.Ordinal);
         Assert.Contains("HTTPS_PROXY", note, StringComparison.Ordinal);
         var ownerPayload = Kautuka.Gateway.Endpoints.Connectors.GatewayConnectorEndpointMappings.ToConnectorPayload(reloaded.McpServers["legacy-proxy-connector"]);
-        Assert.Contains("HTTPS_PROXY", Assert.Single(ownerPayload.Notices!), StringComparison.Ordinal);
-        Assert.Contains("still works without", Assert.Single(ownerPayload.Notices!), StringComparison.Ordinal);
-        Assert.Contains("Environment credentials", Assert.Single(ownerPayload.Notices!), StringComparison.Ordinal);
+        Assert.Equal("This connector still works without 'HTTPS_PROXY'. Select the pencil Edit button on this card, remove the setting from Environment credentials, then select Save changes.", Assert.Single(ownerPayload.Notices!));
     }
 
     [Fact]

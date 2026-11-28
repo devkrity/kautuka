@@ -47,7 +47,7 @@ it('shows refused-setting guidance where the connector owner manages it', () => 
   const connector = connectorSchema.parse({
     id: 'personal', name: 'Family calendar', transport: 'container', scope: 'user',
     ownerUserId: 'owner', enabled: true,
-    notices: ["This connector still works without 'HTTPS_PROXY'. Open Edit connector, remove the matching Environment key entry under Environment credentials, and save."],
+    notices: ["This connector still works without 'HTTPS_PROXY'. Select the pencil Edit button on this card, remove the setting from Environment credentials, then select Save changes."],
   });
   render(<ConnectorCard connector={connector} canManage onToggle={vi.fn()} onEdit={vi.fn()}
     onDelete={vi.fn()} toggling={false} />);
